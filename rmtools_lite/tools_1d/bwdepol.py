@@ -42,13 +42,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy as sp
 from matplotlib.ticker import MaxNLocator
-from tools_1d.do_RMsynth_1D import saveOutput
 from utils.util_plotTk import (
     plot_complexity_fig,
     plot_dirtyFDF_ax,
     plot_Ipqu_spectra_fig,
 )
 
+from rmtools_lite.tools_1d.rmsynth import saveOutput
 from rmtools_lite.utils.misc import (
     MAD,
     create_frac_spectra,
