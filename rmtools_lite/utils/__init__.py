@@ -13,4 +13,4 @@ __all__ = [
     "util_RM",
 ]
 
-__version__ = pkg_resources.get_distribution("RM-Tools").version
+__version__ = pkg_resources.get_distribution("rmtools_lite").version
