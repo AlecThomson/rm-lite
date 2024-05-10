@@ -1,0 +1,57 @@
+[tool.poetry]
+name = "rmtools"
+version = "0.0.0"
+description = "A mini versions of RM-Tools"
+authors = ["Alec Thomson"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = "<2,>=1.22"
+scipy = "*"
+matplotlib = ">=3.4.0"
+astropy = ">=6"
+tdqm = "*"
+deprecation = "*"
+finufft = "*"
+
+bilby = {version = ">=1.1.5", optional = true}
+emcee = {version = "*", optional = true}
+nestle = {version = "*", optional = true}
+corner = {version = "*", optional = true}
+schwimmbad = {version = "*", optional = true}
+
+[tool.poetry.dev-dependencies]
+pre-commit = "*"
+ruff = "*"
+pytest = "*"
+
+[tool.poetry.extras]
+qufitting = ["bilby", "emcee", "nestle", "corner"]
+parallel = ["schwimmbad"]
+dev = ["pre-commit", "ruff", "pytest"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+rmsynth3d = "rmtools.tools_3d.do_RMsynth_3D:main"
+rmclean3d = "rmtools.tools_3d.do_RMclean_3D:main"
+rmsynth1d = "rmtools.tools_1d.do_RMsynth_1D:main"
+rmclean1d = "rmtools.tools_1d.do_RMclean_1D:main"
+rmsynth1dFITS = "rmtools.tools_1d.do_RMsynth_1D_fromFITS:main"
+qufit = "rmtools.tools_1d.do_QUfit_1D_mnest:main"
+rmtools_freqfile = "rmtools.tools_3d.make_freq_file:save_freq_file"
+rmtools_calcRMSF = "rmtools.tools_1d.calculate_RMSF:main"
+rmtools_testdata1D = "rmtools.tools_1d.mk_test_ascii_data:main"
+rmtools_createchunks = "rmtools.tools_3d.create_chunks:main"
+rmtools_assemblechunks = "rmtools.tools_3d.assemble_chunks:main"
+rmtools_fitIcube = "rmtools.tools_3d.do_fitIcube:main"
+rmtools_peakfitcube = "rmtools.tools_3d.RMpeakfit_3D:main"
+rmtools_testdata3D = "rmtools.tools_3d.mk_test_cube_data:main"
+rmtools_extractregion = "rmtools.tools_3d.extract_region:main"
+rmtools_bwdepol = "rmtools.tools_1d.rmtools_bwdepol:main"
+rmtools_bwpredict = "rmtools.tools_1d.rmtools_bwpredict:main"
+rmtools_3DIrescale = "rmtools.tools_3d.rescale_I_model_3D:command_line"
