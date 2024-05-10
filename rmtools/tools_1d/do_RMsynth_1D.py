@@ -45,27 +45,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
 from utils.util_misc import (
-    MAD,
     calculate_StokesI_model,
     create_frac_spectra,
     nanmedian,
-    poly5,
-    powerlaw_poly5,
     renormalize_StokesI_model,
     toscalar,
 )
 from utils.util_plotTk import (
-    CustomNavbar,
     plot_complexity_fig,
     plot_Ipqu_spectra_fig,
     plot_rmsf_fdf_fig,
-    plot_rmsIQU_vs_nu_ax,
 )
 from utils.util_RM import (
-    do_rmsynth,
     do_rmsynth_planes,
     get_rmsf_planes,
-    measure_fdf_complexity,
     measure_FDF_parms,
     measure_qu_complexity,
 )

@@ -69,7 +69,6 @@
 # =============================================================================#
 
 import math as m
-import re
 import sys
 import traceback
 import warnings
@@ -78,191 +77,13 @@ from typing import NamedTuple, Optional, Tuple
 import numpy as np
 import numpy.ma as ma
 import scipy.ndimage as ndi
-from deprecation import deprecated
 from scipy.stats import norm
 from utils.mpfit import mpfit
-
-from . import __version__
 
 # import ConfigParser
 
 
 C = 2.99792458e8
-
-
-# -----------------------------------------------------------------------------#
-@deprecated(
-    deprecated_in="1.3.1",
-    removed_in="1.4",
-    current_version=__version__,
-    details="This function is not used anywhere in current RM-Tools.",
-)
-def config_read(filename, delim="=", doValueSplit=True):
-    """
-    Read a configuration file and output a 'KEY=VALUE' dictionary.
-    """
-
-    configTable = {}
-    CONFIGFILE = open(filename, "r")
-
-    # Compile a few useful regular expressions
-    spaces = re.compile("\s+")
-    commaAndSpaces = re.compile(",\s+")
-    commaOrSpace = re.compile("[\s|,]")
-    brackets = re.compile("[\[|\]\(|\)|\{|\}]")
-    comment = re.compile("#.*")
-    quotes = re.compile("'[^']*'")
-    keyVal = re.compile("^.+" + delim + ".+")
-
-    # Read in the input file, line by line
-    for line in CONFIGFILE:
-        valueLst = []
-        line = line.rstrip("\n\r")
-
-        # Filter for comments and blank lines
-        if not comment.match(line) and keyVal.match(line):
-            # Weed out internal comments & split on 1st space
-            line = comment.sub("", line)
-            (keyword, value) = line.split(delim, 1)
-
-            # If the line contains a value
-            keyword = keyword.strip()  # kill external whitespace
-            keyword = spaces.sub("", keyword)  # kill internal whitespaces
-            value = value.strip()  # kill external whitespace
-            value = spaces.sub(" ", value)  # shrink internal whitespace
-            value = value.replace("'", "")  # kill quotes
-            value = commaAndSpaces.sub(",", value)  # kill ambiguous spaces
-
-            # Split comma/space delimited value strings
-            if doValueSplit:
-                valueLst = commaOrSpace.split(value)
-                if len(valueLst) <= 1:
-                    valueLst = valueLst[0]
-                configTable[keyword] = valueLst
-            else:
-                configTable[keyword] = value
-
-    return configTable
-
-
-# -----------------------------------------------------------------------------#
-def csv_read_to_list(fileName, delim=",", doFloat=False):
-    """Read rows from an ASCII file into a list of lists."""
-
-    outLst = []
-    DATFILE = open(fileName, "r")
-
-    # Compile a few useful regular expressions
-    spaces = re.compile("\s+")
-    comma_and_spaces = re.compile(",\s+")
-    comma_or_space = re.compile("[\s|,]")
-    brackets = re.compile("[\[|\]\(|\)|\{|\}]")
-    comment = re.compile("#.*")
-    quotes = re.compile("'[^']*'")
-    keyVal = re.compile("^.+=.+")
-    words = re.compile("\S+")
-
-    # Read in the input file, line by line
-    for line in DATFILE:
-        line = line.rstrip("\n\r")
-        if comment.match(line):
-            continue
-        line = comment.sub("", line)  # remove internal comments
-        line = line.strip()  # kill external whitespace
-        line = spaces.sub(" ", line)  # shrink internal whitespace
-        if line == "":
-            continue
-        line = line.split(delim)
-        if len(line) < 1:
-            continue
-        if doFloat:
-            line = [float(x) for x in line]
-
-        outLst.append(line)
-
-    return outLst
-
-
-# -----------------------------------------------------------------------------#
-@deprecated(
-    deprecated_in="1.3.1",
-    removed_in="1.4",
-    current_version=__version__,
-    details="This function is not used anywhere in RM-Tools.",
-)
-def cleanup_str_input(textBlock):
-    # Compile a few useful regular expressions
-    spaces = re.compile(r"[^\S\r\n]+")
-    newlines = re.compile(r"\n+")
-    rets = re.compile(r"\r+")
-
-    # Strip multiple spaces etc
-    textBlock = textBlock.strip()
-    textBlock = rets.sub("\n", textBlock)
-    textBlock = newlines.sub("\n", textBlock)
-    textBlock = spaces.sub(" ", textBlock)
-
-    return textBlock
-
-
-# -----------------------------------------------------------------------------#
-def split_repeat_lst(inLst, nPre, nRepeat):
-    """Split entries in a list into a preamble and repeating columns. The
-    repeating entries are pushed into a 2D array of type float64."""
-
-    preLst = inLst[:nPre]
-    repeatLst = list(zip(*[iter(inLst[nPre:])] * nRepeat))
-    parmArr = np.array(repeatLst, dtype="f8").transpose()
-
-    return preLst, parmArr
-
-
-# -----------------------------------------------------------------------------#
-@deprecated(
-    deprecated_in="1.3.1",
-    removed_in="1.4",
-    current_version=__version__,
-    details="This function is not used anywhere in RM-Tools.",
-)
-def deg2dms(deg, delim=":", doSign=False, nPlaces=2):
-    """
-    Convert a float in degrees to 'dd mm ss' format.
-    """
-
-    try:
-        angle = abs(deg)
-        sign = 1
-        if angle != 0:
-            sign = angle / deg
-
-        # Calcuate the degrees, min and sec
-        dd = int(angle)
-        rmndr = 60.0 * (angle - dd)
-        mm = int(rmndr)
-        ss = 60.0 * (rmndr - mm)
-
-        # If rounding up to 60, carry to the next term
-        if float("%05.2f" % ss) >= 60.0:
-            mm += 1.0
-            ss = ss - 60.0
-        if float("%02d" % mm) >= 60.0:
-            dd += 1.0
-            mm = mm - 60.0
-        if nPlaces > 0:
-            formatCode = "%0" + "%s.%sf" % (str(2 + nPlaces + 1), str(nPlaces))
-        else:
-            formatCode = "%02.0f"
-        if sign > 0:
-            if doSign:
-                formatCode = "+%02d%s%02d%s" + formatCode
-            else:
-                formatCode = "%02d%s%02d%s" + formatCode
-        else:
-            formatCode = "-%02d%s%02d%s" + formatCode
-        return formatCode % (dd, delim, mm, delim, ss)
-
-    except Exception:
-        return None
 
 
 # -----------------------------------------------------------------------------#
@@ -1024,23 +845,6 @@ def calc_stats(a, maskzero=False):
         statsDict["success"] = False
 
     return statsDict
-
-
-# -----------------------------------------------------------------------------#
-@deprecated(
-    deprecated_in="1.3.1",
-    removed_in="1.4",
-    current_version=__version__,
-    details="This function is not used anywhere in current RM-Tools.",
-)
-def sort_nicely(l):
-    """
-    Sort a list in the order a human would.
-    """
-
-    convert = lambda text: int(text) if text.isdigit() else text
-    alphanum_key = lambda key: [convert(c) for c in re.split("([0-9]+)", key)]
-    l.sort(key=alphanum_key)
 
 
 # -----------------------------------------------------------------------------#

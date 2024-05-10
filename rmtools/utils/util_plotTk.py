@@ -74,14 +74,12 @@
 #                                                                             #
 # =============================================================================#
 
-import io
 import math as m
 import os
 import sys
 import tkinter.ttk
 import traceback
 
-import astropy.io.fits as pf
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
@@ -111,7 +109,7 @@ try:
         print('Environment variable rmsy_mpl_backend="Agg" detected.')
         print('Using matplotlib "Agg" backend in order to save the plots.')
         mpl.use("Agg")
-except Exception as e:
+except Exception:
     pass
 
 # Constants
@@ -958,7 +956,7 @@ def plot_cleanFDF_ax(
         ax.xaxis.set_label_position("top")
 
     # Plot the dirty FDF in the background
-    if not dirtyFDFArr is None:
+    if dirtyFDFArr is not None:
         dirtyFDFpiArr = np.sqrt(
             np.power(dirtyFDFArr.real, 2.0) + np.power(dirtyFDFArr.imag, 2.0)
         )
@@ -966,7 +964,7 @@ def plot_cleanFDF_ax(
         ax.step(phiArr, dirtyFDFpiArr, where="mid", color="grey", lw=0.5, label="Dirty")
 
     # Plot the clean FDF
-    if not cleanFDFArr is None:
+    if cleanFDFArr is not None:
         ax.step(phiArr, np.abs(cleanFDFArr), where="mid", color="k", lw=1.0, label="PI")
         if showComplex:
             ax.step(
@@ -988,7 +986,7 @@ def plot_cleanFDF_ax(
             # ax.text(0.05, 0.94, title, transform=ax.transAxes)
 
     # Plot the CC spectrum
-    if not ccFDFArr is None:
+    if ccFDFArr is not None:
         ax.step(phiArr, ccFDFArr, where="mid", color="g", lw=0.5, label="CC")
 
     # Plot the Gaussian peak
@@ -1015,7 +1013,7 @@ def plot_cleanFDF_ax(
         )
 
     # Plot the clean cutoff line
-    if not cutoff is None:
+    if cutoff is not None:
         ax.axhline(cutoff, color="tab:red", ls="--")
 
     # Scaling

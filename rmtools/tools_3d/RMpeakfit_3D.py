@@ -14,7 +14,7 @@ import sys
 import astropy.io.fits as pf
 import numpy as np
 from tools_3d.do_RMsynth_3D import readFitsCube, readFreqFile
-from tqdm.auto import tqdm, trange
+from tqdm.auto import trange
 from utils.util_misc import interp_images
 from utils.util_RM import fits_make_lin_axis, measure_FDF_parms
 
