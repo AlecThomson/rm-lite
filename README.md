@@ -2,7 +2,7 @@
 
 # RM-Tools lite
 
-A mini versions of RM-Tools
+A mini fork of RM-Tools
 
 RM-synthesis, RM-clean and QU-fitting on polarised radio spectra
 
