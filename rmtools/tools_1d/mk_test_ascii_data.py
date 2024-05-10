@@ -52,8 +52,7 @@ import shutil
 import sys
 
 import numpy as np
-
-from RMutils.util_misc import (
+from utils.util_misc import (
     calc_stats,
     create_IQU_spectra_burn,
     create_IQU_spectra_diff,

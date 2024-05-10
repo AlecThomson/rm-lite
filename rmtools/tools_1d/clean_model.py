@@ -11,9 +11,8 @@ Author: cvaneck, Aug 2021
 import json
 
 import numpy as np
-
-from RMtools_1D.do_RMsynth_1D import readFile as read_freqFile
-from RMutils.util_misc import FitResult, calculate_StokesI_model
+from tools_1d.do_RMsynth_1D import readFile as read_freqFile
+from utils.util_misc import FitResult, calculate_StokesI_model
 
 
 def calculate_QU_model(freqArr, phiArr, CCArr, lambdaSq_0, Iparms=None):

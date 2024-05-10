@@ -1,17 +1,10 @@
 ![Tests](https://github.com/CIRADA-Tools/RM-tools/actions/workflows/python-package.yml/badge.svg) [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/CIRADA-Tools/RM-Tools/master.svg)](https://results.pre-commit.ci/latest/github/CIRADA-Tools/RM-Tools/master)
 
-# RM-Tools
+# RM-Tools lite
+
+A mini versions of RM-Tools
 
 RM-synthesis, RM-clean and QU-fitting on polarised radio spectra
-
- Python scripts to perform RM-synthesis, RM-clean and QU-fitting on
- polarised radio spectra.
-
-
- Initial version by Cormac R. Purcell
- Currently hosted by CIRADA and maintained by Cameron Van Eck
-
-Version 1.2 is now released! Check the wiki for new functionality.
 
 ## Installation / Usage
 Installation, usage instructions and detailed algorithm information can be found in the [wiki](https://github.com/CIRADA-Tools/RM-Tools/wiki).

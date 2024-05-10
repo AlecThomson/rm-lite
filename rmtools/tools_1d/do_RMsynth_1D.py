@@ -44,8 +44,7 @@ import traceback
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
-
-from RMutils.util_misc import (
+from utils.util_misc import (
     MAD,
     calculate_StokesI_model,
     create_frac_spectra,
@@ -55,14 +54,14 @@ from RMutils.util_misc import (
     renormalize_StokesI_model,
     toscalar,
 )
-from RMutils.util_plotTk import (
+from utils.util_plotTk import (
     CustomNavbar,
     plot_complexity_fig,
     plot_Ipqu_spectra_fig,
     plot_rmsf_fdf_fig,
     plot_rmsIQU_vs_nu_ax,
 )
-from RMutils.util_RM import (
+from utils.util_RM import (
     do_rmsynth,
     do_rmsynth_planes,
     get_rmsf_planes,

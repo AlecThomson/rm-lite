@@ -42,9 +42,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scipy as sp
 from matplotlib.ticker import MaxNLocator
-
-from RMtools_1D.do_RMsynth_1D import saveOutput
-from RMutils.util_misc import (
+from tools_1d.do_RMsynth_1D import saveOutput
+from utils.util_misc import (
     MAD,
     create_frac_spectra,
     nanmedian,
@@ -52,17 +51,12 @@ from RMutils.util_misc import (
     progress,
     toscalar,
 )
-from RMutils.util_plotTk import (
+from utils.util_plotTk import (
     plot_complexity_fig,
     plot_dirtyFDF_ax,
     plot_Ipqu_spectra_fig,
 )
-from RMutils.util_RM import (
-    calc_parabola_vertex,
-    extrap,
-    fit_rmsf,
-    measure_qu_complexity,
-)
+from utils.util_RM import calc_parabola_vertex, extrap, fit_rmsf, measure_qu_complexity
 
 if sys.version_info.major == 2:
     print("RM-tools will no longer run with Python 2! Please use Python 3.")

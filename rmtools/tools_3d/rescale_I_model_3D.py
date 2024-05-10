@@ -51,8 +51,7 @@ from functools import partial
 
 import astropy.io.fits as pf
 import numpy as np
-
-from RMutils.util_misc import FitResult, renormalize_StokesI_model
+from utils.util_misc import FitResult, renormalize_StokesI_model
 
 
 def command_line():

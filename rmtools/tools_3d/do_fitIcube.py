@@ -42,12 +42,11 @@ from functools import partial
 
 import astropy.io.fits as pf
 import numpy as np
+from tools_3d.do_RMsynth_3D import readFitsCube
+from tools_3d.make_freq_file import get_freq_array
 from tqdm.contrib.concurrent import process_map
-
-from RMtools_3D.do_RMsynth_3D import readFitsCube
-from RMtools_3D.make_freq_file import get_freq_array
-from RMutils.util_FITS import strip_fits_dims
-from RMutils.util_misc import MAD, calculate_StokesI_model, fit_StokesI_model
+from utils.util_FITS import strip_fits_dims
+from utils.util_misc import MAD, calculate_StokesI_model, fit_StokesI_model
 
 # -----------------------------------------------------------------------------#
 

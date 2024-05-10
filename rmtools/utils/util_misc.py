@@ -80,8 +80,7 @@ import numpy.ma as ma
 import scipy.ndimage as ndi
 from deprecation import deprecated
 from scipy.stats import norm
-
-from RMutils.mpfit import mpfit
+from utils.mpfit import mpfit
 
 from . import __version__
 

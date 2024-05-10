@@ -48,9 +48,8 @@ if sys.version_info.major == 2:
 import numpy as np
 from astropy import wcs
 from astropy.io import fits
-
-from RMtools_1D.do_RMsynth_1D import run_rmsynth, saveOutput
-from RMtools_3D.make_freq_file import get_freq_array
+from tools_1d.do_RMsynth_1D import run_rmsynth, saveOutput
+from tools_3d.make_freq_file import get_freq_array
 
 C = 2.997924538e8  # Speed of light [m/s]
 

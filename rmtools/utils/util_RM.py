@@ -70,9 +70,8 @@ import numpy as np
 from deprecation import deprecated
 from scipy.stats import anderson, kstest, kurtosis, kurtosistest, norm, skew, skewtest
 from tqdm.auto import tqdm, trange
-
-from RMutils.mpfit import mpfit
-from RMutils.util_misc import (
+from utils.mpfit import mpfit
+from utils.util_misc import (
     MAD,
     calc_mom2_FDF,
     calc_parabola_vertex,

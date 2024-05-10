@@ -83,9 +83,8 @@ import sys
 import astropy.wcs.wcs as pw
 import numpy as np
 from tqdm.auto import tqdm, trange
-
-from RMutils.util_FITS import create_simple_fits_hdu, strip_fits_dims
-from RMutils.util_misc import (
+from utils.util_FITS import create_simple_fits_hdu, strip_fits_dims
+from utils.util_misc import (
     calc_stats,
     create_IQU_spectra_burn,
     create_IQU_spectra_diff,
