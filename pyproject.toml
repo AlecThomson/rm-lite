@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "rmtools"
+name = "rmtools-lite"
 version = "0.0.0"
 description = "A mini versions of RM-Tools"
 authors = ["Alec Thomson"]
