@@ -748,14 +748,6 @@ def nanmean(arr, **kwargs):
 
 
 # -----------------------------------------------------------------------------#
-def nanstd(arr, **kwargs):
-    """
-    Returns standard deviation ignoring NaNs.
-    """
-
-    return ma.std(ma.masked_where(arr != arr, arr), **kwargs)
-
-
 # -----------------------------------------------------------------------------#
 def extrap(x, xp, yp):
     """
@@ -1040,38 +1032,7 @@ def create_pqu_spectra_RMthin(freqArr_Hz, fracPol, psi0_deg, RM_radm2):
 
 
 # -----------------------------------------------------------------------------#
-def create_IQU_spectra_RMthin(
-    freqArr_Hz, fluxI, SI, fracPol, psi0_deg, RM_radm2, freq0_Hz=None
-):
-    """Return Stokes I, Q & U spectra for a Faraday thin source"""
-
-    pArr, qArr, uArr = create_pqu_spectra_RMthin(
-        freqArr_Hz, fracPol, psi0_deg, RM_radm2
-    )
-    if freq0_Hz is None:
-        freq0_Hz = freqArr_Hz[0]
-    IArr = fluxI * np.power(freqArr_Hz / freq0_Hz, SI)
-    PArr = IArr * pArr
-    QArr = IArr * qArr
-    UArr = IArr * uArr
-
-    return IArr, QArr, UArr
-
-
 # -----------------------------------------------------------------------------#
-def create_pqu_resid_RMthin(qArr, uArr, freqArr_Hz, fracPol, psi0_deg, RM_radm2):
-    """Subtract a RM-thin component from the fractional q and u data."""
-
-    pModArr, qModArr, uModArr = create_pqu_spectra_RMthin(
-        freqArr_Hz, fracPol, psi0_deg, RM_radm2
-    )
-    qResidArr = qArr - qModArr
-    uResidArr = uArr - uModArr
-    pResidArr = np.sqrt(qResidArr**2.0 + uResidArr**2.0)
-
-    return pResidArr, qResidArr, uResidArr
-
-
 # -----------------------------------------------------------------------------#
 def xfloat(x, default=None):
     if x is None or x == "":

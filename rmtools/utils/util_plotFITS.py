@@ -193,15 +193,11 @@ def plot_fits_map(
     if w["coord_type"] == "EQU":
         f = 15.0
         majorFormatterX = FuncFormatter(label_format_hms)
-        minorFormatterX = None
         majorFormatterY = FuncFormatter(label_format_dms)
-        minorFormattery = None
     else:
         f = 1.0
         majorFormatterX = FuncFormatter(label_format_deg)
-        minorFormatterX = None
         majorFormatterY = FuncFormatter(label_format_deg)
-        minorFormattery = None
     ax.xaxis.set_major_formatter(majorFormatterX)
     ax.yaxis.set_major_formatter(majorFormatterY)
 
@@ -261,7 +257,7 @@ def plot_fits_map(
             elif type(annEllipseLst[5]) is list:
                 srcEColLst = annEllipseLst[5]
             else:
-                rcEColLst = ["g"] * len(srcXLst)
+                pass
         else:
             srcEColLst = ["g"] * len(srcXLst)
         for i in range(len(srcXLst)):

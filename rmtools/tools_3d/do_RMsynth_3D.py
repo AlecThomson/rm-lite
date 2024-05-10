@@ -928,7 +928,7 @@ def main():
         if not os.path.exists(f):
             print("File does not exist: '%s'." % f)
             sys.exit()
-    dataDir, dummy = os.path.split(args.fitsQ[0])
+    (dataDir,) = os.path.split(args.fitsQ[0])
     verbose = args.verbose
     if args.fitsI is not None:
         dataI = readFitsCube(args.fitsI, verbose)[1]

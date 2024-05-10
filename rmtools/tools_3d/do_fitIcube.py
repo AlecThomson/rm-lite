@@ -155,7 +155,7 @@ def main():
             sys.exit()
     out_directory = args.outDir
     if not out_directory:
-        out_directory, dummy = os.path.split(args.fitsI[0])
+        (out_directory,) = os.path.split(args.fitsI[0])
 
     I_filename = args.fitsI[0]
     datacube, headI = open_datacube(fitsI=I_filename, verbose=args.verbose)

@@ -63,7 +63,6 @@ class APLpyNormalize(Normalize):
 
     def __call__(self, value, clip=None):
         # read in parameters
-        method = self.stretch
         exponent = self.exponent
         midpoint = self.midpoint
 
@@ -119,40 +118,3 @@ class APLpyNormalize(Normalize):
             result = result[0]
 
         return result
-
-    def inverse(self, value):
-        # ORIGINAL MATPLOTLIB CODE
-
-        if not self.scaled():
-            raise ValueError("Not invertible until scaled")
-
-        vmin, vmax = self.vmin, self.vmax
-
-        # CUSTOM APLPY CODE
-
-        if cbook.iterable(value):
-            val = ma.asarray(value)
-        else:
-            val = value
-
-        if self.stretch == "linear":
-            pass
-
-        elif self.stretch == "log":
-            val = self.midpoint * (
-                ma.power(10.0, (val * ma.log10(1.0 / self.midpoint + 1.0))) - 1.0
-            )
-
-        elif self.stretch == "sqrt":
-            val = val * val
-
-        elif self.stretch == "arcsinh":
-            val = self.midpoint * ma.sinh(val * ma.arcsinh(1.0 / self.midpoint))
-
-        elif self.stretch == "power":
-            val = ma.power(val, (1.0 / self.exponent))
-
-        else:
-            raise Exception("Unknown stretch in APLpyNormalize: %s" % self.stretch)
-
-        return vmin + val * (vmax - vmin)

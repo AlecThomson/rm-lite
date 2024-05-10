@@ -585,7 +585,7 @@ def main():
     args = parser.parse_args()
 
     # Form the input file names from prefix of the original data file
-    fileRoot, dummy = os.path.splitext(args.dataFile[0])
+    (fileRoot,) = os.path.splitext(args.dataFile[0])
     fdfFile = fileRoot + "_FDFdirty.dat"
     rmsfFile = fileRoot + "_RMSF.dat"
     weightFile = fileRoot + "_weight.dat"
@@ -596,7 +596,7 @@ def main():
             print("File does not exist: '{:}'.".format(f), end=" ")
             sys.exit()
     nBits = 32
-    dataDir, dummy = os.path.split(args.dataFile[0])
+    (dataDir,) = os.path.split(args.dataFile[0])
     mDict, aDict = readFiles(fdfFile, rmsfFile, weightFile, rmSynthFile, nBits)
     # Run RM-CLEAN on the spectrum
     mDict_cl, aDict_cl = run_rmclean(

@@ -144,13 +144,6 @@ def estimate_channel_bandwidth(freq_array):
     return ban
 
 
-def l2_to_freq_array(lambda_square_array):
-    """returns the freqency array, corresponding to a lambda square array"""
-
-    f = C**2 / lambda_square_array
-    return np.sqrt(f)
-
-
 def adjoint_theory(adjoint_vars, dQUArr, show_progress=False, log=print):
     """Calculates the theoretical sensitivity and noise for the adjoint method
 
@@ -1035,7 +1028,7 @@ def run_adjoint_rmsynth(
                 "> Six columns found, trying [freq_Hz, widths_Hz, Q, U, dQ, dU]",
                 end=" ",
             )
-        (freqArr_Hz, width_Hz, QArr, UArr, dQArr, dUArr) = data
+        (freqArr_Hz, widths_Hz, QArr, UArr, dQArr, dUArr) = data
     elif data.shape[0] == 5:
         if verbose:
             log("> Five columns found, trying [freq_Hz, Q, U, dQ, dU]", end=" ")
@@ -1486,8 +1479,8 @@ def main():
     if not os.path.exists(args.dataFile[0]):
         print("File does not exist: '%s'." % args.dataFile[0])
         sys.exit()
-    prefixOut, ext = os.path.splitext(args.dataFile[0])
-    dataDir, dummy = os.path.split(args.dataFile[0])
+    (prefixOut,) = os.path.splitext(args.dataFile[0])
+    (dataDir,) = os.path.split(args.dataFile[0])
     # Set the floating point precision
     nBits = 64
 

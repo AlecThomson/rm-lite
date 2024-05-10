@@ -40,13 +40,6 @@ def save_freq_file():
     print("Saving the frequencies list to {}".format(args.freq_file))
 
 
-def get_fits_header(filename):
-    hduList = fits.open(filename)
-    header = hduList[0].header
-    hduList.close()
-    return header
-
-
 def get_freq_array(filename):
     header = fits.getheader(filename)
     wcs = WCS(header)

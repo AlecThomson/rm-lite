@@ -175,8 +175,8 @@ def main():
     if not os.path.exists(args.dataFile[0]):
         print("File does not exist: '%s'." % args.dataFile[0])
         sys.exit()
+    (prefixOut,) = os.path.splitext(args.dataFile[0])
 
-    prefixOut, ext = os.path.splitext(args.dataFile[0])
     data = readFile(args.dataFile[0], 32, verbose=args.verbose, debug=args.debug)
 
     # Run the QU-fitting procedure
@@ -614,24 +614,6 @@ class lnlike_call(bilby.Likelihood):
         pDict = {k: None for k in parNames}
         super().__init__(parameters=pDict)
 
-    def log_likelihood(self):
-        # Evaluate the model and calculate the joint ln(like)
-        # Silva 2006
-        model = load_model(self.modelNum).model
-        quMod = model(self.parameters, self.lamSqArr_m2)
-        dquArr = np.sqrt(np.power(self.dqArr, 2) + np.power(self.duArr, 2))
-        chiSqQ = np.nansum(np.power((self.qArr - quMod.real) / self.dqArr, 2))
-        chiSqU = np.nansum(np.power((self.uArr - quMod.imag) / self.dqArr, 2))
-        nData = len(dquArr)
-        logLike = (
-            -nData * np.log(2.0 * np.pi)
-            - 2.0 * np.nansum(np.log(dquArr))
-            - chiSqQ / 2.0
-            - chiSqU / 2.0
-        )
-
-        return logLike
-
 
 # -----------------------------------------------------------------------------#
 def chisq_model(parNames, p, lamSqArr_m2, qArr, dqArr, uArr, duArr, model):
@@ -649,71 +631,8 @@ def chisq_model(parNames, p, lamSqArr_m2, qArr, dqArr, uArr, duArr, model):
 
 
 # -----------------------------------------------------------------------------#
-def wrap_chains(chains, wraps, bounds, p, verbose=False):
-    # Get the indices of the periodic parameters
-    iWrap = [i for i, e in enumerate(wraps) if e != 0]
-
-    # Loop through the chains for periodic parameters
-    for i in iWrap:
-        wrapLow = bounds[i][0]
-        wrapHigh = bounds[i][1]
-        rng = wrapHigh - wrapLow
-
-        # Shift the wrapping to centre on the best fit value
-        wrapCent = wrapLow + (wrapHigh - wrapLow) / 2.0
-        wrapLow += p[i] - wrapCent
-        wrapHigh += p[i] - wrapCent
-        chains[:, i] = ((chains[:, i] - wrapLow) % rng) + wrapLow
-        if verbose:
-            print(
-                "Wrapped parameter '%d' in range [%s, %s] ..." % (i, wrapLow, wrapHigh)
-            )
-
-    return chains
-
-
 # -----------------------------------------------------------------------------#
-def init_mnest():
-    """Initialise MultiNest arguments"""
-
-    argsDict = {
-        "LogLikelihood": "",
-        "Prior": "",
-        "n_dims": 0,
-        "n_params": 0,
-        "n_clustering_params": 0,
-        "wrapped_params": None,
-        "importance_nested_sampling": False,
-        "multimodal": False,
-        "const_efficiency_mode": False,
-        "n_live_points": 100,
-        "evidence_tolerance": 0.5,
-        "sampling_efficiency": "model",
-        "n_iter_before_update": 500,
-        "null_log_evidence": -1.0e90,
-        "max_modes": 100,
-        "mode_tolerance": -1.0e90,
-        "outputfiles_basename": "",
-        "seed": -1,
-        "verbose": True,
-        "resume": True,
-        "context": 0,
-        "write_output": True,
-        "log_zero": -1.0e100,
-        "max_iter": 0,
-        "init_MPI": False,
-        "dump_callback": None,
-    }
-    return argsDict
-
-
 # -----------------------------------------------------------------------------#
-def merge_two_dicts(x, y):
-    z = x.copy()
-    z.update(y)
-    return z
-
-
 # -----------------------------------------------------------------------------#
 if __name__ == "__main__":
     main()

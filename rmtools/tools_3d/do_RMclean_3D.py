@@ -337,39 +337,6 @@ def writefits(
 
 
 # Old method (for multi-extension files)
-def read_FDF_cube(filename):
-    """Read in a FDF/RMSF cube. Figures out which axis is Faraday depth and
-    puts it first (in numpy order) to accommodate the rest of the code.
-    Returns: (complex_cube, header,FD_axis)
-    """
-    HDULst = pf.open(filename, "readonly", memmap=True)
-    head = HDULst[0].header.copy()
-    FDFreal = HDULst[0].data
-    FDFimag = HDULst[1].data
-    complex_cube = FDFreal + 1j * FDFimag
-
-    # Identify Faraday depth axis (assumed to be last one if not explicitly found)
-    Ndim = head["NAXIS"]
-    FD_axis = Ndim
-    # Check for FD axes:
-    for i in range(1, Ndim + 1):
-        try:
-            if "FDEP" in head["CTYPE" + str(i)].upper():
-                FD_axis = i
-        except:
-            pass  # The try statement is needed for if the FITS header does not
-            # have CTYPE keywords.
-
-    # Move FD axis to first place in numpy order.
-    if FD_axis != Ndim:
-        complex_cube = np.moveaxis(complex_cube, Ndim - FD_axis, 0)
-
-    # Remove degenerate axes to prevent problems with later steps.
-    complex_cube = complex_cube.squeeze()
-
-    return complex_cube, head, FD_axis
-
-
 def find_axes(header):
     """Idenfities how many axes are present in a FITS file, and which is the
     Faraday depth axis. Necessary for bookkeeping on cube dimensionality,
@@ -550,7 +517,7 @@ def main():
         if not os.path.exists(f):
             print("File does not exist: '%s'." % f)
             sys.exit()
-    dataDir, dummy = os.path.split(args.fitsFDF[0])
+    (dataDir,) = os.path.split(args.fitsFDF[0])
 
     # Run RM-CLEAN on the cubes
     cleanFDF, ccArr, iterCountArr, residFDF, headtemp = run_rmclean(
