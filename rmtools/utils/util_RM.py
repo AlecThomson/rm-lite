@@ -66,7 +66,6 @@ from typing import NamedTuple
 
 import finufft
 import numpy as np
-from scipy.stats import anderson, kstest, kurtosis, kurtosistest, norm, skew, skewtest
 from tqdm.auto import tqdm, trange
 from utils.mpfit import mpfit
 from utils.util_misc import (

@@ -2412,5 +2412,4 @@ class machar:
             info = numpy.finfo(numpy.float64)
 
         self.machep = info.eps
-        self.maxnum = info.max
         self.minnum = info.tiny

@@ -261,7 +261,6 @@ def run_rmsynth(
 
     # Calculate some wavelength parameters
     lambdaSqArr_m2 = np.power(C / freqArr_Hz, 2.0)
-    dFreq_Hz = np.nanmin(np.abs(np.diff(freqArr_Hz)))
     lambdaSqRange_m2 = np.nanmax(lambdaSqArr_m2) - np.nanmin(lambdaSqArr_m2)
     dLambdaSqMin_m2 = np.nanmin(np.abs(np.diff(lambdaSqArr_m2)))
     dLambdaSqMax_m2 = np.nanmax(np.abs(np.diff(lambdaSqArr_m2)))

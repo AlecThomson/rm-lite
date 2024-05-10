@@ -801,76 +801,7 @@ def MAD(a, c=0.6745, axis=None):
 
 
 # -----------------------------------------------------------------------------#
-def calc_stats(a, maskzero=False):
-    """
-    Calculate the statistics of an array.
-    """
-
-    statsDict = {}
-    a = np.array(a)
-
-    # Mask off bad values and count valid pixels
-    if maskzero:
-        a = np.where(np.equal(a, 0.0), np.nan, a)
-    am = ma.masked_invalid(a)
-    statsDict["npix"] = np.sum(~am.mask)
-
-    if statsDict["npix"] >= 2:
-        statsDict["stdev"] = float(np.std(am))
-        statsDict["mean"] = float(np.mean(am))
-        statsDict["median"] = float(nanmedian(am))
-        statsDict["max"] = float(np.max(am))
-        statsDict["min"] = float(np.min(am))
-        statsDict["centmax"] = list(np.unravel_index(np.argmax(am), a.shape))
-        statsDict["madfm"] = float(MAD(am.flatten()))
-        statsDict["success"] = True
-
-    else:
-        statsDict["npix"] == 0
-        statsDict["stdev"] = 0.0
-        statsDict["mean"] = 0.0
-        statsDict["median"] = 0.0
-        statsDict["max"] = 0.0
-        statsDict["min"] = 0.0
-        statsDict["centmax"] = (0.0, 0.0)
-        statsDict["madfm"] = 0.0
-        statsDict["success"] = False
-
-    return statsDict
-
-
 # -----------------------------------------------------------------------------#
-def twodgaussian(params, shape):
-    """
-    Build a 2D Gaussian ellipse as parameterised by 'params' for a region with
-    'shape'
-        params - [amp, xo, yo, cx, cy, pa] where:
-                amp - amplitude
-                xo  - centre of Gaussian in X
-                yo  - centre of Gaussian in Y
-                cx  - width of Gaussian in X (sigma or c, not FWHM)
-                cy  - width of Gaussian in Y (sigma or c, not FWHM)
-                pa  - position angle of Gaussian, aka theta (radians)
-        shape - (y, x) dimensions of region
-    Returns a 2D numpy array with shape="shape"
-    """
-
-    assert len(shape) == 2
-    amp, xo, yo, cx, cy, pa = params
-    y, x = np.indices(shape)
-    st = m.sin(pa) ** 2
-    ct = m.cos(pa) ** 2
-    s2t = m.sin(2 * pa)
-    a = (ct / cx**2 + st / cy**2) / 2
-    b = s2t / 4 * (1 / cy**2 - 1 / cx**2)
-    c = (st / cx**2 + ct / cy**2) / 2
-    v = amp * np.exp(
-        -1 * (a * (x - xo) ** 2 + 2 * b * (x - xo) * (y - yo) + c * (y - yo) ** 2)
-    )
-
-    return v
-
-
 # -----------------------------------------------------------------------------#
 def create_pqu_spectra_burn(
     freqArr_Hz, fracPolArr, psi0Arr_deg, RMArr_radm2, sigmaRMArr_radm2=None
@@ -921,128 +852,12 @@ def create_pqu_spectra_burn(
 
 
 # -----------------------------------------------------------------------------#
-def create_IQU_spectra_burn(
-    freqArr_Hz,
-    fluxI,
-    SI,
-    fracPolArr,
-    psi0Arr_deg,
-    RMArr_radm2,
-    sigmaRMArr_radm2=None,
-    freq0_Hz=None,
-):
-    """Create Stokes I, Q & U spectra for a source with 1 or more polarised
-    Faraday components affected by external (burn) depolarisation."""
-
-    # Create the polarised fraction spectra
-    pArr, qArr, uArr = create_pqu_spectra_burn(
-        freqArr_Hz, fracPolArr, psi0Arr_deg, RMArr_radm2, sigmaRMArr_radm2
-    )
-
-    # Default reference frequency is first channel
-    if freq0_Hz is None:
-        freq0_Hz = freqArr_Hz[0]
-
-    # Create the absolute value spectra
-    IArr = fluxI * np.power(freqArr_Hz / freq0_Hz, SI)
-    PArr = IArr * pArr
-    QArr = IArr * qArr
-    UArr = IArr * uArr
-
-    return IArr, QArr, UArr
-
-
-# -----------------------------------------------------------------------------#
-def create_pqu_spectra_diff(freqArr_Hz, fracPolArr, psi0Arr_deg, RMArr_radm2):
-    """Return fractional P/I, Q/I & U/I spectra for a sum of Faraday
-    components which are affected by internal (differential) Faraday
-    depolariation."""
-
-    # Convert lists to arrays
-    freqArr_Hz = np.array(freqArr_Hz, dtype="f8")
-    fracPolArr = np.array(fracPolArr, dtype="f8")
-    psi0Arr_rad = np.radians(psi0Arr_deg, dtype="f8")
-    RMArr_radm2 = np.array(RMArr_radm2, dtype="f8")
-
-    # Calculate some prerequsites
-    nChans = len(freqArr_Hz)
-    nComps = len(fracPolArr)
-    lamArr_m = C / freqArr_Hz
-    lamSqArr_m2 = np.power(lamArr_m, 2.0)
-
-    # Convert the inputs to column vectors
-    fracPolArr = fracPolArr.reshape((nComps, 1))
-    psi0Arr_deg = psi0Arr_deg.reshape((nComps, 1))
-    RMArr_radm2 = RMArr_radm2.reshape((nComps, 1))
-
-    # Calculate the p, q and u Spectra for all components
-    RMLamSqArr = RMArr_radm2 * lamSqArr_m2
-    pArr = fracPolArr * np.sinc(RMLamSqArr / np.pi)
-    pArr = pArr.astype("complex")
-    for i in range(nComps):
-        RMLamSqArr[i] *= 0.5
-        pArr[i] *= np.exp(2j * (psi0Arr_rad[i] + RMLamSqArr[i:].sum(0)))
-
-    # Sum along the component axis to create the final spectra
-    pArr = pArr.sum(0)
-    qArr = pArr.real
-    uArr = pArr.imag
-    pArr = np.abs(pArr)
-
-    return pArr, qArr, uArr
-
-
-# -----------------------------------------------------------------------------#
-def create_IQU_spectra_diff(
-    freqArr_Hz, fluxI, SI, fracPolArr, psi0Arr_deg, RMArr_radm2, freq0_Hz=None
-):
-    """Create Stokes I, Q & U spectra for a source with 1 or more polarised
-    Faraday components affected by internal Faraday depolarisation"""
-
-    # Create the polarised fraction spectra
-    pArr, qArr, uArr = create_pqu_spectra_diff(
-        freqArr_Hz, fracPolArr, psi0Arr_deg, RMArr_radm2
-    )
-
-    # Default reference frequency is first channel
-    if freq0_Hz is None:
-        freq0_Hz = freqArr_Hz[0]
-
-    # Create the absolute value spectra
-    IArr = fluxI * np.power(freqArr_Hz / freq0_Hz, SI)
-    PArr = IArr * pArr
-    QArr = IArr * qArr
-    UArr = IArr * uArr
-
-    return IArr, QArr, UArr
-
-
-# -----------------------------------------------------------------------------#
-def create_pqu_spectra_RMthin(freqArr_Hz, fracPol, psi0_deg, RM_radm2):
-    """Return fractional P/I, Q/I & U/I spectra for a Faraday thin source"""
-
-    # Calculate the p, q and u Spectra
-    lamSqArr_m2 = np.power(C / freqArr_Hz, 2.0)
-    pArr = fracPol * np.ones_like(lamSqArr_m2)
-    quArr = pArr * np.exp(2j * (np.radians(psi0_deg) + RM_radm2 * lamSqArr_m2))
-    qArr = quArr.real
-    uArr = quArr.imag
-
-    return pArr, qArr, uArr
-
-
 # -----------------------------------------------------------------------------#
 # -----------------------------------------------------------------------------#
 # -----------------------------------------------------------------------------#
-def xfloat(x, default=None):
-    if x is None or x == "":
-        return default
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
+# -----------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------#
 # -----------------------------------------------------------------------------#
 def norm_cdf(mean=0.0, std=1.0, N=50, xArr=None):
     """Return the CDF of a normal distribution between -6 and 6 sigma, or at
