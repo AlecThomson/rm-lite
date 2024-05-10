@@ -23,7 +23,8 @@ import argparse
 
 import numpy as np
 from matplotlib import pyplot as plt
-from utils.util_RM import get_rmsf_planes
+
+from rmtools_lite.utils.rmsynth import get_rmsf_planes
 
 C = 2.997924538e8  # Speed of light [m/s]
 

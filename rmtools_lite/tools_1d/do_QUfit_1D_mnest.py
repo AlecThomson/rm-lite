@@ -58,8 +58,13 @@ import bilby
 import matplotlib.pyplot as plt
 import numpy as np
 from tools_1d.do_RMsynth_1D import readFile
-from utils.util_misc import calculate_StokesI_model, create_frac_spectra, toscalar
 from utils.util_plotTk import CustomNavbar, plot_Ipqu_spectra_fig
+
+from rmtools_lite.utils.misc import (
+    calculate_StokesI_model,
+    create_frac_spectra,
+    toscalar,
+)
 
 C = 2.997924538e8  # Speed of light [m/s]
 

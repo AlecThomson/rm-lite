@@ -44,19 +44,20 @@ import traceback
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
-from utils.util_misc import (
+from utils.util_plotTk import (
+    plot_complexity_fig,
+    plot_Ipqu_spectra_fig,
+    plot_rmsf_fdf_fig,
+)
+
+from rmtools_lite.utils.misc import (
     calculate_StokesI_model,
     create_frac_spectra,
     nanmedian,
     renormalize_StokesI_model,
     toscalar,
 )
-from utils.util_plotTk import (
-    plot_complexity_fig,
-    plot_Ipqu_spectra_fig,
-    plot_rmsf_fdf_fig,
-)
-from utils.util_RM import (
+from rmtools_lite.utils.rmsynth import (
     do_rmsynth_planes,
     get_rmsf_planes,
     measure_FDF_parms,

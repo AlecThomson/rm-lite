@@ -49,7 +49,8 @@ except:
     parallel_available = False
 
 from tools_3d.do_RMsynth_3D import _setStokes
-from utils.util_RM import do_rmclean_hogbom, fits_make_lin_axis
+
+from rmtools_lite.utils.rmsynth import do_rmclean_hogbom, fits_make_lin_axis
 
 C = 2.997924538e8  # Speed of light [m/s]
 

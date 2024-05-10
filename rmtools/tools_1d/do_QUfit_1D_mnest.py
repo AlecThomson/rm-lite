@@ -59,7 +59,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from rmtools_lite.tools_1d.do_RMsynth_1D import readFile
-from rmtools_lite.utils.util_misc import (
+from rmtools_lite.utils.misc import (
     calculate_StokesI_model,
     create_frac_spectra,
     toscalar,

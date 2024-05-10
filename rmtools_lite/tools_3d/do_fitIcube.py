@@ -46,7 +46,8 @@ from tools_3d.do_RMsynth_3D import readFitsCube
 from tools_3d.make_freq_file import get_freq_array
 from tqdm.contrib.concurrent import process_map
 from utils.util_FITS import strip_fits_dims
-from utils.util_misc import MAD, calculate_StokesI_model, fit_StokesI_model
+
+from rmtools_lite.utils.misc import MAD, calculate_StokesI_model, fit_StokesI_model
 
 # -----------------------------------------------------------------------------#
 

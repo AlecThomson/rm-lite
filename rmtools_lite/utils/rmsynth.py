@@ -68,7 +68,8 @@ import finufft
 import numpy as np
 from tqdm.auto import tqdm, trange
 from utils.mpfit import mpfit
-from utils.util_misc import (
+
+from rmtools_lite.utils.misc import (
     MAD,
     calc_mom2_FDF,
     calc_parabola_vertex,
