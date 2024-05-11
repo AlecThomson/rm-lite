@@ -348,7 +348,7 @@ class FractionalSpectra(NamedTuple):
     stokes_u_frac_error_array: np.ndarray
 
 
-def create_frac_spectra(
+def create_fractional_spectra(
     freq_array_hz: np.ndarray,
     stokes_i_array: np.ndarray,
     stokes_q_array: np.ndarray,
@@ -360,6 +360,24 @@ def create_frac_spectra(
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_model_array: Optional[np.ndarray] = None,
 ) -> FractionalSpectra:
+    no_nan_idx = (
+        np.isfinite(stokes_i_array)
+        & np.isfinite(stokes_i_error_array)
+        & np.isfinite(stokes_q_array)
+        & np.isfinite(stokes_q_error_array)
+        & np.isfinite(stokes_u_array)
+        & np.isfinite(stokes_u_error_array)
+        & np.isfinite(freq_array_hz)
+    )
+
+    freq_array_hz = freq_array_hz[no_nan_idx]
+    stokes_i_array = stokes_i_array[no_nan_idx]
+    stokes_q_array = stokes_q_array[no_nan_idx]
+    stokes_u_array = stokes_u_array[no_nan_idx]
+    stokes_i_error_array = stokes_i_error_array[no_nan_idx]
+    stokes_q_error_array = stokes_q_error_array[no_nan_idx]
+    stokes_u_error_array = stokes_u_error_array[no_nan_idx]
+
     stokes_i_uarray = unumpy.uarray(stokes_i_array, stokes_i_error_array)
     stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
     stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)

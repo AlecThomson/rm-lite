@@ -2,14 +2,16 @@
 # -*- coding: utf-8 -*-
 """RM-synthesis on 1D data"""
 
-import math as m
+import logging
 import time
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 
+from astropy.constants import c as speed_of_light
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
 
+from rmtools_lite.utils import rmsynth
 from rmtools_lite.utils.misc import (
     calculate_StokesI_model,
     create_frac_spectra,
@@ -24,8 +26,69 @@ from rmtools_lite.utils.rmsynth import (
     measure_qu_complexity,
 )
 
+from rmtools_lite.utils.logging import logger
 
-# -----------------------------------------------------------------------------#
+logger.setLevel(logging.INFO)
+
+
+class RMSynthParams(NamedTuple):
+    lambda_sq_arr_m2: np.ndarray
+    phi_arr_radm2: np.ndarray
+    weight_array: np.ndarray
+
+
+def compute_rmsynth_params(
+    freq_array_hz: np.ndarray,
+    stokes_qu_error_array: np.ndarray,
+    d_phi_radm2: Optional[float] = None,
+    n_samples: Optional[float] = 10.0,
+    phi_max_radm2: Optional[float] = None,
+    super_resolution: bool = False,
+    weight_type: Literal["variance", "uniform"] = "variance",
+) -> RMSynthParams:
+    lambda_sq_arr_m2 = (speed_of_light / freq_array_hz) ** 2.0
+    lambda_sq_range_m2 = np.nanmax(lambda_sq_arr_m2) - np.nanmin(lambda_sq_arr_m2)
+    d_lambda_sq_max_m2 = np.nanmax(np.abs(np.diff(lambda_sq_arr_m2)))
+
+    # Set the Faraday depth range
+    if not super_resolution:
+        fwhm_rmsf_radm2 = 3.8 / lambda_sq_range_m2  # Dickey+2019 theoretical RMSF width
+    else:  # If super resolution, use R&C23 theoretical width
+        fwhm_rmsf_radm2 = 2.0 / (
+            np.nanmax(lambda_sq_arr_m2) + np.nanmin(lambda_sq_arr_m2)
+        )
+
+    if d_phi_radm2 is None:
+        if n_samples is None:
+            raise ValueError("Either d_phi_radm2 or n_samples must be provided.")
+        d_phi_radm2 = fwhm_rmsf_radm2 / n_samples
+    if phi_max_radm2 is None:
+        phi_max_radm2 = np.sqrt(3.0) / d_lambda_sq_max_m2
+        phi_max_radm2 = max(
+            phi_max_radm2, fwhm_rmsf_radm2 * 10.0
+        )  # Force the minimum phiMax to 10 FWHM
+
+    # Faraday depth sampling. Zero always centred on middle channel
+    n_chan_rm = int(round(abs((phi_max_radm2 - 0.0) / d_phi_radm2)) * 2.0 + 1.0)
+    max_phi_radm2 = (n_chan_rm - 1.0) * d_phi_radm2 / 2.0
+    phi_arr_radm2 = np.linspace(-max_phi_radm2, max_phi_radm2, n_chan_rm)
+    logger.info(
+        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({n_chan_rm} chans)."
+    )
+
+    # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
+    if weight_type == "variance":
+        weight_array = 1.0 / np.power(stokes_qu_error_array, 2.0)
+    else:
+        weight_array = np.ones_like(freq_array_hz)
+
+    return RMSynthParams(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        phi_arr_radm2=phi_arr_radm2,
+        weight_array=weight_array,
+    )
+
+
 def run_rmsynth(
     stokes_q_array: np.ndarray,
     stokes_u_array: np.ndarray,
@@ -46,106 +109,42 @@ def run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
 ):
-    stokes_qu_error_array = (stokes_q_error_array + stokes_u_error_array) / 2.0
+    if stokes_i_array is not None:
+        fractional_spectra = create_fractional_spectra(
+            freq_array_hz=freq_array_hz,
+            stokes_i_array=stokes_i_array,
+            stokes_q_array=stokes_q_array,
+            stokes_u_array=stokes_u_array,
+            stokes_i_error_array=stokes_i_error_array,
+            stokes_q_error_array=stokes_q_error_array,
+            stokes_u_error_array=stokes_u_error_array,
+            poly_ord=poly_ord,
+            fit_function=fit_function,
+            stokes_i_model_array=stokes_i_model_array,
+        )
 
-    # Fit the Stokes I spectrum and create the fractional spectra
-    fractional_spectra = create_frac_spectra(
+    rmsynth_params = compute_rmsynth_params(
         freq_array_hz=freq_array_hz,
-        stokes_i_array=stokes_i_array,
-        stokes_q_array=stokes_q_array,
-        stokes_u_array=stokes_u_array,
-        stokes_i_error_array=stokes_i_error_array,
-        stokes_q_error_array=stokes_q_error_array,
-        stokes_u_error_array=stokes_u_error_array,
-        poly_ord=poly_ord,
-        fit_function=fit_function,
-        stokes_i_model_array=stokes_i_model_array,
+        stokes_qu_error_array=np.sqrt(
+            stokes_q_error_array**2 + stokes_u_error_array**2
+        ),
+        d_phi_radm2=d_phi_radm2,
+        n_samples=n_samples,
+        phi_max_radm2=phi_max_radm2,
+        super_resolution=super_resolution,
+        weight_type=weight_type,
     )
-
-    stokes_qu_error_array = np.abs(dqArr + duArr) / 2.0
-    stokes_qu_error_array = np.where(
-        np.isfinite(stokes_qu_error_array), stokes_qu_error_array, np.nan
-    )
-
-    # Plot the data and the Stokes I model fit
-    if verbose:
-        log("Plotting the input data and spectral index fit.")
-    freqHirArr_Hz = np.linspace(freqArr_Hz[0], freqArr_Hz[-1], 10000)
-    if stokes_i_model_array is None:
-        IModHirArr = calculate_StokesI_model(fit_result, freqHirArr_Hz)
-    elif stokes_i_model_array is not None:
-        modStokesI_interp = interp1d(freqArr_Hz, stokes_i_model_array)
-        IModHirArr = modStokesI_interp(freqHirArr_Hz)
-    if showPlots or saveFigures:
-        specFig = plt.figure(facecolor="w", figsize=(12.0, 8))
-        plot_Ipqu_spectra_fig(
-            freqArr_Hz=freqArr_Hz,
-            IArr=IArr,
-            qArr=qArr,
-            uArr=uArr,
-            stokes_i_error_array=np.abs(stokes_i_error_array),
-            dqArr=np.abs(dqArr),
-            duArr=np.abs(duArr),
-            freqHirArr_Hz=freqHirArr_Hz,
-            IModArr=IModHirArr,
-            fig=specFig,
-            units=units,
-        )
-
-    # -------------------------------------------------------------------------#
-
-    # Calculate some wavelength parameters
-    lambdaSqArr_m2 = np.power(C / freqArr_Hz, 2.0)
-    lambdaSqRange_m2 = np.nanmax(lambdaSqArr_m2) - np.nanmin(lambdaSqArr_m2)
-    dLambdaSqMin_m2 = np.nanmin(np.abs(np.diff(lambdaSqArr_m2)))
-    dLambdaSqMax_m2 = np.nanmax(np.abs(np.diff(lambdaSqArr_m2)))
-
-    # Set the Faraday depth range
-    if not super_resolution:
-        fwhmRMSF_radm2 = 3.8 / lambdaSqRange_m2  # Dickey+2019 theoretical RMSF width
-    else:  # If super resolution, use R&C23 theoretical width
-        fwhmRMSF_radm2 = 2.0 / (np.nanmax(lambdaSqArr_m2) + np.nanmin(lambdaSqArr_m2))
-    if dPhi_radm2 is None:
-        dPhi_radm2 = fwhmRMSF_radm2 / nSamples
-    if phiMax_radm2 is None:
-        phiMax_radm2 = m.sqrt(3.0) / dLambdaSqMax_m2
-        phiMax_radm2 = max(
-            phiMax_radm2, fwhmRMSF_radm2 * 10.0
-        )  # Force the minimum phiMax to 10 FWHM
-
-    # Faraday depth sampling. Zero always centred on middle channel
-    nChanRM = int(round(abs((phiMax_radm2 - 0.0) / dPhi_radm2)) * 2.0 + 1.0)
-    startPhi_radm2 = -(nChanRM - 1.0) * dPhi_radm2 / 2.0
-    stopPhi_radm2 = +(nChanRM - 1.0) * dPhi_radm2 / 2.0
-    phiArr_radm2 = np.linspace(startPhi_radm2, stopPhi_radm2, nChanRM)
-    phiArr_radm2 = phiArr_radm2.astype(dtFloat)
-    if verbose:
-        log(
-            "PhiArr = %.2f to %.2f by %.2f (%d chans)."
-            % (phiArr_radm2[0], phiArr_radm2[-1], float(dPhi_radm2), nChanRM)
-        )
-
-    # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
-    if weightType == "variance":
-        weightArr = 1.0 / np.power(stokes_qu_error_array, 2.0)
-    else:
-        weightType = "uniform"
-        weightArr = np.ones(freqArr_Hz.shape, dtype=dtFloat)
-    if verbose:
-        log("Weight type is '%s'." % weightType)
 
     startTime = time.time()
 
     # Perform RM-synthesis on the spectrum
-    dirtyFDF, lam0Sq_m2 = do_rmsynth_planes(
-        dataQ=qArr,
-        dataU=uArr,
-        lambdaSqArr_m2=lambdaSqArr_m2,
-        phiArr_radm2=phiArr_radm2,
-        weightArr=weightArr,
-        nBits=nBits,
-        log=log,
-        lam0Sq_m2=0 if super_resolution else None,
+    fdf_dirty_cube, lam_sq_0_m2 = do_rmsynth_planes(
+        dataQ=stokes_q_array,
+        dataU=stokes_u_array,
+        lambdaSqArr_m2=rmsynth_params.lambda_sq_arr_m2,
+        phiArr_radm2=rmsynth_params.phi_arr_radm2,
+        weightArr=rmsynth_params.weight_array,
+        lam_sq_0_m2=0 if super_resolution else None,
     )
 
     # Calculate the Rotation Measure Spread Function
@@ -163,13 +162,6 @@ def run_rmsynth(
         log=log,
     )
     fwhmRMSF = float(fwhmRMSFArr)
-
-    # ALTERNATE RM-SYNTHESIS CODE --------------------------------------------#
-
-    # dirtyFDF, [phi2Arr_radm2, RMSFArr], lam0Sq_m2, fwhmRMSF = \
-    #          do_rmsynth(qArr, uArr, lambdaSqArr_m2, phiArr_radm2, weightArr)
-
-    # -------------------------------------------------------------------------#
 
     endTime = time.time()
     cputime = endTime - startTime
@@ -262,32 +254,6 @@ def run_rmsynth(
     )
     mDict.update(mD)
 
-    # Debugging plots for spectral complexity measure
-    if debug:
-        tmpFig = plot_complexity_fig(
-            xArr=pD["xArrQ"],
-            qArr=pD["yArrQ"],
-            dqArr=pD["dyArrQ"],
-            sigmaAddqArr=pD["sigmaAddArrQ"],
-            chiSqRedqArr=pD["chiSqRedArrQ"],
-            probqArr=pD["probArrQ"],
-            uArr=pD["yArrU"],
-            duArr=pD["dyArrU"],
-            sigmaAdduArr=pD["sigmaAddArrU"],
-            chiSqReduArr=pD["chiSqRedArrU"],
-            probuArr=pD["probArrU"],
-            mDict=mDict,
-        )
-        if saveFigures:
-            if verbose:
-                print("Saving debug plots:")
-            outFilePlot = prefixOut + ".debug-plots.pdf"
-            if verbose:
-                print("> " + outFilePlot)
-            tmpFig.savefig(outFilePlot, bbox_inches="tight")
-        else:
-            tmpFig.show()
-
     # add array dictionary
     aDict = dict()
     aDict["phiArr_radm2"] = phiArr_radm2
@@ -337,32 +303,5 @@ def run_rmsynth(
         log("Fitted polynomial order = {} ".format(mDict["poly_ord"]))
         log()
         log("-" * 80)
-
-    # Plot the RM Spread Function and dirty FDF
-    if showPlots or saveFigures:
-        fdfFig = plt.figure(facecolor="w", figsize=(12.0, 8))
-        plot_rmsf_fdf_fig(
-            phiArr=phiArr_radm2,
-            FDF=dirtyFDF,
-            phi2Arr=phi2Arr_radm2,
-            RMSFArr=RMSFArr,
-            fwhmRMSF=fwhmRMSF,
-            vLine=mDict["phiPeakPIfit_rm2"],
-            fig=fdfFig,
-            units=units,
-        )
-
-    # Pause if plotting enabled
-    if showPlots:
-        plt.show()
-    if saveFigures or debug:
-        if verbose:
-            print("Saving RMSF and dirty FDF plot:")
-        outFilePlot = prefixOut + "_RMSF-dirtyFDF-plots.pdf"
-        if verbose:
-            print("> " + outFilePlot)
-        fdfFig.savefig(outFilePlot, bbox_inches="tight")
-        #        #if verbose: print "Press <RETURN> to exit ...",
-    #        input()
 
     return mDict, aDict
