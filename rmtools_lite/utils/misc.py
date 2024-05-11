@@ -1,105 +1,15 @@
-#!/usr/bin/env python
-# =============================================================================#
-#                                                                             #
-# NAME:     util_misc.py                                                      #
-#                                                                             #
-# PURPOSE:  Miscellaneous functions for working with Faraday spectra & cubes. #
-#                                                                             #
-# REQUIRED: Requires numpy and astropy.                                       #
-#                                                                             #
-# MODIFIED: 12-Mar-2018 by C. Purcell                                         #
-#                                                                             #
-# CONTENTS:                                                                   #
-#                                                                             #
-#  config_read          ... read a key=value format text file                 #
-#  csv_read_to_list     ... read rows from a CSV file into a list of lists    #
-#  cleanup_str_input    ... condense multiple newlines and spaces in a string #
-#  split_repeat_lst     ... split a list into preamble and repeating columns  #
-#  deg2dms              ... convert decimal degrees to dms string             #
-#  progress             ... print a progress bar                              #
-#  calc_mom2_FDF        ... calculate the 2nd moment of the CC                #
-#  calc_parabola_vertex ... interpolate the peak position using a parabola    #
-#  create_frac_spectra  ... fit a Stokes I model and divide into other Stokes #
-#  interp_images        ... interpolate between two image planes              #
-#  fit_spec_poly5       ... fit a >=5th order polynomial to a spectrum        #
-#  poly5                ... function to evaluate a 5th order polynomial       #
-#  nanmedian            ... np.median ignoring NaNs                           #
-#  nanmean              ... np.mean ignoring NaNs                             #
-#  nanstd               ... np.std ignoring NaNs                              #
-#  extrap               ... interpolate & extrapolate a Numpy array           #
-#  toscalar             ... return a scalar version of a Numpy object         #
-#  MAD                  ... calculate the madfm                               #
-#  calc_stats           ... calculate the statistics of an array              #
-#  sort_nicely          ... sort a list in the order a human would            #
-#  twodgaussian         ... return an array containing a 2D Gaussian          #
-#  create_pqu_spectra_burn ... return fractional spectra for N burn sources   #
-#  create_IQU_spectra_burn ... return IQU spectra for N burn sources          #
-#  create_pqu_spectra_diff ... return fractional spectra for N mixed sources  #
-#  create_IQU_spectra_diff ... return IQU spectra for N mixed sources         #
-#  create_pqu_spectra_RMthin ... return fractional spectra for a thin source  #
-#  create_IQU_spectra_RMthin ... return IQU spectra for a thin source         #
-#  create_pqu_resid_RMthin ... return fractional spectra - a thin component   #
-#  xfloat               ... convert to float, default to None on fail         #
-#  norm_cdf             ... calculate the CDF of a Normal distribution        #
-#                                                                             #
-# =============================================================================#
-#                                                                             #
-# The MIT License (MIT)                                                       #
-#                                                                             #
-# Copyright (c) 2015 Cormac R. Purcell                                        #
-#                                                                             #
-# Permission is hereby granted, free of charge, to any person obtaining a     #
-# copy of this software and associated documentation files (the "Software"),  #
-# to deal in the Software without restriction, including without limitation   #
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,    #
-# and/or sell copies of the Software, and to permit persons to whom the       #
-# Software is furnished to do so, subject to the following conditions:        #
-#                                                                             #
-# The above copyright notice and this permission notice shall be included in  #
-# all copies or substantial portions of the Software.                         #
-#                                                                             #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR  #
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,    #
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE #
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER      #
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING     #
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER         #
-# DEALINGS IN THE SOFTWARE.                                                   #
-#                                                                             #
-# =============================================================================#
-
-import math as m
-import sys
-import traceback
+#!/usr/bin/env python3
 import warnings
-from typing import NamedTuple, Optional, Tuple
+from typing import Callable, Literal, NamedTuple, Optional, Tuple
 
+from astropy.stats import akaike_info_criterion_lsq
 import numpy as np
 import numpy.ma as ma
 import scipy.ndimage as ndi
 from scipy.stats import norm
-from utils.mpfit import mpfit
+from scipy.optimize import curve_fit
 
-# import ConfigParser
-
-
-C = 2.99792458e8
-
-
-# -----------------------------------------------------------------------------#
-def progress(width, percent):
-    """
-    Print a progress bar to the terminal.
-    Stolen from Mike Bell.
-    """
-
-    marks = m.floor(width * (percent / 100.0))
-    spaces = m.floor(width - marks)
-    loader = "  [" + ("=" * int(marks)) + (" " * int(spaces)) + "]"
-    sys.stdout.write("%s %d%%\r" % (loader, percent))
-    if percent >= 100:
-        sys.stdout.write("\n")
-    sys.stdout.flush()
+from uncertainties import unumpy
 
 
 # -----------------------------------------------------------------------------#
@@ -140,152 +50,6 @@ def calc_parabola_vertex(x1, y1, x2, y2, x3, y3):
     yv = C - B * B / (4.0 * A)
 
     return xv * deltax + midpoint, yv * yscale
-
-
-# -----------------------------------------------------------------------------#
-class FitResult(NamedTuple):
-    """
-    Results of a polynomial fit.
-    """
-
-    params: np.ndarray
-    """array of polynomial parameters (highest to lowest order)"""
-    fitStatus: int
-    """exit status of fitter."""
-    chiSq: float
-    """chi-squared of fit"""
-    chiSqRed: float
-    """Reduced chi-squared of fit"""
-    AIC: float
-    """Aikaike information criterion value for fit"""
-    polyOrd: int
-    """order of fit"""
-    nIter: int
-    """Number of iterations used by fitter."""
-    reference_frequency_Hz: float
-    """reference frequency for polynomial."""
-    dof: int
-    """degrees of freedom in the fit."""
-    pcov: np.ndarray
-    """covariance matrix of fit parameters"""
-    perror: np.ndarray
-    """parameter errors"""
-    fit_function: str
-    """fit function used"""
-
-    def with_options(self, **kwargs):
-        prop = self._asdict()
-        prop.update(**kwargs)
-
-        return FitResult(**prop)
-
-
-def fit_StokesI_model(freqArr, IArr, dIArr, polyOrd, fit_function="log") -> FitResult:
-    """Fit a model to a Stokes I spectrum with specified errors.
-    Supports linear or log polynomials, and fixed or dynamic order selection.
-
-    Args:
-        freqArr (array): Numpy array-like containing channel frequencies (in Hz)
-        IArr (array): array of Stokes I values (any units)
-        dIArr (array): array of 1-sigma noise/uncertainties in Stokes I
-        polyOrd (int): if positive (0 to 5), will fit that order of polynomial.
-            If negative (-1 to -5), will dynamically find the best order up
-            to the maximum of |polyOrd|.
-        fit_function (str): 'linear' or 'log' to fit the corresponding function.
-
-    Returns:
-        FitResult: Model information.
-    """
-    # Frequency axis must be in GHz to avoid overflow errors
-    goodchan = np.logical_and(
-        np.isfinite(IArr), np.isfinite(dIArr)
-    )  # Ignore NaN channels!
-    # The fitting code is susceptible to numeric overflows because the frequencies are large.
-    # To prevent this, normalize by a reasonable characteristic frequency in order
-    # to make all the numbers close to 1:
-    # The reference frequency is the frequency corresponding to the mean of lambda^2
-    # since this should be close to the polarization reference frequency.
-    reference_frequency_Hz = 1 / np.sqrt(nanmean(1 / freqArr[goodchan] ** 2))
-
-    # negative orders indicate that the code should dynamically increase
-    # order of polynomial so long as it improves the fit
-    if polyOrd < 0:
-        highest_order = np.abs(polyOrd)
-        # Try zero-th order (constant) fit first:
-        mp = fit_spec_poly5(
-            freqArr[goodchan] / reference_frequency_Hz,
-            IArr[goodchan],
-            dIArr[goodchan],
-            0,
-            fit_function,
-        )
-        old_aic = 2 + mp.fnorm
-        current_order = 1
-        while current_order <= highest_order:
-            new_mp = fit_spec_poly5(
-                freqArr[goodchan] / reference_frequency_Hz,
-                IArr[goodchan],
-                dIArr[goodchan],
-                current_order,
-                fit_function,
-            )
-            new_aic = 2 * (current_order + 1) + new_mp.fnorm
-            if new_aic < old_aic:  # if there's an improvement, keep going
-                old_aic = new_aic
-                mp = new_mp
-                current_order += 1
-            else:  # if not an improvement, stop here.
-                break
-        polyOrd = (
-            current_order - 1
-        )  # Best order is always one less than the last one checked.
-        aic = old_aic
-    else:
-        mp = fit_spec_poly5(
-            freqArr[goodchan] / reference_frequency_Hz,
-            IArr[goodchan],
-            dIArr[goodchan],
-            polyOrd,
-            fit_function,
-        )
-        aic = 2 * (polyOrd + 1) + mp.fnorm
-
-    dof = len(freqArr) - polyOrd - 1
-    return FitResult(
-        params=mp.params,
-        fitStatus=int(np.abs(mp.status)),
-        chiSq=mp.fnorm,
-        chiSqRed=mp.fnorm / dof,
-        AIC=aic,
-        polyOrd=polyOrd,
-        nIter=mp.niter,
-        reference_frequency_Hz=reference_frequency_Hz,
-        dof=dof,
-        pcov=mp.covar,
-        perror=mp.perror if mp.perror is not None else np.zeros_like(mp.params),
-        fit_function=fit_function,
-    )
-
-
-def calculate_StokesI_model(
-    fit_result: FitResult, freqArr_Hz: np.ndarray
-) -> np.ndarray:
-    """Calculates channel values for a Stokes I model.
-
-    Inputs:
-        fitDict (FitResult): a dictionary returned from the Stokes I model fitting.
-        freqArr_Hz (array): an array of frequency values (assumed to be in Hz).
-
-    Returns: array containing Stokes I model values corresponding to each frequency."""
-    if fit_result.fit_function == "linear":
-        IModArr = poly5(fit_result.params)(
-            freqArr_Hz / fit_result.reference_frequency_Hz
-        )
-    elif fit_result.fit_function == "log":
-        IModArr = powerlaw_poly5(fit_result.params)(
-            freqArr_Hz / fit_result.reference_frequency_Hz
-        )
-    return IModArr
 
 
 def renormalize_StokesI_model(
@@ -436,173 +200,195 @@ def renormalize_StokesI_model(
     )
 
 
-# -----------------------------------------------------------------------------#
-def create_frac_spectra(
-    freqArr: np.ndarray,
-    IArr: np.ndarray,
-    QArr: np.ndarray,
-    UArr: np.ndarray,
-    dIArr: np.ndarray,
-    dQArr: np.ndarray,
-    dUArr: np.ndarray,
-    polyOrd: int = 2,
-    verbose: bool = False,
-    debug: bool = False,
-    fit_function: str = "log",
-    modStokesI: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, FitResult]:
-    """
-    Fit the Stokes I spectrum with a polynomial and divide into the Q & U
-    spectra to create fractional spectra.
+def polynomial(order: int) -> Callable:
+    def poly_func(x: np.ndarray, *params) -> np.ndarray:
+        result = 0
+        for i in range(order + 1):
+            result += params[i] * x**i
+        return result
 
-    Args:
+    return poly_func
 
-        freqArr (array): Numpy array-like containing channel frequencies (in Hz)
-        IArr (array): array of Stokes I values (any units)
-        QArr (array): array of Stokes Q values (any units)
-        UArr (array): array of Stokes U values (any units)
-        dIArr (array): array of 1-sigma noise/uncertainties in Stokes I
-        dQArr (array): array of 1-sigma noise/uncertainties in Stokes Q
-        dUArr (array): array of 1-sigma noise/uncertainties in Stokes U
-        polyOrd (int): order of polynomial to fit to Stokes I spectrum
-        verbose (bool): print extra information
-        debug (bool): print debugging information
-        fit_function (str): 'linear' or 'log' to fit the corresponding function.
-        modStokesI (array): optional Stokes I model to use instead of fitting
 
-    Returns:
+def power_law(order: int) -> Callable:
+    def power_func(x: np.ndarray, *params) -> np.ndarray:
+        power = 0
 
-        IModArr (array): Stokes I model spectrum
-        qArr (array): fractional Stokes Q spectrum
-        uArr (array): fractional Stokes U spectrum
-        dqArr (array): fractional Stokes Q spectrum errors
-        duArr (array): fractional Stokes U spectrum errors
-        fit_result (FitResult): fit information
+        for i in range(order + 1):
+            power += params[i] * np.log10(x**i)
+        return x**power
 
-    """
-    if modStokesI is None:
-        # Fit a <=5th order polynomial model to the Stokes I spectrum
-        try:
-            # The input values are forced to 64-bit in order to maximize the
-            # stability and quality of the fits. It was found that the fitter
-            # is more susceptible to numerical issues in 32-bit.
-            fit_result = fit_StokesI_model(
-                freqArr.astype("float64"),
-                IArr.astype("float64"),
-                dIArr.astype("float64"),
-                polyOrd,
-                fit_function,
-            )
-            IModArr = calculate_StokesI_model(fit_result, freqArr)
+    return power_func
 
-            if np.min(IModArr) < 0:  # Flag sources with negative models.
-                fit_result = fit_result.with_options(
-                    fitStatus=fit_result.fitStatus + 128
-                )
-            if (IModArr < dIArr).sum() > 0:  # Flag sources with models with S/N < 1.
-                # TODO: this can be made better: estimating the error on the model to see
-                # if the model is within 1 sigma, rather than the data error bars.
-                fit_result = fit_result.with_options(
-                    fitStatus=fit_result.fitStatus + 64
-                )
-        except Exception:  # If fit fails, fallback:
-            print("Err: Failed to fit polynomial to Stokes I spectrum.")
-            if debug:
-                print("\nTRACEBACK:")
-                print(("-" * 80))
-                print((traceback.format_exc()))
-                print(("-" * 80))
-                print("\n")
-            print("> Setting Stokes I spectrum to unity.\n")
-            fit_result = FitResult(
-                params=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
-                fitStatus=9,
-                chiSq=0.0,
-                chiSqRed=0.0,
-                AIC=0,
-                polyOrd=polyOrd,
-                nIter=0,
-                reference_frequency_Hz=1,
-                dof=len(freqArr) - polyOrd - 1,
-                pcov=np.zeros((6, 6)),
-                perror=np.zeros(6),
-                fit_function=fit_function,
-            )
-            IModArr = np.ones_like(IArr)
-    else:
-        # Use provided model
-        IModArr = modStokesI
-        fit_result = FitResult(
-            params=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.0]),
-            fitStatus=0,
-            chiSq=0.0,
-            chiSqRed=0.0,
-            AIC=0,
-            polyOrd=polyOrd,
-            nIter=0,
-            reference_frequency_Hz=1,
-            dof=len(freqArr) - polyOrd - 1,
-            pcov=np.zeros((6, 6)),
-            perror=np.zeros(6),
-            fit_function=fit_function,
+
+def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> Tuple[float, int, int]:
+    """Find the best AIC for a set of AICs using Occam's razor."""
+    # Find the best AIC
+    best_aic_idx = int(np.nanargmin(aics))
+    best_aic = float(aics[best_aic_idx])
+    best_n = int(n_param[best_aic_idx])
+    # logger.debug(f"Lowest AIC is {best_aic}, with {best_n} params.")
+    # Check if lower have diff < 2 in AIC
+    aic_abs_diff = np.abs(aics - best_aic)
+    bool_min_idx = np.zeros_like(aics).astype(bool)
+    bool_min_idx[best_aic_idx] = True
+    potential_idx = (aic_abs_diff[~bool_min_idx] < 2) & (
+        n_param[~bool_min_idx] < best_n
+    )
+    if not any(potential_idx):
+        return best_aic, best_n, best_aic_idx
+
+    bestest_n = int(np.min(n_param[~bool_min_idx][potential_idx]))
+    bestest_aic_idx = int(np.where(n_param == bestest_n)[0][0])
+    bestest_aic = float(aics[bestest_aic_idx])
+    # logger.debug(
+    #     f"Model within 2 of lowest AIC found. Occam says to take AIC of {bestest_aic}, with {bestest_n} params."
+    # )
+    return bestest_aic, bestest_n, bestest_aic_idx
+
+
+class FitResult(NamedTuple):
+    popt: np.ndarray
+    pcov: np.ndarray
+    stokes_i_model_func: Callable
+    aic: float
+    stokes_i_model_array: np.ndarray
+
+
+def static_fit(
+    freq_array_hz: np.ndarray,
+    stokes_i_array: np.ndarray,
+    stokes_i_error_array: np.ndarray,
+    poly_ord: int = 2,
+    fit_type: Literal["log", "linear"] = "log",
+) -> FitResult:
+    if fit_type == "linear":
+        fit_func = polynomial(poly_ord)
+    elif fit_type == "log":
+        fit_func = power_law(poly_ord)
+
+    popt, pcov = curve_fit(
+        fit_func,
+        freq_array_hz,
+        stokes_i_array,
+        sigma=stokes_i_error_array,
+        absolute_sigma=True,
+    )
+    stokes_i_model_array = fit_func(freq_array_hz, *popt)
+    ssr = np.sum((stokes_i_array - stokes_i_model_array) ** 2)
+    aic = akaike_info_criterion_lsq(
+        ssr=ssr, n_params=poly_ord + 1, n_samples=len(freq_array_hz)
+    )
+
+    return FitResult(
+        popt=popt,
+        pcov=pcov,
+        stokes_i_model_func=fit_func,
+        aic=aic,
+        stokes_i_model_array=stokes_i_model_array,
+    )
+
+
+def dynamic_fit(
+    freq_array_hz: np.ndarray,
+    stokes_i_array: np.ndarray,
+    stokes_i_error_array: np.ndarray,
+    poly_ord: int = 2,
+    fit_type: Literal["log", "linear"] = "log",
+) -> FitResult:
+    orders = np.arange(1, poly_ord + 1)
+    fit_results = []
+
+    for i, order in enumerate(orders):
+        fit_result = static_fit(
+            freq_array_hz,
+            stokes_i_array,
+            stokes_i_error_array,
+            order,
+            fit_type,
         )
-        if verbose:
-            print("Using provided model Stokes I spectrum")
+        fit_results.append(fit_result)
 
-    # Calculate the fractional spectra and errors
-    with np.errstate(divide="ignore", invalid="ignore"):
-        qArr = np.true_divide(QArr, IModArr)
-        uArr = np.true_divide(UArr, IModArr)
-        qArr = np.where(np.isfinite(qArr), qArr, np.nan)
-        uArr = np.where(np.isfinite(uArr), uArr, np.nan)
+    aics = np.array([fit_result.aic for fit_result in fit_results])
+    bestest_aic, bestest_n, bestest_aic_idx = best_aic_func(aics, orders)
 
-        ## These errors only apply when dividing by channel Stokes I values, but
-        ## not when dividing by a Stokes I model (the errors on which are more difficult
-        ## to determine). Also assumes errors in Q,U are uncorrelated with errors in I,
-        ## which I'm skeptical about. For now, replacing with what I think is a better
-        ## approximation. I'm leaving this here in case we ever decide to implement
-        ## channel-wise Stokes I normalization.
-        # dqArr = np.abs(qArr) * np.sqrt( np.true_divide(dQArr, QArr)**2.0 +
-        #                         np.true_divide(dIArr, IArr)**2.0 )
-        # duArr = np.abs(uArr) * np.sqrt( np.true_divide(dUArr, UArr)**2.0 +
-        #                         np.true_divide(dIArr, IArr)**2.0 )
-
-        # Alternative scheme: assume errors in Stokes I don't propagate through
-        # (i.e., that the model has no errors.)
-        # TODO: if I do figure out model errors at some point, fold them in here.
-        dqArr = dQArr / IModArr
-        duArr = dUArr / IModArr
-        dqArr = np.where(np.isfinite(dqArr), dqArr, np.nan)
-        duArr = np.where(np.isfinite(duArr), duArr, np.nan)
-
-    return IModArr, qArr, uArr, dqArr, duArr, fit_result
+    return fit_results[bestest_aic_idx]
 
 
-# Documenting fitStatus return values:
-# 0  Improper input parameters.
-# 1  Both actual and predicted relative reductions in the sum of squares
-# 		   are at most ftol.
-# 2  Relative error between two consecutive iterates is at most xtol
-# 3  Conditions for status = 1 and status = 2 both hold.
-# 4  The cosine of the angle between fvec and any column of the jacobian
-# 		   is at most gtol in absolute value.
-# 5  The maximum number of iterations has been reached.
-# 6  ftol is too small. No further reduction in the sum of squares is
-# 		   possible.
-# 7  xtol is too small. No further improvement in the approximate solution
-# 		   x is possible.
-# 8  gtol is too small. fvec is orthogonal to the columns of the jacobian
-# 		   to machine precision.
-# 9 Fit failed; reason unknown (check log/terminal)
-# 16 		   A parameter or function value has become infinite or an undefined
-# 		   number.  This is usually a consequence of numerical overflow in the
-# 		   user's model function, which must be avoided.
-# The following can be added to the previous flags:
-# 64 Model contains one or more channels with S:N < 1
-# 128 Model contains negative Stokes I values.
+def fit_stokes_i_model(
+    freq_array_hz: np.ndarray,
+    stokes_i_array: np.ndarray,
+    stokes_i_error_array: np.ndarray,
+    poly_ord: int = 2,
+    fit_type: Literal["log", "linear"] = "log",
+) -> FitResult:
+    if poly_ord < 0:
+        return dynamic_fit(
+            freq_array_hz,
+            stokes_i_array,
+            stokes_i_error_array,
+            abs(poly_ord),
+            fit_type,
+        )
 
-# All flags greater the 80 indicate questionable/low-signal Stokes I models.
-# All flags greater than 128 indicate bad Stokes I model (negative values)
+    return static_fit(
+        freq_array_hz,
+        stokes_i_array,
+        stokes_i_error_array,
+        poly_ord,
+        fit_type,
+    )
+
+
+class FractionalSpectra(NamedTuple):
+    stokes_i_model_array: np.ndarray
+    stokes_q_frac_array: np.ndarray
+    stokes_u_frac_array: np.ndarray
+    stokes_q_frac_error_array: np.ndarray
+    stokes_u_frac_error_array: np.ndarray
+
+
+def create_frac_spectra(
+    freq_array_hz: np.ndarray,
+    stokes_i_array: np.ndarray,
+    stokes_q_array: np.ndarray,
+    stokes_u_array: np.ndarray,
+    stokes_i_error_array: np.ndarray,
+    stokes_q_error_array: np.ndarray,
+    stokes_u_error_array: np.ndarray,
+    poly_ord: int = 2,
+    fit_function: Literal["log", "linear"] = "log",
+    stokes_i_model_array: Optional[np.ndarray] = None,
+) -> FractionalSpectra:
+    stokes_i_uarray = unumpy.uarray(stokes_i_array, stokes_i_error_array)
+    stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
+    stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)
+    if stokes_i_model_array is not None:
+        stokes_i_model_uarray = unumpy.uarray(stokes_i_model_array, 0.0)
+    else:
+        fit_result = fit_stokes_i_model(
+            freq_array_hz,
+            stokes_i_array,
+            stokes_i_error_array,
+            poly_ord,
+            fit_function,
+        )
+
+    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_uarray
+    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_uarray
+
+    stokes_q_frac_array = unumpy.nominal_values(stokes_q_frac_uarray)
+    stokes_u_frac_array = unumpy.nominal_values(stokes_u_frac_uarray)
+    stokes_q_frac_error_array = unumpy.std_devs(stokes_q_frac_uarray)
+    stokes_u_frac_error_array = unumpy.std_devs(stokes_u_frac_uarray)
+
+    return FractionalSpectra(
+        stokes_i_model_array=stokes_i_model_array,
+        stokes_q_frac_array=stokes_q_frac_array,
+        stokes_u_frac_array=stokes_u_frac_array,
+        stokes_q_frac_error_array=stokes_q_frac_error_array,
+        stokes_u_frac_error_array=stokes_u_frac_error_array,
+    )
 
 
 # -----------------------------------------------------------------------------#
