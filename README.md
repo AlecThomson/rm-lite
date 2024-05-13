@@ -11,7 +11,7 @@ The goal of this project is to provide low code surface area with high reliabili
 ## Installtion
 
 ```
-pip install rmtools-lite
+pip install rm-lite
 ```
 
 
@@ -26,16 +26,16 @@ Contributions are welcome. Questions, bug reports, and feature requests can be p
 
 The development dependencies can be installed via `pip` from PyPI:
 ```bash
-pip install "rmtools-lite[dev]"
+pip install "rm-lite[dev]"
 ```
 or for a local clone:
 ```bash
-cd rmtools-lite
+cd rm-lite
 pip install ".[dev]"
 ```
 
 Code formatting and style is handled by `ruff`, with tests run by `pytest`. A `pre-commit` hook is available to handle the autoformatting. After installing the `dev` dependencies, you can install the hooks by running:
 ```bash
-cd RM-Tools
+cd rm-lite
 pre-commit install
 ```
