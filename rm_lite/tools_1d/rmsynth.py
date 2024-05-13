@@ -7,21 +7,20 @@ import time
 from typing import Literal, NamedTuple, Optional
 
 from astropy.constants import c as speed_of_light
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
 
-from rm_lite.utils import rmsynth
 from rm_lite.utils.misc import (
-    calculate_StokesI_model,
     create_fractional_spectra,
     renormalize_StokesI_model,
 )
 from rm_lite.utils.rmsynth import (
-    do_rmsynth_planes,
-    get_rmsf_planes,
+    rmsynth_nufft,
+    get_rmsf_nufft,
     measure_FDF_parms,
     measure_qu_complexity,
+    make_phi_array,
+    get_fwhm_rmsf,
 )
 
 from rm_lite.utils.logging import logger
@@ -44,17 +43,11 @@ def compute_rmsynth_params(
     super_resolution: bool = False,
     weight_type: Literal["variance", "uniform"] = "variance",
 ) -> RMSynthParams:
-    lambda_sq_arr_m2 = (speed_of_light / freq_array_hz) ** 2.0
-    lambda_sq_range_m2 = np.nanmax(lambda_sq_arr_m2) - np.nanmin(lambda_sq_arr_m2)
-    d_lambda_sq_max_m2 = np.nanmax(np.abs(np.diff(lambda_sq_arr_m2)))
+    lambda_sq_arr_m2 = (speed_of_light.value / freq_array_hz) ** 2.0
 
-    # Set the Faraday depth range
-    if not super_resolution:
-        fwhm_rmsf_radm2 = 3.8 / lambda_sq_range_m2  # Dickey+2019 theoretical RMSF width
-    else:  # If super resolution, use R&C23 theoretical width
-        fwhm_rmsf_radm2 = 2.0 / (
-            np.nanmax(lambda_sq_arr_m2) + np.nanmin(lambda_sq_arr_m2)
-        )
+    fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
+        lambda_sq_arr_m2, super_resolution
+    )
 
     if d_phi_radm2 is None:
         if n_samples is None:
@@ -66,17 +59,15 @@ def compute_rmsynth_params(
             phi_max_radm2, fwhm_rmsf_radm2 * 10.0
         )  # Force the minimum phiMax to 10 FWHM
 
-    # Faraday depth sampling. Zero always centred on middle channel
-    n_chan_rm = int(round(abs((phi_max_radm2 - 0.0) / d_phi_radm2)) * 2.0 + 1.0)
-    max_phi_radm2 = (n_chan_rm - 1.0) * d_phi_radm2 / 2.0
-    phi_arr_radm2 = np.linspace(-max_phi_radm2, max_phi_radm2, n_chan_rm)
+    phi_arr_radm2 = make_phi_array(phi_max_radm2, d_phi_radm2)
+
     logger.info(
-        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({n_chan_rm} chans)."
+        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
     )
 
     # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
     if weight_type == "variance":
-        weight_array = 1.0 / np.power(stokes_qu_error_array, 2.0)
+        weight_array = 1.0 / stokes_qu_error_array**2
     else:
         weight_array = np.ones_like(freq_array_hz)
 
@@ -142,17 +133,17 @@ def run_rmsynth(
     startTime = time.time()
 
     # Perform RM-synthesis on the spectrum
-    fdf_dirty_cube, lam_sq_0_m2 = do_rmsynth_planes(
-        dataQ=stokes_q_array,
-        dataU=stokes_u_array,
-        lambdaSqArr_m2=rmsynth_params.lambda_sq_arr_m2,
-        phiArr_radm2=rmsynth_params.phi_arr_radm2,
-        weightArr=rmsynth_params.weight_array,
+    fdf_dirty_cube, lam_sq_0_m2 = rmsynth_nufft(
+        stokes_q_array=stokes_q_array,
+        stokes_u_array=stokes_u_array,
+        lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
+        phi_arr_radm2=rmsynth_params.phi_arr_radm2,
+        weight_array=rmsynth_params.weight_array,
         lam_sq_0_m2=0 if super_resolution else None,
     )
 
     # Calculate the Rotation Measure Spread Function
-    RMSFArr, phi2Arr_radm2, fwhmRMSFArr, fitStatArr, _ = get_rmsf_planes(
+    RMSFArr, phi2Arr_radm2, fwhmRMSFArr, fitStatArr, _ = get_rmsf_nufft(
         lambdaSqArr_m2=lambdaSqArr_m2,
         phiArr_radm2=phiArr_radm2,
         weightArr=weightArr,

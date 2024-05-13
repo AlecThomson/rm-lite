@@ -12,6 +12,14 @@ from scipy.optimize import curve_fit
 from uncertainties import unumpy
 
 
+class FitResult(NamedTuple):
+    popt: np.ndarray
+    pcov: np.ndarray
+    stokes_i_model_func: Callable
+    aic: float
+    stokes_i_model_array: np.ndarray
+
+
 # -----------------------------------------------------------------------------#
 def calc_mom2_FDF(FDF, phiArr):
     """
@@ -245,14 +253,6 @@ def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> Tuple[float, int, in
     #     f"Model within 2 of lowest AIC found. Occam says to take AIC of {bestest_aic}, with {bestest_n} params."
     # )
     return bestest_aic, bestest_n, bestest_aic_idx
-
-
-class FitResult(NamedTuple):
-    popt: np.ndarray
-    pcov: np.ndarray
-    stokes_i_model_func: Callable
-    aic: float
-    stokes_i_model_array: np.ndarray
 
 
 def static_fit(
