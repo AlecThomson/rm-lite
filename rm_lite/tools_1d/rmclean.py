@@ -43,7 +43,7 @@ import time
 import numpy as np
 from matplotlib import pyplot as plt
 
-from rmtools_lite.utils.rmsynth import (
+from rm_lite.utils.rmsynth import (
     do_rmclean_hogbom,
     measure_fdf_complexity,
     measure_FDF_parms,

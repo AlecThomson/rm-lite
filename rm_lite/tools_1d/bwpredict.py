@@ -39,7 +39,7 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 
-from rmtools_lite.tools_1d.bwdepol import (
+from rm_lite.tools_1d.bwdepol import (
     adjoint_theory,
     estimate_channel_bandwidth,
     plot_adjoint_info,

@@ -15,9 +15,9 @@ import astropy.io.fits as pf
 import numpy as np
 from tqdm.auto import trange
 
-from rmtools_lite.tools_3d.rmsynth import readFitsCube, readFreqFile
-from rmtools_lite.utils.misc import interp_images
-from rmtools_lite.utils.rmsynth import fits_make_lin_axis, measure_FDF_parms
+from rm_lite.tools_3d.rmsynth import readFitsCube, readFreqFile
+from rm_lite.utils.misc import interp_images
+from rm_lite.utils.rmsynth import fits_make_lin_axis, measure_FDF_parms
 
 C = 2.997924538e8  # Speed of light [m/s]
 

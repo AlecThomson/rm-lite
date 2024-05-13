@@ -48,8 +48,8 @@ from utils.util_plotTk import (
     plot_Ipqu_spectra_fig,
 )
 
-from rmtools_lite.tools_1d.rmsynth import saveOutput
-from rmtools_lite.utils.misc import (
+from rm_lite.tools_1d.rmsynth import saveOutput
+from rm_lite.utils.misc import (
     MAD,
     create_frac_spectra,
     nanmedian,
@@ -57,7 +57,7 @@ from rmtools_lite.utils.misc import (
     progress,
     toscalar,
 )
-from rmtools_lite.utils.rmsynth import (
+from rm_lite.utils.rmsynth import (
     calc_parabola_vertex,
     extrap,
     fit_rmsf,

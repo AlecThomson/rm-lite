@@ -48,8 +48,8 @@ try:
 except:
     parallel_available = False
 
-from rmtools_lite.tools_3d.rmsynth import _setStokes
-from rmtools_lite.utils.rmsynth import do_rmclean_hogbom, fits_make_lin_axis
+from rm_lite.tools_3d.rmsynth import _setStokes
+from rm_lite.utils.rmsynth import do_rmclean_hogbom, fits_make_lin_axis
 
 C = 2.997924538e8  # Speed of light [m/s]
 

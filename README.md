@@ -1,10 +1,12 @@
 ![Tests](https://github.com/CIRADA-Tools/RM-tools/actions/workflows/python-package.yml/badge.svg) [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/CIRADA-Tools/RM-Tools/master.svg)](https://results.pre-commit.ci/latest/github/CIRADA-Tools/RM-Tools/master)
 
-# RM-Tools lite
+# RM-lite
 
-A mini fork of RM-Tools - RM-synthesis, RM-clean and QU-fitting on polarised radio spectra
+A mini fork of RM-Tools - RM-synthesis, RM-clean and QU-fitting on polarised radio spectra.
 
 This just exposes a Python API. No plotting, I/O utilities, or CLI are provided. See the main fork of [RM-Tools](https://github.com/CIRADA-Tools/RM-Tools) for that functionality.
+
+The goal of this project is to provide low code surface area with high reliability, performance, and developer ergonomics.
 
 ## Installtion
 

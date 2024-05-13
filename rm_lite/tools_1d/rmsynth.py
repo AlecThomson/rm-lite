@@ -11,22 +11,22 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import interp1d
 
-from rmtools_lite.utils import rmsynth
-from rmtools_lite.utils.misc import (
+from rm_lite.utils import rmsynth
+from rm_lite.utils.misc import (
     calculate_StokesI_model,
     create_frac_spectra,
     nanmedian,
     renormalize_StokesI_model,
     toscalar,
 )
-from rmtools_lite.utils.rmsynth import (
+from rm_lite.utils.rmsynth import (
     do_rmsynth_planes,
     get_rmsf_planes,
     measure_FDF_parms,
     measure_qu_complexity,
 )
 
-from rmtools_lite.utils.logging import logger
+from rm_lite.utils.logging import logger
 
 logger.setLevel(logging.INFO)
 

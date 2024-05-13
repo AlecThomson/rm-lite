@@ -1,65 +1,5 @@
 #!/usr/bin/env python
-# =============================================================================#
-#                                                                             #
-# NAME:     util_RM.py                                                        #
-#                                                                             #
-# PURPOSE:  Common procedures used with RM-synthesis scripts.                 #
-#                                                                             #
-# REQUIRED: Requires the numpy and scipy modules.                             #
-#                                                                             #
-# MODIFIED: 16-Nov-2018 by J. West                                            #
-#                                                                             #
-# CONTENTS:                                                                   #
-#                                                                             #
-#  do_rmsynth_planes   ... perform RM-synthesis on Q & U data cubes           #
-#  get_rmsf_planes     ... calculate the RMSF for a cube of data              #
-#  do_rmclean_hogbom   ... perform Hogbom RM-clean on a dirty FDF             #
-#  fits_make_lin_axis  ... create an array of absica values for a lin axis    #
-#  extrap              ... interpolate and extrapolate an array               #
-#  fit_rmsf            ... fit a Gaussian to the main lobe of the RMSF        #
-#  gauss1D             ... return a function to evaluate a 1D Gaussian        #
-#  detect_peak         ... detect the extent of a peak in a 1D array          #
-#  measure_FDF_parms   ... measure parameters of a Faraday dispersion func    #
-#  norm_cdf            ... calculate the CDF of a Normal distribution         #
-#  cdf_percentile      ... return the value at the given percentile of a CDF  #
-#  calc_sigma_add      ... calculate most likely additional scatter           #
-#  calc_normal_tests   ... calculate metrics measuring deviation from normal  #
-#  measure_qu_complexity  ... measure the complexity of a q & u spectrum      #
-#  measure_fdf_complexity  ... measure the complexity of a clean FDF spectrum #
-#                                                                             #
-# DEPRECATED CODE ------------------------------------------------------------#
-#                                                                             #
-#  do_rmsynth          ... perform RM-synthesis on Q & U data by spectrum     #
-#  get_RMSF            ... calculate the RMSF for a 1D wavelength^2 array     #
-#  do_rmclean          ... perform Hogbom RM-clean on a dirty FDF             #
-#  plot_complexity     ... plot the residual, PDF and CDF (deprecated)        #
-#                                                                             #
-# =============================================================================#
-#                                                                             #
-# The MIT License (MIT)                                                       #
-#                                                                             #
-# Copyright (c) 2015 - 2018 Cormac R. Purcell                                 #
-#                                                                             #
-# Permission is hereby granted, free of charge, to any person obtaining a     #
-# copy of this software and associated documentation files (the "Software"),  #
-# to deal in the Software without restriction, including without limitation   #
-# the rights to use, copy, modify, merge, publish, distribute, sublicense,    #
-# and/or sell copies of the Software, and to permit persons to whom the       #
-# Software is furnished to do so, subject to the following conditions:        #
-#                                                                             #
-# The above copyright notice and this permission notice shall be included in  #
-# all copies or substantial portions of the Software.                         #
-#                                                                             #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR  #
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,    #
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE #
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER      #
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING     #
-# FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER         #
-# DEALINGS IN THE SOFTWARE.                                                   #
-#                                                                             #
-# =============================================================================#
-
+# -*- coding: utf-8 -*-
 import gc
 import math as m
 from typing import NamedTuple, Optional
@@ -67,9 +7,7 @@ from typing import NamedTuple, Optional
 import finufft
 import numpy as np
 from tqdm.auto import tqdm, trange
-from utils.mpfit import mpfit
-
-from rmtools_lite.utils.misc import (
+from rm_lite.utils.misc import (
     MAD,
     calc_mom2_FDF,
     calc_parabola_vertex,
@@ -77,11 +15,7 @@ from rmtools_lite.utils.misc import (
     toscalar,
 )
 
-# Constants
-C = 2.99792458e8
 
-
-# -----------------------------------------------------------------------------#
 class RMsynthResults(NamedTuple):
     """Results of the RM-synthesis calculation"""
 
