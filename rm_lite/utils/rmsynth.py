@@ -200,8 +200,6 @@ class RMSFResults(NamedTuple):
     """The FWHM of the RMSF main lobe"""
     fit_status_array: np.ndarray
     """The status of the RMSF fit"""
-    lam_sq_0_m2: float
-    """The reference lambda^2 value"""
 
 
 def get_rmsf_nufft(
@@ -224,10 +222,10 @@ def get_rmsf_nufft(
 
     # Set the mask array (default to 1D, no masked channels)
     if mask_array is None:
-        mask_array = np.zeros_like(lambda_sq_arr_m2, dtype="bool")
+        mask_array = np.zeros_like(lambda_sq_arr_m2, dtype=bool)
         n_dimension = 1
     else:
-        mask_array = mask_array.astype("bool")
+        mask_array = mask_array.astype(bool)
         n_dimension = len(mask_array.shape)
 
     # Sanity checks on array sizes
@@ -345,7 +343,6 @@ def get_rmsf_nufft(
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_arr=fwhm_rmsf_arr,
         fit_status_array=fit_status_array,
-        lam_sq_0_m2=lam_sq_0_m2,
     )
 
 

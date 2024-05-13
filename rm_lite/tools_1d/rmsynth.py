@@ -92,33 +92,39 @@ def run_rmsynth(
     d_phi_radm2: Optional[float] = None,
     n_samples: Optional[float] = 10.0,
     weight_type: Literal["variance", "uniform"] = "variance",
-    fit_rmsf=False,
+    do_fit_rmsf=False,
     # phi_noise_radm2=1e6,
     units: str = "Jy/beam",
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
 ):
-    if stokes_i_array is not None:
-        fractional_spectra = create_fractional_spectra(
-            freq_array_hz=freq_array_hz,
-            stokes_i_array=stokes_i_array,
-            stokes_q_array=stokes_q_array,
-            stokes_u_array=stokes_u_array,
-            stokes_i_error_array=stokes_i_error_array,
-            stokes_q_error_array=stokes_q_error_array,
-            stokes_u_error_array=stokes_u_error_array,
-            fit_order=fit_order,
-            fit_function=fit_function,
-            stokes_i_model_array=stokes_i_model_array,
+    if stokes_i_array is None:
+        logger.warning(
+            "Stokes I array not provided. No fractional polarization will be calculated."
         )
-        stokes_q_array, stokes_u_array, stokes_q_error_array, stokes_u_error_array = (
-            fractional_spectra.stokes_q_array,
-            fractional_spectra.stokes_u_array,
-            fractional_spectra.stokes_q_error_array,
-            fractional_spectra.stokes_u_error_array,
-        )
+        stokes_i_array = np.ones_like(stokes_q_array)
+        stokes_i_error_array = np.zeros_like(stokes_q_array)
 
-    rmsynth_params = compute_rmsynth_params(
+    fractional_spectra = create_fractional_spectra(
+        freq_array_hz=freq_array_hz,
+        stokes_i_array=stokes_i_array,
+        stokes_q_array=stokes_q_array,
+        stokes_u_array=stokes_u_array,
+        stokes_i_error_array=stokes_i_error_array,
+        stokes_q_error_array=stokes_q_error_array,
+        stokes_u_error_array=stokes_u_error_array,
+        fit_order=fit_order,
+        fit_function=fit_function,
+        stokes_i_model_array=stokes_i_model_array,
+    )
+    stokes_q_array, stokes_u_array, stokes_q_error_array, stokes_u_error_array = (
+        fractional_spectra.stokes_q_array,
+        fractional_spectra.stokes_u_array,
+        fractional_spectra.stokes_q_error_array,
+        fractional_spectra.stokes_u_error_array,
+    )
+
+    lambda_sq_arr_m2, phi_arr_radm2, weight_array = compute_rmsynth_params(
         freq_array_hz=freq_array_hz,
         stokes_qu_error_array=np.sqrt(
             stokes_q_error_array**2 + stokes_u_error_array**2
@@ -130,173 +136,168 @@ def run_rmsynth(
         weight_type=weight_type,
     )
 
-    startTime = time.time()
+    tick = time.time()
 
     # Perform RM-synthesis on the spectrum
     fdf_dirty_cube, lam_sq_0_m2 = rmsynth_nufft(
         stokes_q_array=stokes_q_array,
         stokes_u_array=stokes_u_array,
-        lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
-        phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-        weight_array=rmsynth_params.weight_array,
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        phi_arr_radm2=phi_arr_radm2,
+        weight_array=weight_array,
         lam_sq_0_m2=0 if super_resolution else None,
     )
 
     # Calculate the Rotation Measure Spread Function
-    RMSFArr, phi2Arr_radm2, fwhmRMSFArr, fitStatArr, _ = get_rmsf_nufft(
-        lambdaSqArr_m2=lambdaSqArr_m2,
-        phiArr_radm2=phiArr_radm2,
-        weightArr=weightArr,
-        mskArr=~np.isfinite(qArr),
-        lam0Sq_m2=lam0Sq_m2,
-        double=True,
-        fitRMSF=fitRMSF or super_resolution,
-        fitRMSFreal=super_resolution,
-        nBits=nBits,
-        verbose=verbose,
-        log=log,
+    rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_array = get_rmsf_nufft(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        phi_arr_radm2=phi_arr_radm2,
+        weight_array=weight_array,
+        lam_sq_0_m2=lam_sq_0_m2,
+        super_resolution=super_resolution,
+        mask_array=~np.isfinite(stokes_q_array) | ~np.isfinite(stokes_u_array),
+        do_fit_rmsf=do_fit_rmsf or super_resolution,
+        do_fit_rmsf_real=super_resolution,
     )
-    fwhmRMSF = float(fwhmRMSFArr)
 
-    endTime = time.time()
-    cputime = endTime - startTime
-    if verbose:
-        log("> RM-synthesis completed in %.2f seconds." % cputime)
+    tock = time.time()
+    cpu_time = tock - tick
+    logger.info(f"RM-synthesis completed in {cpu_time*1000:.2f}ms.")
 
     # Convert Stokes I model to polarization reference frequency. If lambda^2_0 is
     # non-zero, use that as polarization reference frequency and adapt Stokes I model.
     # If lambda^2_0 is zero, make polarization reference frequency equal to
     # Stokes I reference frequency.
 
-    if lam0Sq_m2 == 0:  # Rudnick-Cotton adapatation
-        freq0_Hz = fit_result.reference_frequency_Hz
-    else:  # standard RM-synthesis
-        freq0_Hz = C / m.sqrt(lam0Sq_m2)
-        if stokes_i_model_array is None:
-            fit_result = renormalize_StokesI_model(fit_result, freq0_Hz)
-        else:
-            fit_result = fit_result.with_options(reference_frequency_Hz=freq0_Hz)
+    # if lam_sq_0_m2 == 0:  # Rudnick-Cotton adapatation
+    #     freq0_Hz = fit_result.reference_frequency_Hz
+    # else:  # standard RM-synthesis
+    #     freq0_Hz = C / m.sqrt(lam_sq_0_m2)
+    #     if stokes_i_model_array is None:
+    #         fit_result = renormalize_StokesI_model(fit_result, freq0_Hz)
+    #     else:
+    #         fit_result = fit_result.with_options(reference_frequency_Hz=freq0_Hz)
 
-    # Set Ifreq0 (Stokes I at reference frequency) from either supplied model
-    # (interpolated as required) or fit model, as appropriate.
-    # Multiply the dirty FDF by Ifreq0 to recover the PI
-    if stokes_i_model_array is None:
-        Ifreq0 = calculate_StokesI_model(fit_result, freq0_Hz)
-    elif stokes_i_model_array is not None:
-        modStokesI_interp = interp1d(freqArr_Hz, stokes_i_model_array)
-        Ifreq0 = modStokesI_interp(freq0_Hz)
-    dirtyFDF *= Ifreq0  # FDF is in fracpol units initially, convert back to flux
+    # # Set Ifreq0 (Stokes I at reference frequency) from either supplied model
+    # # (interpolated as required) or fit model, as appropriate.
+    # # Multiply the dirty FDF by Ifreq0 to recover the PI
+    # if stokes_i_model_array is None:
+    #     Ifreq0 = calculate_StokesI_model(fit_result, freq0_Hz)
+    # elif stokes_i_model_array is not None:
+    #     modStokesI_interp = interp1d(freqArr_Hz, stokes_i_model_array)
+    #     Ifreq0 = modStokesI_interp(freq0_Hz)
+    # dirtyFDF *= Ifreq0  # FDF is in fracpol units initially, convert back to flux
 
-    # Calculate the theoretical noise in the FDF !!Old formula only works for wariance weights!
-    weightArr = np.where(np.isnan(weightArr), 0.0, weightArr)
-    dFDFth = np.abs(Ifreq0) * np.sqrt(
-        np.nansum(weightArr**2 * np.nan_to_num(stokes_qu_error_array) ** 2)
-        / (np.sum(weightArr)) ** 2
-    )
+    # # Calculate the theoretical noise in the FDF !!Old formula only works for wariance weights!
+    # weight_array = np.where(np.isnan(weight_array), 0.0, weight_array)
+    # dFDFth = np.abs(Ifreq0) * np.sqrt(
+    #     np.nansum(weight_array**2 * np.nan_to_num(stokes_qu_error_array) ** 2)
+    #     / (np.sum(weight_array)) ** 2
+    # )
 
-    # Measure the parameters of the dirty FDF
-    # Use the theoretical noise to calculate uncertainties
-    mDict = measure_FDF_parms(
-        FDF=dirtyFDF,
-        phiArr=phiArr_radm2,
-        fwhmRMSF=fwhmRMSF,
-        dFDF=dFDFth,
-        lamSqArr_m2=lambdaSqArr_m2,
-        lam0Sq=lam0Sq_m2,
-    )
-    mDict["Ifreq0"] = toscalar(Ifreq0)
-    mDict["polyCoeffs"] = ",".join(
-        [str(x.astype(np.float32)) for x in fit_result.params]
-    )
-    mDict["polyCoefferr"] = ",".join(
-        [str(x.astype(np.float32)) for x in fit_result.perror]
-    )
-    mDict["fit_order"] = fit_result.fit_order
-    mDict["IfitStat"] = fit_result.fitStatus
-    mDict["IfitChiSqRed"] = fit_result.chiSqRed
-    mDict["fit_function"] = fit_function
-    mDict["lam0Sq_m2"] = toscalar(lam0Sq_m2)
-    mDict["freq0_Hz"] = toscalar(freq0_Hz)
-    mDict["fwhmRMSF"] = toscalar(fwhmRMSF)
-    mDict["dQU"] = toscalar(nanmedian(stokes_qu_error_array))
-    mDict["dFDFth"] = toscalar(dFDFth)
-    mDict["units"] = units
+    # # Measure the parameters of the dirty FDF
+    # # Use the theoretical noise to calculate uncertainties
+    # mDict = measure_FDF_parms(
+    #     FDF=dirtyFDF,
+    #     phiArr=phi_arr_radm2,
+    #     fwhmRMSF=fwhmRMSF,
+    #     dFDF=dFDFth,
+    #     lamSqArr_m2=lambda_sq_arr_m2,
+    #     lam0Sq=lam_sq_0_m2,
+    # )
+    # mDict["Ifreq0"] = toscalar(Ifreq0)
+    # mDict["polyCoeffs"] = ",".join(
+    #     [str(x.astype(np.float32)) for x in fit_result.params]
+    # )
+    # mDict["polyCoefferr"] = ",".join(
+    #     [str(x.astype(np.float32)) for x in fit_result.perror]
+    # )
+    # mDict["fit_order"] = fit_result.fit_order
+    # mDict["IfitStat"] = fit_result.fitStatus
+    # mDict["IfitChiSqRed"] = fit_result.chiSqRed
+    # mDict["fit_function"] = fit_function
+    # mDict["lam_sq_0_m2"] = toscalar(lam_sq_0_m2)
+    # mDict["freq0_Hz"] = toscalar(freq0_Hz)
+    # mDict["fwhmRMSF"] = toscalar(fwhmRMSF)
+    # mDict["dQU"] = toscalar(nanmedian(stokes_qu_error_array))
+    # mDict["dFDFth"] = toscalar(dFDFth)
+    # mDict["units"] = units
 
-    if (fit_result.fitStatus >= 128) and verbose:
-        log("WARNING: Stokes I model contains negative values!")
-    elif (fit_result.fitStatus >= 64) and verbose:
-        log("Caution: Stokes I model has low signal-to-noise.")
+    # if (fit_result.fitStatus >= 128) and verbose:
+    #     logger.warning("Stokes I model contains negative values!")
+    # elif (fit_result.fitStatus >= 64) and verbose:
+    #     logger.warning("Stokes I model has low signal-to-noise.")
 
-    # Add information on nature of channels:
-    good_channels = np.where(np.logical_and(weightArr != 0, np.isfinite(qArr)))[0]
-    mDict["min_freq"] = float(np.min(freqArr_Hz[good_channels]))
-    mDict["max_freq"] = float(np.max(freqArr_Hz[good_channels]))
-    mDict["N_channels"] = good_channels.size
-    mDict["median_channel_width"] = float(np.median(np.diff(freqArr_Hz)))
+    # # Add information on nature of channels:
+    # good_channels = np.where(np.logical_and(weight_array != 0, np.isfinite(qArr)))[0]
+    # mDict["min_freq"] = float(np.min(freqArr_Hz[good_channels]))
+    # mDict["max_freq"] = float(np.max(freqArr_Hz[good_channels]))
+    # mDict["N_channels"] = good_channels.size
+    # mDict["median_channel_width"] = float(np.median(np.diff(freqArr_Hz)))
 
-    # Measure the complexity of the q and u spectra
-    # Use 'ampPeakPIfitEff' for bias correct PI
-    mDict["fracPol"] = toscalar(mDict["ampPeakPIfitEff"] / (Ifreq0))
-    mD, pD = measure_qu_complexity(
-        freqArr_Hz=freqArr_Hz,
-        qArr=qArr,
-        uArr=uArr,
-        dqArr=dqArr,
-        duArr=duArr,
-        fracPol=mDict["fracPol"],
-        psi0_deg=mDict["polAngle0Fit_deg"],
-        RM_radm2=mDict["phiPeakPIfit_rm2"],
-    )
-    mDict.update(mD)
+    # # Measure the complexity of the q and u spectra
+    # # Use 'ampPeakPIfitEff' for bias correct PI
+    # mDict["fracPol"] = toscalar(mDict["ampPeakPIfitEff"] / (Ifreq0))
+    # mD, pD = measure_qu_complexity(
+    #     freqArr_Hz=freqArr_Hz,
+    #     qArr=qArr,
+    #     uArr=uArr,
+    #     dqArr=dqArr,
+    #     duArr=duArr,
+    #     fracPol=mDict["fracPol"],
+    #     psi0_deg=mDict["polAngle0Fit_deg"],
+    #     RM_radm2=mDict["phiPeakPIfit_rm2"],
+    # )
+    # mDict.update(mD)
 
-    # add array dictionary
-    aDict = dict()
-    aDict["phiArr_radm2"] = phiArr_radm2
-    aDict["phi2Arr_radm2"] = phi2Arr_radm2
-    aDict["RMSFArr"] = RMSFArr
-    aDict["freqArr_Hz"] = freqArr_Hz
-    aDict["weightArr"] = weightArr
-    aDict["dirtyFDF"] = dirtyFDF
+    # # add array dictionary
+    # aDict = dict()
+    # aDict["phi_arr_radm2"] = phi_arr_radm2
+    # aDict["phi2Arr_radm2"] = phi2Arr_radm2
+    # aDict["RMSFArr"] = RMSFArr
+    # aDict["freqArr_Hz"] = freqArr_Hz
+    # aDict["weight_array"] = weight_array
+    # aDict["dirtyFDF"] = dirtyFDF
 
-    if verbose:
-        # Print the results to the screen
-        log()
-        log("-" * 80)
-        log("RESULTS:\n")
-        log("FWHM RMSF = %.4g rad/m^2" % (mDict["fwhmRMSF"]))
+    # if verbose:
+    #     # Print the results to the screen
+    #     log()
+    #     log("-" * 80)
+    #     log("RESULTS:\n")
+    #     log("FWHM RMSF = %.4g rad/m^2" % (mDict["fwhmRMSF"]))
 
-        log(
-            "Pol Angle = %.4g (+/-%.4g) deg"
-            % (mDict["polAngleFit_deg"], mDict["dPolAngleFit_deg"])
-        )
-        log(
-            "Pol Angle 0 = %.4g (+/-%.4g) deg"
-            % (mDict["polAngle0Fit_deg"], mDict["dPolAngle0Fit_deg"])
-        )
-        log(
-            "Peak FD = %.4g (+/-%.4g) rad/m^2"
-            % (mDict["phiPeakPIfit_rm2"], mDict["dPhiPeakPIfit_rm2"])
-        )
-        log("freq0_GHz = %.4g " % (mDict["freq0_Hz"] / 1e9))
-        log("I freq0 = %.4g %s" % (mDict["Ifreq0"], units))
-        log(
-            "Peak PI = %.4g (+/-%.4g) %s"
-            % (mDict["ampPeakPIfit"], mDict["dAmpPeakPIfit"], units)
-        )
-        log("QU Noise = %.4g %s" % (mDict["dQU"], units))
-        log("FDF Noise (theory)   = %.4g %s" % (mDict["dFDFth"], units))
-        log("FDF Noise (Corrected MAD) = %.4g %s" % (mDict["dFDFcorMAD"], units))
-        log("FDF SNR = %.4g " % (mDict["snrPIfit"]))
-        log(
-            "sigma_add(q) = %.4g (+%.4g, -%.4g)"
-            % (mDict["sigmaAddQ"], mDict["dSigmaAddPlusQ"], mDict["dSigmaAddMinusQ"])
-        )
-        log(
-            "sigma_add(u) = %.4g (+%.4g, -%.4g)"
-            % (mDict["sigmaAddU"], mDict["dSigmaAddPlusU"], mDict["dSigmaAddMinusU"])
-        )
-        log("Fitted polynomial order = {} ".format(mDict["fit_order"]))
-        log()
-        log("-" * 80)
+    #     log(
+    #         "Pol Angle = %.4g (+/-%.4g) deg"
+    #         % (mDict["polAngleFit_deg"], mDict["dPolAngleFit_deg"])
+    #     )
+    #     log(
+    #         "Pol Angle 0 = %.4g (+/-%.4g) deg"
+    #         % (mDict["polAngle0Fit_deg"], mDict["dPolAngle0Fit_deg"])
+    #     )
+    #     log(
+    #         "Peak FD = %.4g (+/-%.4g) rad/m^2"
+    #         % (mDict["phiPeakPIfit_rm2"], mDict["dPhiPeakPIfit_rm2"])
+    #     )
+    #     log("freq0_GHz = %.4g " % (mDict["freq0_Hz"] / 1e9))
+    #     log("I freq0 = %.4g %s" % (mDict["Ifreq0"], units))
+    #     log(
+    #         "Peak PI = %.4g (+/-%.4g) %s"
+    #         % (mDict["ampPeakPIfit"], mDict["dAmpPeakPIfit"], units)
+    #     )
+    #     log("QU Noise = %.4g %s" % (mDict["dQU"], units))
+    #     log("FDF Noise (theory)   = %.4g %s" % (mDict["dFDFth"], units))
+    #     log("FDF Noise (Corrected MAD) = %.4g %s" % (mDict["dFDFcorMAD"], units))
+    #     log("FDF SNR = %.4g " % (mDict["snrPIfit"]))
+    #     log(
+    #         "sigma_add(q) = %.4g (+%.4g, -%.4g)"
+    #         % (mDict["sigmaAddQ"], mDict["dSigmaAddPlusQ"], mDict["dSigmaAddMinusQ"])
+    #     )
+    #     log(
+    #         "sigma_add(u) = %.4g (+%.4g, -%.4g)"
+    #         % (mDict["sigmaAddU"], mDict["dSigmaAddPlusU"], mDict["dSigmaAddMinusU"])
+    #     )
+    #     log("Fitted polynomial order = {} ".format(mDict["fit_order"]))
+    #     log()
+    #     log("-" * 80)
 
-    return mDict, aDict
+    # return mDict, aDict
