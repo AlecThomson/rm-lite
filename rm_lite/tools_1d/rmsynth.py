@@ -14,10 +14,8 @@ from scipy.interpolate import interp1d
 from rm_lite.utils import rmsynth
 from rm_lite.utils.misc import (
     calculate_StokesI_model,
-    create_frac_spectra,
-    nanmedian,
+    create_fractional_spectra,
     renormalize_StokesI_model,
-    toscalar,
 )
 from rm_lite.utils.rmsynth import (
     do_rmsynth_planes,
@@ -98,7 +96,7 @@ def run_rmsynth(
     stokes_i_array: Optional[np.ndarray] = None,
     stokes_i_error_array: Optional[np.ndarray] = None,
     stokes_i_model_array: Optional[np.ndarray] = None,
-    poly_ord: int = 2,
+    fit_order: int = 2,
     phi_max_radm2: Optional[float] = None,
     d_phi_radm2: Optional[float] = None,
     n_samples: Optional[float] = 10.0,
@@ -118,9 +116,15 @@ def run_rmsynth(
             stokes_i_error_array=stokes_i_error_array,
             stokes_q_error_array=stokes_q_error_array,
             stokes_u_error_array=stokes_u_error_array,
-            poly_ord=poly_ord,
+            fit_order=fit_order,
             fit_function=fit_function,
             stokes_i_model_array=stokes_i_model_array,
+        )
+        stokes_q_array, stokes_u_array, stokes_q_error_array, stokes_u_error_array = (
+            fractional_spectra.stokes_q_array,
+            fractional_spectra.stokes_u_array,
+            fractional_spectra.stokes_q_error_array,
+            fractional_spectra.stokes_u_error_array,
         )
 
     rmsynth_params = compute_rmsynth_params(
@@ -216,7 +220,7 @@ def run_rmsynth(
     mDict["polyCoefferr"] = ",".join(
         [str(x.astype(np.float32)) for x in fit_result.perror]
     )
-    mDict["poly_ord"] = fit_result.poly_ord
+    mDict["fit_order"] = fit_result.fit_order
     mDict["IfitStat"] = fit_result.fitStatus
     mDict["IfitChiSqRed"] = fit_result.chiSqRed
     mDict["fit_function"] = fit_function
@@ -300,7 +304,7 @@ def run_rmsynth(
             "sigma_add(u) = %.4g (+%.4g, -%.4g)"
             % (mDict["sigmaAddU"], mDict["dSigmaAddPlusU"], mDict["dSigmaAddMinusU"])
         )
-        log("Fitted polynomial order = {} ".format(mDict["poly_ord"]))
+        log("Fitted polynomial order = {} ".format(mDict["fit_order"]))
         log()
         log("-" * 80)
 

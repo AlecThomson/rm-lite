@@ -259,13 +259,13 @@ def static_fit(
     freq_array_hz: np.ndarray,
     stokes_i_array: np.ndarray,
     stokes_i_error_array: np.ndarray,
-    poly_ord: int = 2,
+    fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
     if fit_type == "linear":
-        fit_func = polynomial(poly_ord)
+        fit_func = polynomial(fit_order)
     elif fit_type == "log":
-        fit_func = power_law(poly_ord)
+        fit_func = power_law(fit_order)
 
     popt, pcov = curve_fit(
         fit_func,
@@ -273,11 +273,12 @@ def static_fit(
         stokes_i_array,
         sigma=stokes_i_error_array,
         absolute_sigma=True,
+        p0=np.zeros(fit_order + 1),
     )
     stokes_i_model_array = fit_func(freq_array_hz, *popt)
     ssr = np.sum((stokes_i_array - stokes_i_model_array) ** 2)
     aic = akaike_info_criterion_lsq(
-        ssr=ssr, n_params=poly_ord + 1, n_samples=len(freq_array_hz)
+        ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_array_hz)
     )
 
     return FitResult(
@@ -293,10 +294,10 @@ def dynamic_fit(
     freq_array_hz: np.ndarray,
     stokes_i_array: np.ndarray,
     stokes_i_error_array: np.ndarray,
-    poly_ord: int = 2,
+    fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
-    orders = np.arange(1, poly_ord + 1)
+    orders = np.arange(1, fit_order + 1)
     fit_results = []
 
     for i, order in enumerate(orders):
@@ -319,15 +320,15 @@ def fit_stokes_i_model(
     freq_array_hz: np.ndarray,
     stokes_i_array: np.ndarray,
     stokes_i_error_array: np.ndarray,
-    poly_ord: int = 2,
+    fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
-    if poly_ord < 0:
+    if fit_order < 0:
         return dynamic_fit(
             freq_array_hz,
             stokes_i_array,
             stokes_i_error_array,
-            abs(poly_ord),
+            abs(fit_order),
             fit_type,
         )
 
@@ -335,7 +336,7 @@ def fit_stokes_i_model(
         freq_array_hz,
         stokes_i_array,
         stokes_i_error_array,
-        poly_ord,
+        fit_order,
         fit_type,
     )
 
@@ -356,7 +357,7 @@ def create_fractional_spectra(
     stokes_i_error_array: np.ndarray,
     stokes_q_error_array: np.ndarray,
     stokes_u_error_array: np.ndarray,
-    poly_ord: int = 2,
+    fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_model_array: Optional[np.ndarray] = None,
 ) -> FractionalSpectra:
@@ -388,7 +389,7 @@ def create_fractional_spectra(
             freq_array_hz,
             stokes_i_array,
             stokes_i_error_array,
-            poly_ord,
+            fit_order,
             fit_function,
         )
 
