@@ -49,7 +49,7 @@ from utils.util_plotTk import (
 )
 
 from rm_lite.tools_1d.rmsynth import saveOutput
-from rm_lite.utils.misc import (
+from rm_lite.utils.fitting import (
     MAD,
     create_frac_spectra,
     nanmedian,
@@ -57,7 +57,7 @@ from rm_lite.utils.misc import (
     progress,
     toscalar,
 )
-from rm_lite.utils.rmsynth import (
+from rm_lite.utils.synthesis import (
     calc_parabola_vertex,
     extrap,
     fit_rmsf,

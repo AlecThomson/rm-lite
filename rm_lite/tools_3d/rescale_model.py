@@ -52,7 +52,7 @@ from functools import partial
 import astropy.io.fits as pf
 import numpy as np
 
-from rm_lite.utils.misc import FitResult, renormalize_StokesI_model
+from rm_lite.utils.fitting import FitResult, renormalize_StokesI_model
 
 
 def command_line():

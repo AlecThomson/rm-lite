@@ -43,8 +43,8 @@ import time
 import astropy.io.fits as pf
 import numpy as np
 
-from rm_lite.utils.misc import interp_images
-from rm_lite.utils.rmsynth import do_rmsynth_planes, get_rmsf_planes
+from rm_lite.utils.fitting import interp_images
+from rm_lite.utils.synthesis import do_rmsynth_planes, get_rmsf_planes
 
 if sys.version_info.major == 2:
     print("RM-tools will no longer run with Python 2! Please use Python 3.")

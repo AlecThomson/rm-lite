@@ -11,7 +11,7 @@ from scipy import signal
 from scipy import optimize
 from astropy.modeling.models import Gaussian1D
 
-from rm_lite.utils.misc import (
+from rm_lite.utils.fitting import (
     MAD,
     calc_mom2_FDF,
     calc_parabola_vertex,

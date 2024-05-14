@@ -47,7 +47,7 @@ from tqdm.contrib.concurrent import process_map
 from utils.util_FITS import strip_fits_dims
 
 from rm_lite.tools_3d.rmsynth import readFitsCube
-from rm_lite.utils.misc import MAD, calculate_StokesI_model, fit_StokesI_model
+from rm_lite.utils.fitting import MAD, calculate_StokesI_model, fit_StokesI_model
 
 # -----------------------------------------------------------------------------#
 

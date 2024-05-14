@@ -60,7 +60,7 @@ import numpy as np
 from utils.util_plotTk import CustomNavbar, plot_Ipqu_spectra_fig
 
 from rm_lite.tools_1d.rmsynth import readFile
-from rm_lite.utils.misc import (
+from rm_lite.utils.fitting import (
     calculate_StokesI_model,
     create_frac_spectra,
     toscalar,

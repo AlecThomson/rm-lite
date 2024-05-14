@@ -10,11 +10,11 @@ from astropy.constants import c as speed_of_light
 import numpy as np
 from scipy.interpolate import interp1d
 
-from rm_lite.utils.misc import (
+from rm_lite.utils.fitting import (
     create_fractional_spectra,
     renormalize_StokesI_model,
 )
-from rm_lite.utils.rmsynth import (
+from rm_lite.utils.synthesis import (
     rmsynth_nufft,
     get_rmsf_nufft,
     measure_FDF_parms,
