@@ -1,31 +1,78 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import gc
-import math as m
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Literal
 
+from astropy.constants import c as speed_of_light
 import finufft
 import numpy as np
 from tqdm.auto import tqdm, trange
-from scipy import signal
 from scipy import optimize
 from astropy.modeling.models import Gaussian1D
 
 from rm_lite.utils.fitting import (
-    MAD,
     calc_mom2_FDF,
     calc_parabola_vertex,
     create_pqu_spectra_burn,
-    toscalar,
 )
 
 from rm_lite.utils.logging import logger
 
 
+class RMSynthParams(NamedTuple):
+    lambda_sq_arr_m2: np.ndarray
+    phi_arr_radm2: np.ndarray
+    weight_array: np.ndarray
+
+
+def compute_rmsynth_params(
+    freq_array_hz: np.ndarray,
+    stokes_qu_error_array: np.ndarray,
+    d_phi_radm2: Optional[float] = None,
+    n_samples: Optional[float] = 10.0,
+    phi_max_radm2: Optional[float] = None,
+    super_resolution: bool = False,
+    weight_type: Literal["variance", "uniform"] = "variance",
+) -> RMSynthParams:
+    lambda_sq_arr_m2 = (speed_of_light.value / freq_array_hz) ** 2.0
+
+    fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
+        lambda_sq_arr_m2, super_resolution
+    )
+
+    if d_phi_radm2 is None:
+        if n_samples is None:
+            raise ValueError("Either d_phi_radm2 or n_samples must be provided.")
+        d_phi_radm2 = fwhm_rmsf_radm2 / n_samples
+    if phi_max_radm2 is None:
+        phi_max_radm2 = np.sqrt(3.0) / d_lambda_sq_max_m2
+        phi_max_radm2 = max(
+            phi_max_radm2, fwhm_rmsf_radm2 * 10.0
+        )  # Force the minimum phiMax to 10 FWHM
+
+    phi_arr_radm2 = make_phi_array(phi_max_radm2, d_phi_radm2)
+
+    logger.debug(
+        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
+    )
+
+    # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
+    if weight_type == "variance":
+        weight_array = 1.0 / stokes_qu_error_array**2
+    else:
+        weight_array = np.ones_like(freq_array_hz)
+
+    return RMSynthParams(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        phi_arr_radm2=phi_arr_radm2,
+        weight_array=weight_array,
+    )
+
+
 def make_phi_array(
     phi_max_radm2: float,
     d_phi_radm2: float,
-):
+) -> np.ndarray:
     # Faraday depth sampling. Zero always centred on middle channel
     n_chan_rm = int(np.round(abs((phi_max_radm2 - 0.0) / d_phi_radm2)) * 2.0 + 1.0)
     max_phi_radm2 = (n_chan_rm - 1.0) * d_phi_radm2 / 2.0
@@ -304,9 +351,11 @@ def get_rmsf_nufft(
         for i in trange(num_pixels, desc="Fitting RMSF by pixel"):
             try:
                 fitted_rmsf = fit_rmsf(
-                    rmsf_to_fit_array=rmsf_cube[:, i].real
-                    if do_fit_rmsf_real
-                    else np.abs(rmsf_cube[:, i]),
+                    rmsf_to_fit_array=(
+                        rmsf_cube[:, i].real
+                        if do_fit_rmsf_real
+                        else np.abs(rmsf_cube[:, i])
+                    ),
                     phi_double_arr_radm2=phi_double_arr_radm2,
                     fwhm_rmsf_radm2=fwhm_rmsf_radm2,
                 )

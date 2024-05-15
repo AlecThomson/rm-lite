@@ -4,12 +4,13 @@ from typing import Callable, Literal, NamedTuple, Optional, Tuple
 
 from astropy.stats import akaike_info_criterion_lsq
 import numpy as np
-import numpy.ma as ma
-import scipy.ndimage as ndi
 from scipy.stats import norm
 from scipy.optimize import curve_fit
-
 from uncertainties import unumpy
+
+from rm_lite.utils.logging import logger
+
+logger.setLevel("INFO")
 
 
 class FitResult(NamedTuple):
@@ -17,10 +18,8 @@ class FitResult(NamedTuple):
     pcov: np.ndarray
     stokes_i_model_func: Callable
     aic: float
-    stokes_i_model_array: np.ndarray
 
 
-# -----------------------------------------------------------------------------#
 def calc_mom2_FDF(FDF, phiArr):
     """
     Calculate the 2nd moment of the polarised intensity FDF. Can be applied to
@@ -34,7 +33,6 @@ def calc_mom2_FDF(FDF, phiArr):
     return phiMom2
 
 
-# -----------------------------------------------------------------------------#
 def calc_parabola_vertex(x1, y1, x2, y2, x3, y3):
     """
     Calculate the vertex of a parabola given three adjacent points.
@@ -210,6 +208,10 @@ def renormalize_StokesI_model(
 
 def polynomial(order: int) -> Callable:
     def poly_func(x: np.ndarray, *params) -> np.ndarray:
+        if len(params) != order + 1:
+            raise ValueError(
+                f"Polynomial function of order {order} requires {order + 1} parameters, {len(params)} given."
+            )
         result = 0
         for i in range(order + 1):
             result += params[i] * x**i
@@ -220,11 +222,14 @@ def polynomial(order: int) -> Callable:
 
 def power_law(order: int) -> Callable:
     def power_func(x: np.ndarray, *params) -> np.ndarray:
+        if len(params) != order + 1:
+            raise ValueError(
+                f"Power law function of order {order} requires {order + 1} parameters, {len(params)} given."
+            )
         power = 0
-
-        for i in range(order + 1):
-            power += params[i] * np.log10(x**i)
-        return x**power
+        for i in range(1, order + 1):
+            power += params[i] * np.log10(x) ** i
+        return params[0] * 10**power
 
     return power_func
 
@@ -235,7 +240,7 @@ def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> Tuple[float, int, in
     best_aic_idx = int(np.nanargmin(aics))
     best_aic = float(aics[best_aic_idx])
     best_n = int(n_param[best_aic_idx])
-    # logger.debug(f"Lowest AIC is {best_aic}, with {best_n} params.")
+    logger.debug(f"Lowest AIC is {best_aic}, with {best_n} params.")
     # Check if lower have diff < 2 in AIC
     aic_abs_diff = np.abs(aics - best_aic)
     bool_min_idx = np.zeros_like(aics).astype(bool)
@@ -249,14 +254,15 @@ def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> Tuple[float, int, in
     bestest_n = int(np.min(n_param[~bool_min_idx][potential_idx]))
     bestest_aic_idx = int(np.where(n_param == bestest_n)[0][0])
     bestest_aic = float(aics[bestest_aic_idx])
-    # logger.debug(
-    #     f"Model within 2 of lowest AIC found. Occam says to take AIC of {bestest_aic}, with {bestest_n} params."
-    # )
+    logger.debug(
+        f"Model within 2 of lowest AIC found. Occam says to take AIC of {bestest_aic}, with {bestest_n} params."
+    )
     return bestest_aic, bestest_n, bestest_aic_idx
 
 
 def static_fit(
     freq_array_hz: np.ndarray,
+    ref_freq_hz: float,
     stokes_i_array: np.ndarray,
     stokes_i_error_array: np.ndarray,
     fit_order: int = 2,
@@ -266,16 +272,21 @@ def static_fit(
         fit_func = polynomial(fit_order)
     elif fit_type == "log":
         fit_func = power_law(fit_order)
+    else:
+        raise ValueError(
+            f"Unknown fit type {fit_type} provided. Must be 'log' or 'linear'."
+        )
 
+    logger.debug(f"Fitting Stokes I model with {fit_type} model of order {fit_order}.")
     popt, pcov = curve_fit(
         fit_func,
-        freq_array_hz,
+        freq_array_hz / ref_freq_hz,
         stokes_i_array,
         sigma=stokes_i_error_array,
         absolute_sigma=True,
         p0=np.zeros(fit_order + 1),
     )
-    stokes_i_model_array = fit_func(freq_array_hz, *popt)
+    stokes_i_model_array = fit_func(freq_array_hz / ref_freq_hz, *popt)
     ssr = np.sum((stokes_i_array - stokes_i_model_array) ** 2)
     aic = akaike_info_criterion_lsq(
         ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_array_hz)
@@ -286,12 +297,12 @@ def static_fit(
         pcov=pcov,
         stokes_i_model_func=fit_func,
         aic=aic,
-        stokes_i_model_array=stokes_i_model_array,
     )
 
 
 def dynamic_fit(
     freq_array_hz: np.ndarray,
+    ref_freq_hz: float,
     stokes_i_array: np.ndarray,
     stokes_i_error_array: np.ndarray,
     fit_order: int = 2,
@@ -303,6 +314,7 @@ def dynamic_fit(
     for i, order in enumerate(orders):
         fit_result = static_fit(
             freq_array_hz,
+            ref_freq_hz,
             stokes_i_array,
             stokes_i_error_array,
             order,
@@ -318,6 +330,7 @@ def dynamic_fit(
 
 def fit_stokes_i_model(
     freq_array_hz: np.ndarray,
+    ref_freq_hz: float,
     stokes_i_array: np.ndarray,
     stokes_i_error_array: np.ndarray,
     fit_order: int = 2,
@@ -326,6 +339,7 @@ def fit_stokes_i_model(
     if fit_order < 0:
         return dynamic_fit(
             freq_array_hz,
+            ref_freq_hz,
             stokes_i_array,
             stokes_i_error_array,
             abs(fit_order),
@@ -334,6 +348,7 @@ def fit_stokes_i_model(
 
     return static_fit(
         freq_array_hz,
+        ref_freq_hz,
         stokes_i_array,
         stokes_i_error_array,
         fit_order,
@@ -347,6 +362,7 @@ class FractionalSpectra(NamedTuple):
     stokes_u_frac_array: np.ndarray
     stokes_q_frac_error_array: np.ndarray
     stokes_u_frac_error_array: np.ndarray
+    ref_freq_hz: float
 
 
 def create_fractional_spectra(
@@ -360,6 +376,7 @@ def create_fractional_spectra(
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_model_array: Optional[np.ndarray] = None,
+    stokes_i_model_error: Optional[np.ndarray] = None,
 ) -> FractionalSpectra:
     no_nan_idx = (
         np.isfinite(stokes_i_array)
@@ -372,6 +389,7 @@ def create_fractional_spectra(
     )
 
     freq_array_hz = freq_array_hz[no_nan_idx]
+    ref_freq_hz = np.mean(freq_array_hz[no_nan_idx])
     stokes_i_array = stokes_i_array[no_nan_idx]
     stokes_q_array = stokes_q_array[no_nan_idx]
     stokes_u_array = stokes_u_array[no_nan_idx]
@@ -379,20 +397,37 @@ def create_fractional_spectra(
     stokes_q_error_array = stokes_q_error_array[no_nan_idx]
     stokes_u_error_array = stokes_u_error_array[no_nan_idx]
 
-    stokes_i_uarray = unumpy.uarray(stokes_i_array, stokes_i_error_array)
+    # stokes_i_uarray = unumpy.uarray(stokes_i_array, stokes_i_error_array)
     stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
     stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)
     if stokes_i_model_array is not None:
-        stokes_i_model_uarray = unumpy.uarray(stokes_i_model_array, 0.0)
+        if stokes_i_model_error is None:
+            raise ValueError(
+                "If `stokes_i_model_array` is provided, `stokes_i_model_error` must also be provided."
+            )
+        stokes_i_model_uarray = unumpy.uarray(
+            stokes_i_model_array, stokes_i_model_error
+        )
     else:
-        fit_result = fit_stokes_i_model(
+        popt, pcov, stokes_i_model_func, aic = fit_stokes_i_model(
             freq_array_hz,
+            ref_freq_hz,
             stokes_i_array,
             stokes_i_error_array,
             fit_order,
             fit_function,
         )
-        stokes_i_model_array = fit_result.stokes_i_model_array
+        stokes_i_model_array = stokes_i_model_func(freq_array_hz / ref_freq_hz, *popt)
+        stokes_i_model_high = stokes_i_model_func(
+            freq_array_hz / ref_freq_hz, *(popt + np.sqrt(np.diag(pcov)))
+        )
+        stokes_i_model_low = stokes_i_model_func(
+            freq_array_hz / ref_freq_hz, *(popt - np.sqrt(np.diag(pcov)))
+        )
+        stokes_i_model_uarray = unumpy.uarray(
+            stokes_i_model_array,
+            0.5 * np.abs((stokes_i_model_high - stokes_i_model_low)),
+        )
 
     stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_uarray
     stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_uarray
@@ -408,6 +443,7 @@ def create_fractional_spectra(
         stokes_u_frac_array=stokes_u_frac_array,
         stokes_q_frac_error_array=stokes_q_frac_error_array,
         stokes_u_frac_error_array=stokes_u_frac_error_array,
+        ref_freq_hz=ref_freq_hz,
     )
 
 

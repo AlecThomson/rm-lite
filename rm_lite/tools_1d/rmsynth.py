@@ -4,78 +4,23 @@
 
 import logging
 import time
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, Optional
 
-from astropy.constants import c as speed_of_light
+
 import numpy as np
-from scipy.interpolate import interp1d
 
 from rm_lite.utils.fitting import (
     create_fractional_spectra,
-    renormalize_StokesI_model,
 )
 from rm_lite.utils.synthesis import (
     rmsynth_nufft,
     get_rmsf_nufft,
-    measure_FDF_parms,
-    measure_qu_complexity,
-    make_phi_array,
-    get_fwhm_rmsf,
+    compute_rmsynth_params,
 )
 
 from rm_lite.utils.logging import logger
 
 logger.setLevel(logging.INFO)
-
-
-class RMSynthParams(NamedTuple):
-    lambda_sq_arr_m2: np.ndarray
-    phi_arr_radm2: np.ndarray
-    weight_array: np.ndarray
-
-
-def compute_rmsynth_params(
-    freq_array_hz: np.ndarray,
-    stokes_qu_error_array: np.ndarray,
-    d_phi_radm2: Optional[float] = None,
-    n_samples: Optional[float] = 10.0,
-    phi_max_radm2: Optional[float] = None,
-    super_resolution: bool = False,
-    weight_type: Literal["variance", "uniform"] = "variance",
-) -> RMSynthParams:
-    lambda_sq_arr_m2 = (speed_of_light.value / freq_array_hz) ** 2.0
-
-    fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
-        lambda_sq_arr_m2, super_resolution
-    )
-
-    if d_phi_radm2 is None:
-        if n_samples is None:
-            raise ValueError("Either d_phi_radm2 or n_samples must be provided.")
-        d_phi_radm2 = fwhm_rmsf_radm2 / n_samples
-    if phi_max_radm2 is None:
-        phi_max_radm2 = np.sqrt(3.0) / d_lambda_sq_max_m2
-        phi_max_radm2 = max(
-            phi_max_radm2, fwhm_rmsf_radm2 * 10.0
-        )  # Force the minimum phiMax to 10 FWHM
-
-    phi_arr_radm2 = make_phi_array(phi_max_radm2, d_phi_radm2)
-
-    logger.info(
-        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
-    )
-
-    # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
-    if weight_type == "variance":
-        weight_array = 1.0 / stokes_qu_error_array**2
-    else:
-        weight_array = np.ones_like(freq_array_hz)
-
-    return RMSynthParams(
-        lambda_sq_arr_m2=lambda_sq_arr_m2,
-        phi_arr_radm2=phi_arr_radm2,
-        weight_array=weight_array,
-    )
 
 
 def run_rmsynth(
@@ -102,27 +47,33 @@ def run_rmsynth(
         logger.warning(
             "Stokes I array not provided. No fractional polarization will be calculated."
         )
-        stokes_i_array = np.ones_like(stokes_q_array)
-        stokes_i_error_array = np.zeros_like(stokes_q_array)
-
-    fractional_spectra = create_fractional_spectra(
-        freq_array_hz=freq_array_hz,
-        stokes_i_array=stokes_i_array,
-        stokes_q_array=stokes_q_array,
-        stokes_u_array=stokes_u_array,
-        stokes_i_error_array=stokes_i_error_array,
-        stokes_q_error_array=stokes_q_error_array,
-        stokes_u_error_array=stokes_u_error_array,
-        fit_order=fit_order,
-        fit_function=fit_function,
-        stokes_i_model_array=stokes_i_model_array,
-    )
-    stokes_q_array, stokes_u_array, stokes_q_error_array, stokes_u_error_array = (
-        fractional_spectra.stokes_q_array,
-        fractional_spectra.stokes_u_array,
-        fractional_spectra.stokes_q_error_array,
-        fractional_spectra.stokes_u_error_array,
-    )
+    else:
+        (
+            stokes_i_model_array,
+            stokes_q_frac_array,
+            stokes_u_frac_array,
+            stokes_q_frac_error_array,
+            stokes_u_frac_error_array,
+            ref_freq_hz,
+            fractional_spectra,
+        ) = create_fractional_spectra(
+            freq_array_hz=freq_array_hz,
+            stokes_i_array=stokes_i_array,
+            stokes_q_array=stokes_q_array,
+            stokes_u_array=stokes_u_array,
+            stokes_i_error_array=stokes_i_error_array,
+            stokes_q_error_array=stokes_q_error_array,
+            stokes_u_error_array=stokes_u_error_array,
+            fit_order=fit_order,
+            fit_function=fit_function,
+            stokes_i_model_array=stokes_i_model_array,
+        )
+        stokes_q_array, stokes_u_array, stokes_q_error_array, stokes_u_error_array = (
+            fractional_spectra.stokes_q_array,
+            fractional_spectra.stokes_u_array,
+            fractional_spectra.stokes_q_error_array,
+            fractional_spectra.stokes_u_error_array,
+        )
 
     lambda_sq_arr_m2, phi_arr_radm2, weight_array = compute_rmsynth_params(
         freq_array_hz=freq_array_hz,
