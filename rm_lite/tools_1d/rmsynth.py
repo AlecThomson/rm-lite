@@ -2,25 +2,21 @@
 # -*- coding: utf-8 -*-
 """RM-synthesis on 1D data"""
 
-import logging
 import time
 from typing import Literal, Optional
-
 
 import numpy as np
 from scipy import interpolate
 
-from rm_lite.utils.fitting import (
-    create_fractional_spectra,
-)
+from rm_lite.utils.fitting import create_fractional_spectra
+from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
+    compute_rmsynth_params,
     compute_theoretical_noise,
+    get_rmsf_nufft,
     lambda2_to_freq,
     rmsynth_nufft,
-    get_rmsf_nufft,
-    compute_rmsynth_params,
 )
-from rm_lite.utils.logging import logger
 
 logger.setLevel("WARNING")
 

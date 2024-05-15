@@ -2,10 +2,10 @@
 import warnings
 from typing import Callable, Literal, NamedTuple, Optional, Tuple
 
-from astropy.stats import akaike_info_criterion_lsq
 import numpy as np
-from scipy.stats import norm
+from astropy.stats import akaike_info_criterion_lsq
 from scipy.optimize import curve_fit
+from scipy.stats import norm
 from uncertainties import unumpy
 
 from rm_lite.utils.logging import logger

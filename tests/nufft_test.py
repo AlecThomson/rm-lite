@@ -7,9 +7,8 @@ from time import time
 from typing import NamedTuple
 
 import numpy as np
-from tqdm import trange
-
 from RMutils.util_RM import do_rmsynth_planes, extrap, fit_rmsf, get_rmsf_planes
+from tqdm import trange
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

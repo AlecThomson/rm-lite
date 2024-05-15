@@ -1,21 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import gc
-from typing import NamedTuple, Optional, Literal
+from typing import Literal, NamedTuple, Optional
 
-from astropy.constants import c as speed_of_light
 import finufft
 import numpy as np
-from tqdm.auto import tqdm, trange
-from scipy import optimize
+from astropy.constants import c as speed_of_light
 from astropy.modeling.models import Gaussian1D
+from scipy import optimize
+from tqdm.auto import tqdm, trange
 
 from rm_lite.utils.fitting import (
     calc_mom2_FDF,
     calc_parabola_vertex,
     create_pqu_spectra_burn,
 )
-
 from rm_lite.utils.logging import logger
 
 
