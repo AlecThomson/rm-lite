@@ -362,11 +362,11 @@ class FractionalSpectra(NamedTuple):
     stokes_u_frac_array: np.ndarray
     stokes_q_frac_error_array: np.ndarray
     stokes_u_frac_error_array: np.ndarray
-    ref_freq_hz: float
 
 
 def create_fractional_spectra(
     freq_array_hz: np.ndarray,
+    ref_freq_hz: float,
     stokes_i_array: np.ndarray,
     stokes_q_array: np.ndarray,
     stokes_u_array: np.ndarray,
@@ -389,7 +389,6 @@ def create_fractional_spectra(
     )
 
     freq_array_hz = freq_array_hz[no_nan_idx]
-    ref_freq_hz = np.mean(freq_array_hz[no_nan_idx])
     stokes_i_array = stokes_i_array[no_nan_idx]
     stokes_q_array = stokes_q_array[no_nan_idx]
     stokes_u_array = stokes_u_array[no_nan_idx]
@@ -495,14 +494,6 @@ def create_pqu_spectra_burn(
     return pArr, qArr, uArr
 
 
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
 def norm_cdf(mean=0.0, std=1.0, N=50, xArr=None):
     """Return the CDF of a normal distribution between -6 and 6 sigma, or at
     the values of an input array."""

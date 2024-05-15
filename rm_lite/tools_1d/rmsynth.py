@@ -8,19 +8,21 @@ from typing import Literal, Optional
 
 
 import numpy as np
+from scipy import interpolate
 
 from rm_lite.utils.fitting import (
     create_fractional_spectra,
 )
 from rm_lite.utils.synthesis import (
+    compute_theoretical_noise,
+    lambda2_to_freq,
     rmsynth_nufft,
     get_rmsf_nufft,
     compute_rmsynth_params,
 )
-
 from rm_lite.utils.logging import logger
 
-logger.setLevel(logging.INFO)
+logger.setLevel("WARNING")
 
 
 def run_rmsynth(
@@ -43,21 +45,40 @@ def run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
 ):
+    lambda_sq_arr_m2, lam_sq_0_m2, phi_arr_radm2, weight_array = compute_rmsynth_params(
+        freq_array_hz=freq_array_hz,
+        pol_array=stokes_q_array + 1j * stokes_u_array,
+        stokes_qu_error_array=np.abs(stokes_q_error_array + stokes_u_error_array) / 2.0,
+        d_phi_radm2=d_phi_radm2,
+        n_samples=n_samples,
+        phi_max_radm2=phi_max_radm2,
+        super_resolution=super_resolution,
+        weight_type=weight_type,
+    )
+
     if stokes_i_array is None:
         logger.warning(
             "Stokes I array not provided. No fractional polarization will be calculated."
         )
+        no_nan_idx = (
+            np.isfinite(stokes_q_array)
+            & np.isfinite(stokes_q_error_array)
+            & np.isfinite(stokes_u_array)
+            & np.isfinite(stokes_u_error_array)
+            & np.isfinite(freq_array_hz)
+        )
+
+        freq_array_hz = freq_array_hz[no_nan_idx]
     else:
         (
             stokes_i_model_array,
-            stokes_q_frac_array,
-            stokes_u_frac_array,
-            stokes_q_frac_error_array,
-            stokes_u_frac_error_array,
-            ref_freq_hz,
-            fractional_spectra,
+            stokes_q_array,
+            stokes_u_array,
+            stokes_q_error_array,
+            stokes_u_error_array,
         ) = create_fractional_spectra(
             freq_array_hz=freq_array_hz,
+            ref_freq_hz=lambda2_to_freq(lam_sq_0_m2),
             stokes_i_array=stokes_i_array,
             stokes_q_array=stokes_q_array,
             stokes_u_array=stokes_u_array,
@@ -68,35 +89,19 @@ def run_rmsynth(
             fit_function=fit_function,
             stokes_i_model_array=stokes_i_model_array,
         )
-        stokes_q_array, stokes_u_array, stokes_q_error_array, stokes_u_error_array = (
-            fractional_spectra.stokes_q_array,
-            fractional_spectra.stokes_u_array,
-            fractional_spectra.stokes_q_error_array,
-            fractional_spectra.stokes_u_error_array,
-        )
 
-    lambda_sq_arr_m2, phi_arr_radm2, weight_array = compute_rmsynth_params(
-        freq_array_hz=freq_array_hz,
-        stokes_qu_error_array=np.sqrt(
-            stokes_q_error_array**2 + stokes_u_error_array**2
-        ),
-        d_phi_radm2=d_phi_radm2,
-        n_samples=n_samples,
-        phi_max_radm2=phi_max_radm2,
-        super_resolution=super_resolution,
-        weight_type=weight_type,
-    )
-
+    # Compute after any fractional spectra have been created
+    stokes_qu_error_array = np.abs(stokes_q_error_array + stokes_u_error_array) / 2.0
     tick = time.time()
 
     # Perform RM-synthesis on the spectrum
-    fdf_dirty_cube, lam_sq_0_m2 = rmsynth_nufft(
+    fdf_dirty_cube = rmsynth_nufft(
         stokes_q_array=stokes_q_array,
         stokes_u_array=stokes_u_array,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         phi_arr_radm2=phi_arr_radm2,
         weight_array=weight_array,
-        lam_sq_0_m2=0 if super_resolution else None,
+        lam_sq_0_m2=0 if super_resolution else lam_sq_0_m2,
     )
 
     # Calculate the Rotation Measure Spread Function
@@ -115,36 +120,14 @@ def run_rmsynth(
     cpu_time = tock - tick
     logger.info(f"RM-synthesis completed in {cpu_time*1000:.2f}ms.")
 
-    # Convert Stokes I model to polarization reference frequency. If lambda^2_0 is
-    # non-zero, use that as polarization reference frequency and adapt Stokes I model.
-    # If lambda^2_0 is zero, make polarization reference frequency equal to
-    # Stokes I reference frequency.
-
-    # if lam_sq_0_m2 == 0:  # Rudnick-Cotton adapatation
-    #     freq0_Hz = fit_result.reference_frequency_Hz
-    # else:  # standard RM-synthesis
-    #     freq0_Hz = C / m.sqrt(lam_sq_0_m2)
-    #     if stokes_i_model_array is None:
-    #         fit_result = renormalize_StokesI_model(fit_result, freq0_Hz)
-    #     else:
-    #         fit_result = fit_result.with_options(reference_frequency_Hz=freq0_Hz)
-
-    # # Set Ifreq0 (Stokes I at reference frequency) from either supplied model
-    # # (interpolated as required) or fit model, as appropriate.
-    # # Multiply the dirty FDF by Ifreq0 to recover the PI
-    # if stokes_i_model_array is None:
-    #     Ifreq0 = calculate_StokesI_model(fit_result, freq0_Hz)
-    # elif stokes_i_model_array is not None:
-    #     modStokesI_interp = interp1d(freqArr_Hz, stokes_i_model_array)
-    #     Ifreq0 = modStokesI_interp(freq0_Hz)
-    # dirtyFDF *= Ifreq0  # FDF is in fracpol units initially, convert back to flux
-
-    # # Calculate the theoretical noise in the FDF !!Old formula only works for wariance weights!
-    # weight_array = np.where(np.isnan(weight_array), 0.0, weight_array)
-    # dFDFth = np.abs(Ifreq0) * np.sqrt(
-    #     np.nansum(weight_array**2 * np.nan_to_num(stokes_qu_error_array) ** 2)
-    #     / (np.sum(weight_array)) ** 2
-    # )
+    fdf_error_noise = compute_theoretical_noise(
+        stokes_qu_error_array=stokes_qu_error_array, weight_array=weight_array
+    )
+    if stokes_i_model_array is not None:
+        stokes_i_model = interpolate.interp1d(freq_array_hz, stokes_i_model_array)
+        stokes_i_reference_flux = stokes_i_model(lambda2_to_freq(lam_sq_0_m2))
+        fdf_dirty_cube *= stokes_i_reference_flux
+        fdf_error_noise *= stokes_i_reference_flux
 
     # # Measure the parameters of the dirty FDF
     # # Use the theoretical noise to calculate uncertainties

@@ -19,14 +19,41 @@ from rm_lite.utils.fitting import (
 from rm_lite.utils.logging import logger
 
 
+def freq_to_lambda2(freq_hz: float) -> float:
+    """Convert frequency to lambda^2."""
+    return (speed_of_light.value / freq_hz) ** 2.0
+
+
+def lambda2_to_freq(lambda_sq_m2: float) -> float:
+    """Convert lambda^2 to frequency."""
+    return np.sqrt(lambda_sq_m2) / speed_of_light.value
+
+
+def compute_theoretical_noise(
+    stokes_qu_error_array: np.ndarray,
+    weight_array: np.ndarray,
+) -> float:
+    weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
+    stokes_qu_error_array = np.nan_to_num(
+        stokes_qu_error_array, nan=0.0, posinf=0.0, neginf=0.0
+    )
+    fdf_error_noise = np.sqrt(
+        np.nansum(weight_array**2 * stokes_qu_error_array**2)
+        / (np.sum(weight_array)) ** 2
+    )
+    return fdf_error_noise
+
+
 class RMSynthParams(NamedTuple):
     lambda_sq_arr_m2: np.ndarray
+    lam_sq_0_m2: float
     phi_arr_radm2: np.ndarray
     weight_array: np.ndarray
 
 
 def compute_rmsynth_params(
     freq_array_hz: np.ndarray,
+    pol_array: np.ndarray,
     stokes_qu_error_array: np.ndarray,
     d_phi_radm2: Optional[float] = None,
     n_samples: Optional[float] = 10.0,
@@ -34,7 +61,7 @@ def compute_rmsynth_params(
     super_resolution: bool = False,
     weight_type: Literal["variance", "uniform"] = "variance",
 ) -> RMSynthParams:
-    lambda_sq_arr_m2 = (speed_of_light.value / freq_array_hz) ** 2.0
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_array_hz)
 
     fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
         lambda_sq_arr_m2, super_resolution
@@ -62,8 +89,19 @@ def compute_rmsynth_params(
     else:
         weight_array = np.ones_like(freq_array_hz)
 
+    mask = ~np.isfinite(pol_array)
+    weight_array[mask] = 0.0
+
+    # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
+    # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
+    scale_factor = 1.0 / np.nansum(weight_array)
+    lam_sq_0_m2 = scale_factor * np.nansum(weight_array * lambda_sq_arr_m2)
+    if not np.isfinite(lam_sq_0_m2):  # Can happen if all channels are NaNs/zeros
+        lam_sq_0_m2 = 0.0
+
     return RMSynthParams(
         lambda_sq_arr_m2=lambda_sq_arr_m2,
+        lam_sq_0_m2=lam_sq_0_m2,
         phi_arr_radm2=phi_arr_radm2,
         weight_array=weight_array,
     )
@@ -127,7 +165,7 @@ def rmsynth_nufft(
     weight_array: np.ndarray,
     lam_sq_0_m2: Optional[float] = None,
     eps: float = 1e-6,
-) -> RMsynthResults:
+) -> np.ndarray:
     weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Sanity check on array sizes
@@ -174,21 +212,13 @@ def rmsynth_nufft(
     pol_cube = (stokes_q_array + 1j * stokes_u_array) * weight_array[:, np.newaxis]
 
     # Check for NaNs (flagged data) in the cube & set to zero
-    mask_cube = np.isnan(pol_cube)
+    mask_cube = ~np.isfinite(pol_cube)
     pol_cube = np.nan_to_num(pol_cube, nan=0.0, posinf=0.0, neginf=0.0)
 
     # If full planes are flagged then set corresponding weights to zero
     mask_planes = np.sum(~mask_cube, axis=1)
     mask_planes = np.where(mask_planes == 0, 0, 1)
     weight_array *= mask_planes
-
-    # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
-    # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
-    scale_factor = 1.0 / np.sum(weight_array)
-    if lam_sq_0_m2 is None:
-        lam_sq_0_m2 = scale_factor * np.sum(weight_array * lambda_sq_arr_m2)
-    if not np.isfinite(lam_sq_0_m2):  # Can happen if all channels are NaNs/zeros
-        lam_sq_0_m2 = 0.0
 
     # The K value used to scale each FDF spectrum must take into account
     # flagged voxels data in the datacube and can be position dependent
@@ -232,7 +262,7 @@ def rmsynth_nufft(
     # Remove redundant dimensions in the FDF array
     fdf_dirty_cube = np.squeeze(fdf_dirty_cube)
 
-    return RMsynthResults(fdf_dirty_cube=fdf_dirty_cube, lam_sq_0_m2=lam_sq_0_m2)
+    return fdf_dirty_cube
 
 
 # -----------------------------------------------------------------------------#
