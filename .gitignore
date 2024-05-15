@@ -152,3 +152,4 @@ tests/simdata
 tests/models_ns
 *egg-info
 .DS_Store
+*.ipynb
