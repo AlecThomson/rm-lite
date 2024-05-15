@@ -40,8 +40,6 @@ def run_rmsynth(
     n_samples: Optional[float] = 10.0,
     weight_type: Literal["variance", "uniform"] = "variance",
     do_fit_rmsf=False,
-    # phi_noise_radm2=1e6,
-    units: str = "Jy/beam",
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
 ):
