@@ -25,7 +25,7 @@ def freq_to_lambda2(freq_hz: float) -> float:
 
 def lambda2_to_freq(lambda_sq_m2: float) -> float:
     """Convert lambda^2 to frequency."""
-    return np.sqrt(lambda_sq_m2) / speed_of_light.value
+    return speed_of_light.value / np.sqrt(lambda_sq_m2)
 
 
 def compute_theoretical_noise(
@@ -165,6 +165,26 @@ def rmsynth_nufft(
     lam_sq_0_m2: Optional[float] = None,
     eps: float = 1e-6,
 ) -> np.ndarray:
+    """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
+
+    Args:
+        stokes_q_array (np.ndarray): Stokes Q data array
+        stokes_u_array (np.ndarray): Stokes U data array
+        lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
+        phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
+        weight_array (np.ndarray): Weight array
+        lam_sq_0_m2 (Optional[float], optional): Reference wavelength^2 in m^2. Defaults to None.
+        eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
+
+    Raises:
+        ValueError: If the weight and lambda^2 arrays are not the same shape.
+        ValueError: If the Stokes Q and U data arrays are not the same shape.
+        ValueError: If the data dimensions are > 3.
+        ValueError: If the data depth does not match the lambda^2 vector.
+
+    Returns:
+        np.ndarray: Dirty Faraday dispersion function cube
+    """
     weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Sanity check on array sizes
@@ -287,10 +307,31 @@ def get_rmsf_nufft(
     mask_array: Optional[np.ndarray] = None,
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real=False,
-    eps=1e-6,
+    eps: float = 1e-6,
 ) -> RMSFResults:
+    """Compute the RMSF for a given set of lambda^2 values.
+
+    Args:
+        lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
+        phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
+        weight_array (np.ndarray): Weight array
+        lam_sq_0_m2 (float): Reference wavelength^2 value
+        super_resolution (bool, optional): Use superresolution. Defaults to False.
+        mask_array (Optional[np.ndarray], optional): Mask array. Defaults to None.
+        do_fit_rmsf (bool, optional): Fit the RMSF with a Gaussian. Defaults to False.
+        do_fit_rmsf_real (bool, optional): Fit the *real* part of the. Defaults to False.
+        eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
+
+    Raises:
+        ValueError: If the wavelength^2 and weight arrays are not the same shape.
+        ValueError: If the mask dimensions are > 3.
+        ValueError: If the mask depth does not match the lambda^2 vector.
+
+    Returns:
+        RMSFResults: rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_array
+    """
     phi_double_arr_radm2 = make_phi_array(
-        phi_max_radm2=np.max(phi_arr_radm2),
+        phi_max_radm2=np.max(phi_arr_radm2) * 2,
         d_phi_radm2=phi_arr_radm2[1] - phi_arr_radm2[0],
     )
 
@@ -359,7 +400,7 @@ def get_rmsf_nufft(
         finufft.nufft1d3(
             x=exponent,
             c=np.ascontiguousarray(weight_cube.T).astype(complex),
-            s=(phi_arr_radm2[::-1] * 2).astype(exponent.dtype),
+            s=(phi_double_arr_radm2[::-1] * 2).astype(exponent.dtype),
             eps=eps,
         )
         * scale_factor_array[..., None]

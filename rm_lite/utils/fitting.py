@@ -5,7 +5,7 @@ from typing import Callable, Literal, NamedTuple, Optional, Tuple
 import numpy as np
 from astropy.stats import akaike_info_criterion_lsq
 from scipy.optimize import curve_fit
-from scipy.stats import norm
+from scipy.stats import norm, multivariate_normal
 from uncertainties import unumpy
 
 from rm_lite.utils.logging import logger
@@ -278,13 +278,21 @@ def static_fit(
         )
 
     logger.debug(f"Fitting Stokes I model with {fit_type} model of order {fit_order}.")
+    initital_guess = np.zeros(fit_order + 1)
+    initital_guess[0] = np.nanmean(stokes_i_array)
+    bounds = (
+        [-np.inf] * (fit_order + 1),
+        [np.inf] * (fit_order + 1),
+    )
+    bounds[0][0] = 0.0
     popt, pcov = curve_fit(
         fit_func,
         freq_array_hz / ref_freq_hz,
         stokes_i_array,
         sigma=stokes_i_error_array,
         absolute_sigma=True,
-        p0=np.zeros(fit_order + 1),
+        p0=initital_guess,
+        bounds=bounds,
     )
     stokes_i_model_array = fit_func(freq_array_hz / ref_freq_hz, *popt)
     ssr = np.sum((stokes_i_array - stokes_i_model_array) ** 2)
@@ -308,7 +316,8 @@ def dynamic_fit(
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
-    orders = np.arange(1, fit_order + 1)
+    orders = np.arange(fit_order + 1)
+    n_parameters = orders + 1
     fit_results = []
 
     for i, order in enumerate(orders):
@@ -322,8 +331,13 @@ def dynamic_fit(
         )
         fit_results.append(fit_result)
 
+    logger.debug(f"Fit results for orders {orders}:")
     aics = np.array([fit_result.aic for fit_result in fit_results])
-    bestest_aic, bestest_n, bestest_aic_idx = best_aic_func(aics, orders)
+    bestest_aic, bestest_n, bestest_aic_idx = best_aic_func(aics, n_parameters)
+    logger.debug(f"Best fit found with {bestest_n} parameters.")
+    logger.debug(f"Best fit found with AIC {bestest_aic}.")
+    logger.debug(f"Best fit found at index {bestest_aic_idx}.")
+    logger.debug(f"Best fit found with order {orders[bestest_aic_idx]}.")
 
     return fit_results[bestest_aic_idx]
 
@@ -377,6 +391,7 @@ def create_fractional_spectra(
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_model_array: Optional[np.ndarray] = None,
     stokes_i_model_error: Optional[np.ndarray] = None,
+    n_error_samples: int = 10_000,
 ) -> FractionalSpectra:
     no_nan_idx = (
         np.isfinite(stokes_i_array)
@@ -387,7 +402,7 @@ def create_fractional_spectra(
         & np.isfinite(stokes_u_error_array)
         & np.isfinite(freq_array_hz)
     )
-
+    logger.debug(f"{ref_freq_hz=}")
     freq_array_hz = freq_array_hz[no_nan_idx]
     stokes_i_array = stokes_i_array[no_nan_idx]
     stokes_q_array = stokes_q_array[no_nan_idx]
@@ -416,16 +431,23 @@ def create_fractional_spectra(
             fit_order,
             fit_function,
         )
-        stokes_i_model_array = stokes_i_model_func(freq_array_hz / ref_freq_hz, *popt)
-        stokes_i_model_high = stokes_i_model_func(
-            freq_array_hz / ref_freq_hz, *(popt + np.sqrt(np.diag(pcov)))
+        error_distribution = multivariate_normal(
+            mean=popt, cov=pcov, allow_singular=True
         )
-        stokes_i_model_low = stokes_i_model_func(
-            freq_array_hz / ref_freq_hz, *(popt - np.sqrt(np.diag(pcov)))
+        error_samples = error_distribution.rvs(n_error_samples)
+
+        model_samples = np.array(
+            [
+                stokes_i_model_func(freq_array_hz / ref_freq_hz, *sample)
+                for sample in error_samples
+            ]
+        )
+        stokes_i_model_low, stokes_i_model_array, stokes_i_model_high = np.percentile(
+            model_samples, [16, 50, 84], axis=0
         )
         stokes_i_model_uarray = unumpy.uarray(
             stokes_i_model_array,
-            0.5 * np.abs((stokes_i_model_high - stokes_i_model_low)),
+            np.abs((stokes_i_model_high - stokes_i_model_low)),
         )
 
     stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_uarray
@@ -442,7 +464,6 @@ def create_fractional_spectra(
         stokes_u_frac_array=stokes_u_frac_array,
         stokes_q_frac_error_array=stokes_q_frac_error_array,
         stokes_u_frac_error_array=stokes_u_frac_error_array,
-        ref_freq_hz=ref_freq_hz,
     )
 
 
