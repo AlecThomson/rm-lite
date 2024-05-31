@@ -8,11 +8,8 @@ import numpy as np
 from astropy.constants import c as speed_of_light
 from scipy import optimize
 from tqdm.auto import tqdm, trange
+from uncertainties import unumpy
 
-from rm_lite.utils.fitting import (
-    calc_mom2_FDF,
-    create_pqu_spectra_burn,
-)
 from rm_lite.utils.logging import logger
 
 
@@ -58,6 +55,116 @@ class RMCleanResults(NamedTuple):
     """The number of iterations for each pixel"""
     residFDF: np.ndarray
     """The residual Faraday dispersion function cube"""
+
+
+class FractionalSpectra(NamedTuple):
+    stokes_i_model_array: np.ndarray
+    stokes_q_frac_array: np.ndarray
+    stokes_u_frac_array: np.ndarray
+    stokes_q_frac_error_array: np.ndarray
+    stokes_u_frac_error_array: np.ndarray
+
+
+def calc_mom2_FDF(FDF, phiArr):
+    """
+    Calculate the 2nd moment of the polarised intensity FDF. Can be applied to
+    a clean component spectrum or a standard FDF
+    """
+
+    K = np.sum(np.abs(FDF))
+    phiMean = np.sum(phiArr * np.abs(FDF)) / K
+    phiMom2 = np.sqrt(np.sum(np.power((phiArr - phiMean), 2.0) * np.abs(FDF)) / K)
+
+    return phiMom2
+
+
+def create_fractional_spectra(
+    freq_array_hz: np.ndarray,
+    ref_freq_hz: float,
+    stokes_i_array: np.ndarray,
+    stokes_q_array: np.ndarray,
+    stokes_u_array: np.ndarray,
+    stokes_i_error_array: np.ndarray,
+    stokes_q_error_array: np.ndarray,
+    stokes_u_error_array: np.ndarray,
+    fit_order: int = 2,
+    fit_function: Literal["log", "linear"] = "log",
+    stokes_i_model_array: Optional[np.ndarray] = None,
+    stokes_i_model_error: Optional[np.ndarray] = None,
+    n_error_samples: int = 10_000,
+) -> FractionalSpectra:
+    no_nan_idx = (
+        np.isfinite(stokes_i_array)
+        & np.isfinite(stokes_i_error_array)
+        & np.isfinite(stokes_q_array)
+        & np.isfinite(stokes_q_error_array)
+        & np.isfinite(stokes_u_array)
+        & np.isfinite(stokes_u_error_array)
+        & np.isfinite(freq_array_hz)
+    )
+    logger.debug(f"{ref_freq_hz=}")
+    freq_array_hz = freq_array_hz[no_nan_idx]
+    stokes_i_array = stokes_i_array[no_nan_idx]
+    stokes_q_array = stokes_q_array[no_nan_idx]
+    stokes_u_array = stokes_u_array[no_nan_idx]
+    stokes_i_error_array = stokes_i_error_array[no_nan_idx]
+    stokes_q_error_array = stokes_q_error_array[no_nan_idx]
+    stokes_u_error_array = stokes_u_error_array[no_nan_idx]
+
+    # stokes_i_uarray = unumpy.uarray(stokes_i_array, stokes_i_error_array)
+    stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
+    stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)
+    if stokes_i_model_array is not None:
+        if stokes_i_model_error is None:
+            raise ValueError(
+                "If `stokes_i_model_array` is provided, `stokes_i_model_error` must also be provided."
+            )
+        stokes_i_model_uarray = unumpy.uarray(
+            stokes_i_model_array, stokes_i_model_error
+        )
+    else:
+        popt, pcov, stokes_i_model_func, aic = fit_stokes_i_model(
+            freq_array_hz,
+            ref_freq_hz,
+            stokes_i_array,
+            stokes_i_error_array,
+            fit_order,
+            fit_function,
+        )
+        error_distribution = multivariate_normal(
+            mean=popt, cov=pcov, allow_singular=True
+        )
+        error_samples = error_distribution.rvs(n_error_samples)
+
+        model_samples = np.array(
+            [
+                stokes_i_model_func(freq_array_hz / ref_freq_hz, *sample)
+                for sample in error_samples
+            ]
+        )
+        stokes_i_model_low, stokes_i_model_array, stokes_i_model_high = np.percentile(
+            model_samples, [16, 50, 84], axis=0
+        )
+        stokes_i_model_uarray = unumpy.uarray(
+            stokes_i_model_array,
+            np.abs((stokes_i_model_high - stokes_i_model_low)),
+        )
+
+    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_uarray
+    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_uarray
+
+    stokes_q_frac_array = unumpy.nominal_values(stokes_q_frac_uarray)
+    stokes_u_frac_array = unumpy.nominal_values(stokes_u_frac_uarray)
+    stokes_q_frac_error_array = unumpy.std_devs(stokes_q_frac_uarray)
+    stokes_u_frac_error_array = unumpy.std_devs(stokes_u_frac_uarray)
+
+    return FractionalSpectra(
+        stokes_i_model_array=stokes_i_model_array,
+        stokes_q_frac_array=stokes_q_frac_array,
+        stokes_u_frac_array=stokes_u_frac_array,
+        stokes_q_frac_error_array=stokes_q_frac_error_array,
+        stokes_u_frac_error_array=stokes_u_frac_error_array,
+    )
 
 
 def freq_to_lambda2(freq_hz: float) -> float:
@@ -1083,8 +1190,54 @@ def calc_sigma_add(xArr, yArr, dyArr, yMed=None, noise=None, nSamp=1000, suffix=
     return mDict, pltDict
 
 
-# -----------------------------------------------------------------------------#
-# -----------------------------------------------------------------------------#
+def create_pqu_spectra_burn(
+    freqArr_Hz, fracPolArr, psi0Arr_deg, RMArr_radm2, sigmaRMArr_radm2=None
+):
+    """Return fractional P/I, Q/I & U/I spectra for a sum of Faraday thin
+    components (multiple values may be given as a list for each argument).
+    Burn-law external depolarisation may be applied to each
+    component via the optional 'sigmaRMArr_radm2' argument. If
+    sigmaRMArr_radm2=None, all values are set to zero, i.e., no
+    depolarisation."""
+
+    # Convert lists to arrays
+    freqArr_Hz = np.array(freqArr_Hz, dtype="f8")
+    fracPolArr = np.array(fracPolArr, dtype="f8")
+    psi0Arr_deg = np.array(psi0Arr_deg, dtype="f8")
+    RMArr_radm2 = np.array(RMArr_radm2, dtype="f8")
+    if sigmaRMArr_radm2 is None:
+        sigmaRMArr_radm2 = np.zeros_like(fracPolArr)
+    else:
+        sigmaRMArr_radm2 = np.array(sigmaRMArr_radm2, dtype="f8")
+
+    # Calculate some prerequsites
+    nChans = len(freqArr_Hz)
+    nComps = len(fracPolArr)
+    lamArr_m = C / freqArr_Hz
+    lamSqArr_m2 = np.power(lamArr_m, 2.0)
+
+    # Convert the inputs to column vectors
+    fracPolArr = fracPolArr.reshape((nComps, 1))
+    psi0Arr_deg = psi0Arr_deg.reshape((nComps, 1))
+    RMArr_radm2 = RMArr_radm2.reshape((nComps, 1))
+    sigmaRMArr_radm2 = sigmaRMArr_radm2.reshape((nComps, 1))
+
+    # Calculate the p, q and u Spectra for all components
+    pArr = fracPolArr * np.ones((nComps, nChans), dtype="f8")
+    quArr = pArr * (
+        np.exp(2j * (np.radians(psi0Arr_deg) + RMArr_radm2 * lamSqArr_m2))
+        * np.exp(-2.0 * sigmaRMArr_radm2 * np.power(lamArr_m, 4.0))
+    )
+
+    # Sum along the component axis to create the final spectra
+    quArr = quArr.sum(0)
+    qArr = quArr.real
+    uArr = quArr.imag
+    pArr = np.abs(quArr)
+
+    return pArr, qArr, uArr
+
+
 def measure_qu_complexity(
     freqArr_Hz, qArr, uArr, dqArr, duArr, fracPol, psi0_deg, RM_radm2, specF=1
 ):
