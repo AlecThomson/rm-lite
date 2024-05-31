@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from rm_lite.utils.synthesis import (
-    FWHMRMSF,
+    FWHM,
     freq_to_lambda2,
     lambda2_to_freq,
     make_phi_array,
@@ -64,7 +64,7 @@ def racs_data(racs_model):
 
 def test_get_fwhm_rmsf(racs_data, racs_model):
     assert np.allclose(racs_data.lsq, freq_to_lambda2(lambda2_to_freq(racs_data.lsq)))
-    fwhm: FWHMRMSF = get_fwhm_rmsf(racs_data.lsq, super_resolution=False)
+    fwhm: FWHM = get_fwhm_rmsf(racs_data.lsq, super_resolution=False)
     assert np.isclose(fwhm.fwhm_rmsf_radm2, racs_model.fwhm, atol=0.1)
     assert np.isclose(
         fwhm.d_lambda_sq_max_m2, np.nanmax(np.abs(np.diff(racs_data.lsq)))

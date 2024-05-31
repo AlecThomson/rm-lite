@@ -13,12 +13,21 @@ from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     compute_rmsynth_params,
     compute_theoretical_noise,
+    get_fdf_parameters,
     get_rmsf_nufft,
     lambda2_to_freq,
     rmsynth_nufft,
 )
 
 logger.setLevel("WARNING")
+
+
+class RMSynthResults(NamedTuple):
+    """Results of RM-synthesis"""
+
+
+class RMSynthArrays(NamedTuple):
+    """Result arrays from RM-synthesis"""
 
 
 def run_rmsynth(
@@ -85,11 +94,10 @@ def run_rmsynth(
         )
 
     # Compute after any fractional spectra have been created
-    stokes_qu_error_array = np.abs(stokes_q_error_array + stokes_u_error_array) / 2.0
     tick = time.time()
 
     # Perform RM-synthesis on the spectrum
-    fdf_dirty_cube = rmsynth_nufft(
+    fdf_dirty_array = rmsynth_nufft(
         stokes_q_array=stokes_q_array,
         stokes_u_array=stokes_u_array,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
@@ -99,7 +107,7 @@ def run_rmsynth(
     )
 
     # Calculate the Rotation Measure Spread Function
-    rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_array = get_rmsf_nufft(
+    rmsf_array, phi_double_arr_radm2, fwhm_rmsf, fit_status_array = get_rmsf_nufft(
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         phi_arr_radm2=phi_arr_radm2,
         weight_array=weight_array,
@@ -114,25 +122,31 @@ def run_rmsynth(
     cpu_time = tock - tick
     logger.info(f"RM-synthesis completed in {cpu_time*1000:.2f}ms.")
 
-    fdf_error_noise = compute_theoretical_noise(
-        stokes_qu_error_array=stokes_qu_error_array, weight_array=weight_array
+    theoretical_noise = compute_theoretical_noise(
+        stokes_q_error_array=stokes_q_error_array,
+        stokes_u_error_array=stokes_u_error_array,
+        weight_array=weight_array,
     )
     if stokes_i_model_array is not None:
         stokes_i_model = interpolate.interp1d(freq_array_hz, stokes_i_model_array)
         stokes_i_reference_flux = stokes_i_model(lambda2_to_freq(lam_sq_0_m2))
-        fdf_dirty_cube *= stokes_i_reference_flux
-        fdf_error_noise *= stokes_i_reference_flux
+        fdf_dirty_array *= stokes_i_reference_flux
+        theoretical_noise = theoretical_noise.with_options(
+            fdf_error_noise=theoretical_noise.fdf_error_noise * stokes_i_reference_flux,
+            fdf_q_noise=theoretical_noise.fdf_q_noise * stokes_i_reference_flux,
+            fdf_u_noise=theoretical_noise.fdf_u_noise * stokes_i_reference_flux,
+        )
 
-    # # Measure the parameters of the dirty FDF
-    # # Use the theoretical noise to calculate uncertainties
-    # mDict = measure_FDF_parms(
-    #     FDF=dirtyFDF,
-    #     phiArr=phi_arr_radm2,
-    #     fwhmRMSF=fwhmRMSF,
-    #     dFDF=dFDFth,
-    #     lamSqArr_m2=lambda_sq_arr_m2,
-    #     lam0Sq=lam_sq_0_m2,
-    # )
+    # Measure the parameters of the dirty FDF
+    # Use the theoretical noise to calculate uncertainties
+    fdf_parameters = get_fdf_parameters(
+        fdf_array=fdf_dirty_array,
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf,
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        lam_sq_0_m2=lam_sq_0_m2,
+        fdf_error=theoretical_noise.fdf_error_noise,
+    )
     # mDict["Ifreq0"] = toscalar(Ifreq0)
     # mDict["polyCoeffs"] = ",".join(
     #     [str(x.astype(np.float32)) for x in fit_result.params]

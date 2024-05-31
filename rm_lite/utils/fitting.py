@@ -12,10 +12,27 @@ logger.setLevel("INFO")
 
 
 class FitResult(NamedTuple):
+    """Results of a Stokes I fit"""
+
     popt: np.ndarray
+    """Best fit parameters"""
     pcov: np.ndarray
+    """Covariance matrix of the fit"""
     stokes_i_model_func: Callable
+    """Function of the best fit model"""
     aic: float
+    """Akaike Information Criterion of the fit"""
+
+
+class FDFFitResult(NamedTuple):
+    """Results of a Gaussian FDF fit"""
+
+    amplitude_fit: float
+    """Amplitude of the best fit model"""
+    mean_fit: float
+    """Mean (Faraday depth) of the best fit model"""
+    stddev_fit: float
+    """Standard deviation (Faraday depth) of the best fit model"""
 
 
 def gaussian(x, amplitude, mean, stddev):
@@ -47,9 +64,40 @@ def fit_rmsf(
         unit_centred_gaussian,
         phi_double_arr_radm2[mask],
         rmsf_to_fit_array[mask],
-        p0=[fwhm_rmsf_radm2],
+        p0=[fwhm_rmsf_radm2 / (2 * np.sqrt(2 * np.log(2)))],
     )
     return popt[0]
+
+
+def fit_fdf(
+    fdf_to_fit_array: np.ndarray,
+    phi_arr_radm2: np.ndarray,
+    fwhm_fdf_radm2: float,
+) -> FDFFitResult:
+    d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
+    mask = np.zeros_like(phi_arr_radm2, dtype=bool)
+    mask[np.argmax(fdf_to_fit_array)] = 1
+    fwhm_fdf_arr_pix = fwhm_fdf_radm2 / d_phi
+    for i in np.where(mask)[0]:
+        start = int(i - fwhm_fdf_arr_pix / 2)
+        end = int(i + fwhm_fdf_arr_pix / 2)
+        mask[start : end + 2] = True
+
+    amplitude_guess = np.nanmax(fdf_to_fit_array[mask])
+    mean_guess = phi_arr_radm2[np.argmax(fdf_to_fit_array[mask])]
+    stddev_guess = fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2)))
+    popt, pcov = curve_fit(
+        gaussian,
+        phi_arr_radm2[mask],
+        fdf_to_fit_array[mask],
+        p0=[amplitude_guess, mean_guess, stddev_guess],
+    )
+    amplitude_fit, mean_fit, stddev_fit = popt
+    return FDFFitResult(
+        amplitude_fit=amplitude_fit,
+        mean_fit=mean_fit,
+        stddev_fit=stddev_fit,
+    )
 
 
 def polynomial(order: int) -> Callable:

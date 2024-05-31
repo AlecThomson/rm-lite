@@ -6,13 +6,15 @@ from typing import Literal, NamedTuple, Optional
 import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
+from astropy.stats import mad_std
 from tqdm.auto import tqdm, trange
 from uncertainties import unumpy
 
+from rm_lite.utils.fitting import fit_fdf
 from rm_lite.utils.logging import logger
 
 
-class FWHMRMSF(NamedTuple):
+class FWHM(NamedTuple):
     fwhm_rmsf_radm2: float
     """The FWHM of the RMSF main lobe"""
     d_lambda_sq_max_m2: float
@@ -52,7 +54,7 @@ class RMCleanResults(NamedTuple):
     """The clean components cube"""
     iterCountArr: np.ndarray
     """The number of iterations for each pixel"""
-    residFDF: np.ndarray
+    resifdf_error: np.ndarray
     """The residual Faraday dispersion function cube"""
 
 
@@ -64,15 +66,74 @@ class FractionalSpectra(NamedTuple):
     stokes_u_frac_error_array: np.ndarray
 
 
-def calc_mom2_FDF(FDF, phiArr):
+class FDFParameters(NamedTuple):
+    """Parameters of the Faraday dispersion function"""
+
+    fdf_error_mad: float
+    """Median absolute deviation error of the FDF"""
+    peak_pi_fit: float
+    """Peak polarised intensity of the FDF"""
+    peak_pi_error: float
+    """Error on the peak polarised intensity"""
+    peak_pi_fit_debias: float
+    """Debiased peak polarised intensity of the FDF"""
+    peak_pi_fit_snr: float
+    """Signal-to-noise ratio of the peak polarised intensity"""
+    peak_pi_fit_index: float
+    """Index of the fitted peak polarised intensity"""
+    peak_rm_fit: float
+    """Peak Faraday depth of the FDF"""
+    peak_rm_fit_error: float
+    """Error on the peak Faraday depth"""
+    peak_q_fit: float
+    """Peak Stokes Q of the FDF"""
+    peak_u_fit: float
+    """Peak Stokes U of the FDF"""
+    peak_pa_fit_deg: float
+    """Peak position angle of the FDF in degrees"""
+    peak_pa_fit_deg_error: float
+    """Error on the peak position angle of the FDF in degrees"""
+    peak_pa0_fit_deg: float
+    """Peak deroated position angle of the FDF in degrees"""
+    peak_pa0_fit_deg_error: float
+    """Error on the peak deroated position angle of the FDF in degrees"""
+
+
+class TheoreticalNoise(NamedTuple):
+    """Theoretical noise of the FDF"""
+
+    fdf_error_noise: float
+    """Theoretical noise of the FDF"""
+    fdf_q_noise: float
+    """Theoretical noise of the real FDF"""
+    fdf_u_noise: float
+    """Theoretical noise of the imaginary FDF"""
+
+    def with_options(self, **kwargs):
+        """Create a new TheoreticalNoise instance with keywords updated
+
+        Returns:
+            TheoreticalNoise: New TheoreticalNoise instance with updated attributes
+        """
+        # TODO: Update the signature to have the actual attributes to
+        # help keep mypy and other linters happy
+        as_dict = self._asdict()
+        as_dict.update(kwargs)
+
+        return TheoreticalNoise(**as_dict)
+
+
+def calc_mom2_FDF(FDF, phi_arr_radm2):
     """
     Calculate the 2nd moment of the polarised intensity FDF. Can be applied to
     a clean component spectrum or a standard FDF
     """
 
     K = np.sum(np.abs(FDF))
-    phiMean = np.sum(phiArr * np.abs(FDF)) / K
-    phiMom2 = np.sqrt(np.sum(np.power((phiArr - phiMean), 2.0) * np.abs(FDF)) / K)
+    phiMean = np.sum(phi_arr_radm2 * np.abs(FDF)) / K
+    phiMom2 = np.sqrt(
+        np.sum(np.power((phi_arr_radm2 - phiMean), 2.0) * np.abs(FDF)) / K
+    )
 
     return phiMom2
 
@@ -191,10 +252,12 @@ def lambda2_to_freq(lambda_sq_m2: float) -> float:
 
 
 def compute_theoretical_noise(
-    stokes_qu_error_array: np.ndarray,
+    stokes_q_error_array: np.ndarray,
+    stokes_u_error_array: np.ndarray,
     weight_array: np.ndarray,
-) -> float:
+) -> TheoreticalNoise:
     weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
+    stokes_qu_error_array = np.abs(stokes_q_error_array + stokes_u_error_array) / 2.0
     stokes_qu_error_array = np.nan_to_num(
         stokes_qu_error_array, nan=0.0, posinf=0.0, neginf=0.0
     )
@@ -202,7 +265,13 @@ def compute_theoretical_noise(
         np.nansum(weight_array**2 * stokes_qu_error_array**2)
         / (np.sum(weight_array)) ** 2
     )
-    return fdf_error_noise
+    fdf_q_noise = np.average(stokes_q_error_array, weights=weight_array)
+    fdf_u_noise = np.average(stokes_u_error_array, weights=weight_array)
+    return TheoreticalNoise(
+        fdf_error_noise=fdf_error_noise,
+        fdf_q_noise=fdf_q_noise,
+        fdf_u_noise=fdf_u_noise,
+    )
 
 
 class RMSynthParams(NamedTuple):
@@ -315,7 +384,7 @@ def make_phi_array(
 def get_fwhm_rmsf(
     lambda_sq_arr_m2: np.ndarray,
     super_resolution: bool = False,
-) -> FWHMRMSF:
+) -> FWHM:
     """Calculate the FWHM of the RMSF.
 
     Args:
@@ -323,7 +392,7 @@ def get_fwhm_rmsf(
         super_resolution (bool, optional): Use Cotton+Rudnick superresolution. Defaults to False.
 
     Returns:
-        FWHMRMSF: FWHM of the RMSF main lobe, maximum difference in lambda^2 values, range of lambda^2 values
+        fwhm_rmsf_arr: FWHM of the RMSF main lobe, maximum difference in lambda^2 values, range of lambda^2 values
     """
     lambda_sq_range_m2 = np.nanmax(lambda_sq_arr_m2) - np.nanmin(lambda_sq_arr_m2)
     d_lambda_sq_max_m2 = np.nanmax(np.abs(np.diff(lambda_sq_arr_m2)))
@@ -335,7 +404,7 @@ def get_fwhm_rmsf(
         fwhm_rmsf_radm2 = 2.0 / (
             np.nanmax(lambda_sq_arr_m2) + np.nanmin(lambda_sq_arr_m2)
         )
-    return FWHMRMSF(
+    return FWHM(
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
         d_lambda_sq_max_m2=d_lambda_sq_max_m2,
         lambda_sq_range_m2=lambda_sq_range_m2,
@@ -731,8 +800,8 @@ def do_rmclean_hogbom(
     iterCountArr = np.zeros_like(mask_array, dtype="int")
 
     # Determine which pixels have components above the cutoff
-    absFDF = np.abs(np.nan_to_num(dirtyFDF))
-    mskCutoff = np.where(np.max(absFDF, axis=0) >= cutoff, 1, 0)
+    abs_fdf_cube = np.abs(np.nan_to_num(dirtyFDF))
+    mskCutoff = np.where(np.max(abs_fdf_cube, axis=0) >= cutoff, 1, 0)
     xyCoords = np.rot90(np.where(mskCutoff > 0))
 
     # Feeback to user
@@ -744,7 +813,7 @@ def do_rmclean_hogbom(
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
     # Residual is initially copies of dirty FDF, so that pixels that are not
     #  processed get correct values (but will be overridden when processed)
-    residFDF = dirtyFDF.copy()
+    resifdf_error = dirtyFDF.copy()
     ccArr = np.zeros(dirtyFDF.shape, dtype=dtComplex)
     cleanFDF = np.zeros_like(dirtyFDF)
 
@@ -785,25 +854,25 @@ def do_rmclean_hogbom(
     # Put data back in correct shape
     #    ccArr = np.reshape(np.rot90(np.stack([model for _, _, model in output]), k=-1),dirtyFDF.shape)
     #    cleanFDF = np.reshape(np.rot90(np.stack([clean for clean, _, _ in output]), k=-1),dirtyFDF.shape)
-    #    residFDF = np.reshape(np.rot90(np.stack([resid for _, resid, _ in output]), k=-1),dirtyFDF.shape)
+    #    resifdf_error = np.reshape(np.rot90(np.stack([resid for _, resid, _ in output]), k=-1),dirtyFDF.shape)
     for i in range(len(inputs)):
         yi = inputs[i][0]
         xi = inputs[i][1]
         ccArr[:, yi, xi] = output[i][2]
         cleanFDF[:, yi, xi] = output[i][0]
-        residFDF[:, yi, xi] = output[i][1]
+        resifdf_error[:, yi, xi] = output[i][1]
 
     # Restore the residual to the CLEANed FDF (moved outside of loop:
     # will now work for pixels/spectra without clean components)
-    cleanFDF += residFDF
+    cleanFDF += resifdf_error
 
     # Remove redundant dimensions
     cleanFDF = np.squeeze(cleanFDF)
     ccArr = np.squeeze(ccArr)
     iterCountArr = np.squeeze(iterCountArr)
-    residFDF = np.squeeze(residFDF)
+    resifdf_error = np.squeeze(resifdf_error)
 
-    return RMCleanResults(cleanFDF, ccArr, iterCountArr, residFDF)
+    return RMCleanResults(cleanFDF, ccArr, iterCountArr, resifdf_error)
 
 
 # -----------------------------------------------------------------------------#
@@ -812,7 +881,7 @@ class CleanLoopResults(NamedTuple):
 
     cleanFDF: np.ndarray
     """The cleaned Faraday dispersion function cube"""
-    residFDF: np.ndarray
+    resifdf_error: np.ndarray
     """The residual Faraday dispersion function cube"""
     ccArr: np.ndarray
     """The clean components cube"""
@@ -855,7 +924,7 @@ class RMcleaner:
     def _cleanloop(self, yi, xi, dirtyFDF) -> CleanLoopResults:
         dirtyFDF = dirtyFDF[:, yi, xi]
         # Initialise arrays to hold the residual FDF, clean components, clean FDF
-        residFDF = dirtyFDF.copy()
+        resifdf_error = dirtyFDF.copy()
         ccArr = np.zeros_like(dirtyFDF)
         cleanFDF = np.zeros_like(dirtyFDF)
         RMSFArr = self.RMSFArr[:, yi, xi]
@@ -871,10 +940,10 @@ class RMcleaner:
         )
 
         iterCount = 0
-        while np.max(np.abs(residFDF)) >= self.cutoff and iterCount < self.maxIter:
+        while np.max(np.abs(resifdf_error)) >= self.cutoff and iterCount < self.maxIter:
             # Get the absolute peak channel, values and Faraday depth
-            indxPeakFDF = np.argmax(np.abs(residFDF))
-            peakFDFval = residFDF[indxPeakFDF]
+            indxPeakFDF = np.argmax(np.abs(resifdf_error))
+            peakFDFval = resifdf_error[indxPeakFDF]
             phiPeak = self.phi_arr_radm2[indxPeakFDF]
 
             # A clean component is "loop-gain * peakFDFval
@@ -890,7 +959,7 @@ class RMcleaner:
             ]
 
             # Subtract the product of the CC shifted RMSF from the residual FDF
-            residFDF -= CC * shiftedRMSFArr
+            resifdf_error -= CC * shiftedRMSFArr
 
             # Restore the CC * a Gaussian to the cleaned FDF
             cleanFDF += gauss1D(CC, phiPeak, fwhm_rmsf_arr)(self.phi_arr_radm2)
@@ -899,23 +968,23 @@ class RMcleaner:
 
         # Create a mask for the pixels that have been cleaned
         mask = np.abs(ccArr) > 0
-        dPhi = self.phi_arr_radm2[1] - self.phi_arr_radm2[0]
-        fwhm_rmsf_arr_pix = fwhm_rmsf_arr / dPhi
+        delta_phi = self.phi_arr_radm2[1] - self.phi_arr_radm2[0]
+        fwhm_rmsf_arr_pix = fwhm_rmsf_arr / delta_phi
         for i in np.where(mask)[0]:
             start = int(i - fwhm_rmsf_arr_pix / 2)
             end = int(i + fwhm_rmsf_arr_pix / 2)
             mask[start:end] = True
-        residFDF_mask = np.ma.array(residFDF, mask=~mask)
+        resifdf_error_mask = np.ma.array(resifdf_error, mask=~mask)
         # Clean again within mask
         while (
-            np.ma.max(np.ma.abs(residFDF_mask)) >= self.window
+            np.ma.max(np.ma.abs(resifdf_error_mask)) >= self.window
             and iterCount < self.maxIter
         ):
-            if residFDF_mask.mask.all():
+            if resifdf_error_mask.mask.all():
                 break
             # Get the absolute peak channel, values and Faraday depth
-            indxPeakFDF = np.ma.argmax(np.abs(residFDF_mask))
-            peakFDFval = residFDF_mask[indxPeakFDF]
+            indxPeakFDF = np.ma.argmax(np.abs(resifdf_error_mask))
+            peakFDFval = resifdf_error_mask[indxPeakFDF]
             phiPeak = self.phi_arr_radm2[indxPeakFDF]
 
             # A clean component is "loop-gain * peakFDFval
@@ -931,7 +1000,7 @@ class RMcleaner:
             ]
 
             # Subtract the product of the CC shifted RMSF from the residual FDF
-            residFDF -= CC * shiftedRMSFArr
+            resifdf_error -= CC * shiftedRMSFArr
 
             # Restore the CC * a Gaussian to the cleaned FDF
             cleanFDF += gauss1D(CC, phiPeak, fwhm_rmsf_arr)(self.phi_arr_radm2)
@@ -939,25 +1008,26 @@ class RMcleaner:
             self.iterCountArr[yi, xi] = iterCount
 
             # Remake masked residual FDF
-            residFDF_mask = np.ma.array(residFDF, mask=~mask)
+            resifdf_error_mask = np.ma.array(resifdf_error, mask=~mask)
 
         cleanFDF = np.squeeze(cleanFDF)
-        residFDF = np.squeeze(residFDF)
+        resifdf_error = np.squeeze(resifdf_error)
         ccArr = np.squeeze(ccArr)
 
-        return CleanLoopResults(cleanFDF=cleanFDF, residFDF=residFDF, ccArr=ccArr)
+        return CleanLoopResults(
+            cleanFDF=cleanFDF, resifdf_error=resifdf_error, ccArr=ccArr
+        )
 
 
-# -----------------------------------------------------------------------------#
-def measure_FDF_parms(
-    FDF,
-    phiArr,
-    fwhmRMSF,
-    dFDF=None,
-    lamSqArr_m2=None,
-    lam0Sq=None,
-    snrDoBiasCorrect=5.0,
-):
+def get_fdf_parameters(
+    fdf_array: np.ndarray,
+    phi_arr_radm2: np.ndarray,
+    fwhm_rmsf_radm2: float,
+    lambda_sq_arr_m2: np.ndarray,
+    lam_sq_0_m2: float,
+    fdf_error: Optional[float] = None,
+    bias_correction_snr: float = 5.0,
+) -> FDFParameters:
     """
     Measure standard parameters from a complex Faraday Dispersion Function.
     Currently this function assumes that the noise levels in the Stokes Q
@@ -965,121 +1035,112 @@ def measure_FDF_parms(
     Returns a dictionary containing measured parameters.
     """
 
-    # Determine the peak channel in the FDF, its amplitude and index
-    absFDF = np.abs(FDF)
-    indxPeakPIchan = (
-        np.nanargmax(absFDF[1:-1]) + 1
-    )  # Masks out the edge channels, since they can't be fit to.
+    abs_fdf_array = np.abs(fdf_array)
+    peak_pi_index = np.nanargmax(abs_fdf_array)
 
     # Measure the RMS noise in the spectrum after masking the peak
-    dPhi = np.nanmin(np.diff(phiArr))
-    fwhmRMSF_chan = np.ceil(fwhmRMSF / dPhi)
-    iL = int(max(0, indxPeakPIchan - fwhmRMSF_chan * 2))
-    iR = int(min(len(absFDF), indxPeakPIchan + fwhmRMSF_chan * 2))
-    FDFmsked = FDF.copy()
-    FDFmsked[iL:iR] = np.nan
-    FDFmsked = FDFmsked[np.where(FDFmsked == FDFmsked)]
-    if float(len(FDFmsked)) / len(FDF) < 0.3:
-        dFDFcorMAD = MAD(np.concatenate((np.real(FDF), np.imag(FDF))))
-    else:
-        dFDFcorMAD = MAD(np.concatenate((np.real(FDFmsked), np.imag(FDFmsked))))
+    d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
+    mask = np.ones_like(phi_arr_radm2, dtype=bool)
+    mask[peak_pi_index] = False
+    fwhm_rmsf_arr_pix = fwhm_rmsf_radm2 / d_phi
+    for i in np.where(mask)[0]:
+        start = int(i - fwhm_rmsf_arr_pix / 2)
+        end = int(i + fwhm_rmsf_arr_pix / 2)
+        mask[start : end + 2] = False
+
+    fdf_error_mad: float = mad_std(
+        np.concatenate([fdf_array[mask].real, fdf_array[mask].imag])
+    )
 
     # Default to using the measured FDF if a noise value has not been provided
-    if dFDF is None:
-        dFDF = dFDFcorMAD
+    if fdf_error is None:
+        fdf_error = fdf_error_mad
 
-    nChansGood = np.sum(np.where(lamSqArr_m2 == lamSqArr_m2, 1.0, 0.0))
-    varLamSqArr_m2 = (
-        np.sum(lamSqArr_m2**2.0) - np.sum(lamSqArr_m2) ** 2.0 / nChansGood
-    ) / (nChansGood - 1)
+    n_good_chan = np.isfinite(fdf_array).sum()
+    lambda_sq_arr_m2_variance = (
+        np.sum(lambda_sq_arr_m2**2.0) - np.sum(lambda_sq_arr_m2) ** 2.0 / n_good_chan
+    ) / (n_good_chan - 1)
 
-    # Determine the peak in the FDF, its amplitude and Phi using a
-    # 3-point parabolic interpolation
-    phiPeakPIfit = None
-    dPhiPeakPIfit = None
-    ampPeakPIfit = None
-    snrPIfit = None
-    ampPeakPIfitEff = None
-    indxPeakPIfit = None
-    peakFDFimagFit = None
-    peakFDFrealFit = None
-    polAngleFit_deg = None
-    dPolAngleFit_deg = None
-    polAngle0Fit_deg = None
-    dPolAngle0Fit_deg = None
-
-    # Only do the 3-point fit if peak is 1-channel from either edge
-    if indxPeakPIchan > 0 and indxPeakPIchan < len(FDF) - 1:
-        phiPeakPIfit, ampPeakPIfit = calc_parabola_vertex(
-            phiArr[indxPeakPIchan - 1],
-            absFDF[indxPeakPIchan - 1],
-            phiArr[indxPeakPIchan],
-            absFDF[indxPeakPIchan],
-            phiArr[indxPeakPIchan + 1],
-            absFDF[indxPeakPIchan + 1],
+    if not (peak_pi_index > 0 and peak_pi_index < len(abs_fdf_array) - 1):
+        return FDFParameters(
+            fdf_error_mad=fdf_error_mad,
+            peak_pi_fit=np.nan,
+            peak_pi_error=fdf_error,
+            peak_pi_fit_debias=np.nan,
+            peak_pi_fit_snr=np.nan,
+            peak_pi_fit_index=np.nan,
+            peak_rm_fit=np.nan,
+            peak_rm_fit_error=np.nan,
+            peak_q_fit=np.nan,
+            peak_u_fit=np.nan,
+            peak_pa_fit_deg=np.nan,
+            peak_pa_fit_deg_error=np.nan,
+            peak_pa0_fit_deg=np.nan,
+            peak_pa0_fit_deg_error=np.nan,
         )
+    peak_pi_fit, peak_rm_fit, _ = fit_fdf(
+        fdf_to_fit_array=abs_fdf_array,
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_fdf_radm2=fwhm_rmsf_radm2,
+    )
+    peak_pi_fit_snr = peak_pi_fit / fdf_error
+    # In rare cases, a parabola can be fitted to the edge of the spectrum,
+    # producing a unreasonably large RM and polarized intensity.
+    # In these cases, everything should get NaN'd out.
+    if np.abs(peak_rm_fit) > np.max(np.abs(phi_arr_radm2)):
+        peak_rm_fit = np.nan
+        peak_pi_fit = np.nan
 
-        snrPIfit = ampPeakPIfit / dFDF
+    # Error on fitted Faraday depth (RM) is same as channel, but using fitted PI
+    peak_rm_fit_err = fwhm_rmsf_radm2 * fdf_error / (2.0 * peak_pi_fit)
 
-        # In rare cases, a parabola can be fitted to the edge of the spectrum,
-        # producing a unreasonably large RM and polarized intensity.
-        # In these cases, everything should get NaN'd out.
-        if np.abs(phiPeakPIfit) > np.max(np.abs(phiArr)):
-            phiPeakPIfit = np.nan
-            ampPeakPIfit = np.nan
+    # Correct the peak for polarisation bias (POSSUM report 11)
+    peak_pi_fit_debias = peak_pi_fit
+    if peak_pi_fit_snr >= bias_correction_snr:
+        peak_pi_fit_debias = np.sqrt(peak_pi_fit**2.0 - 2.3 * fdf_error**2.0)
 
-        # Error on fitted Faraday depth (RM) is same as channel, but using fitted PI
-        dPhiPeakPIfit = fwhmRMSF * dFDF / (2.0 * ampPeakPIfit)
+    # Calculate the polarisation angle from the fitted peak
+    # Uncertainty from Eqn A.12 in Brentjens & De Bruyn 2005
+    peak_pi_fit_index = np.interp(
+        peak_rm_fit, phi_arr_radm2, np.arange(phi_arr_radm2.shape[-1], dtype="f4")
+    )
+    peak_u_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_array.imag)
+    peak_q_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_array.real)
+    peak_pa_fit_deg = 0.5 * np.degrees(np.arctan2(peak_u_fit, peak_q_fit)) % 180
+    peak_pa_fit_deg_err = np.degrees(fdf_error / (2.0 * peak_pi_fit))
 
-        # Correct the peak for polarisation bias (POSSUM report 11)
-        ampPeakPIfitEff = ampPeakPIfit
-        if snrPIfit >= snrDoBiasCorrect:
-            ampPeakPIfitEff = np.sqrt(ampPeakPIfit**2.0 - 2.3 * dFDF**2.0)
-
-        # Calculate the polarisation angle from the fitted peak
-        # Uncertainty from Eqn A.12 in Brentjens & De Bruyn 2005
-        indxPeakPIfit = np.interp(
-            phiPeakPIfit, phiArr, np.arange(phiArr.shape[-1], dtype="f4")
+    # Calculate the derotated polarisation angle and uncertainty
+    # Uncertainty from Eqn A.20 in Brentjens & De Bruyn 2005
+    peak_pa0_fit_deg = (
+        np.degrees(np.radians(peak_pa_fit_deg) - peak_rm_fit * lam_sq_0_m2)
+    ) % 180.0
+    peak_pa0_fit_rad_err = np.sqrt(
+        fdf_error**2.0
+        * n_good_chan
+        / (4.0 * (n_good_chan - 2.0) * peak_pi_fit**2.0)
+        * (
+            (n_good_chan - 1) / n_good_chan
+            + lam_sq_0_m2**2.0 / lambda_sq_arr_m2_variance
         )
-        peakFDFimagFit = np.interp(phiPeakPIfit, phiArr, FDF.imag)
-        peakFDFrealFit = np.interp(phiPeakPIfit, phiArr, FDF.real)
-        polAngleFit_deg = (
-            0.5 * np.degrees(np.arctan2(peakFDFimagFit, peakFDFrealFit)) % 180
-        )
-        dPolAngleFit_deg = np.degrees(dFDF / (2.0 * ampPeakPIfit))
+    )
+    peak_pa0_fit_deg_err = np.degrees(peak_pa0_fit_rad_err)
 
-        # Calculate the derotated polarisation angle and uncertainty
-        # Uncertainty from Eqn A.20 in Brentjens & De Bruyn 2005
-        polAngle0Fit_deg = (
-            np.degrees(np.radians(polAngleFit_deg) - phiPeakPIfit * lam0Sq)
-        ) % 180
-        dPolAngle0Fit_rad = np.sqrt(
-            dFDF**2.0
-            * nChansGood
-            / (4.0 * (nChansGood - 2.0) * ampPeakPIfit**2.0)
-            * ((nChansGood - 1) / nChansGood + lam0Sq**2.0 / varLamSqArr_m2)
-        )
-        dPolAngle0Fit_deg = np.degrees(dPolAngle0Fit_rad)
-
-    # Store the measurements in a dictionary and return
-    mDict = {
-        "dFDFcorMAD": toscalar(dFDFcorMAD),
-        "phiPeakPIfit_rm2": toscalar(phiPeakPIfit),
-        "dPhiPeakPIfit_rm2": toscalar(dPhiPeakPIfit),
-        "ampPeakPIfit": toscalar(ampPeakPIfit),
-        "ampPeakPIfitEff": toscalar(ampPeakPIfitEff),
-        "dAmpPeakPIfit": toscalar(dFDF),
-        "snrPIfit": toscalar(snrPIfit),
-        "indxPeakPIfit": toscalar(indxPeakPIfit),
-        "peakFDFimagFit": toscalar(peakFDFimagFit),
-        "peakFDFrealFit": toscalar(peakFDFrealFit),
-        "polAngleFit_deg": toscalar(polAngleFit_deg),
-        "dPolAngleFit_deg": toscalar(dPolAngleFit_deg),
-        "polAngle0Fit_deg": toscalar(polAngle0Fit_deg),
-        "dPolAngle0Fit_deg": toscalar(dPolAngle0Fit_deg),
-    }
-
-    return mDict
+    return FDFParameters(
+        fdf_error_mad=fdf_error_mad,
+        peak_pi_fit=peak_pi_fit,
+        peak_pi_error=fdf_error,
+        peak_pi_fit_debias=peak_pi_fit_debias,
+        peak_pi_fit_snr=peak_pi_fit_snr,
+        peak_pi_fit_index=peak_pi_fit_index,
+        peak_rm_fit=peak_rm_fit,
+        peak_rm_fit_error=peak_rm_fit_err,
+        peak_q_fit=peak_q_fit,
+        peak_u_fit=peak_u_fit,
+        peak_pa_fit_deg=peak_pa_fit_deg,
+        peak_pa_fit_deg_error=peak_pa_fit_deg_err,
+        peak_pa0_fit_deg=peak_pa0_fit_deg,
+        peak_pa0_fit_deg_error=peak_pa0_fit_deg_err,
+    )
 
 
 # -----------------------------------------------------------------------------#
@@ -1213,7 +1274,7 @@ def create_pqu_spectra_burn(
     nChans = len(freqArr_Hz)
     nComps = len(fracPolArr)
     lamArr_m = C / freqArr_Hz
-    lamSqArr_m2 = np.power(lamArr_m, 2.0)
+    lambda_sq_arr_m2 = np.power(lamArr_m, 2.0)
 
     # Convert the inputs to column vectors
     fracPolArr = fracPolArr.reshape((nComps, 1))
@@ -1224,7 +1285,7 @@ def create_pqu_spectra_burn(
     # Calculate the p, q and u Spectra for all components
     pArr = fracPolArr * np.ones((nComps, nChans), dtype="f8")
     quArr = pArr * (
-        np.exp(2j * (np.radians(psi0Arr_deg) + RMArr_radm2 * lamSqArr_m2))
+        np.exp(2j * (np.radians(psi0Arr_deg) + RMArr_radm2 * lambda_sq_arr_m2))
         * np.exp(-2.0 * sigmaRMArr_radm2 * np.power(lamArr_m, 4.0))
     )
 
@@ -1247,8 +1308,8 @@ def measure_qu_complexity(
         psi0Arr_deg=[psi0_deg],
         RMArr_radm2=[RM_radm2],
     )
-    lamSqArr_m2 = np.power(C / freqArr_Hz, 2.0)
-    ndata = len(lamSqArr_m2)
+    lambda_sq_arr_m2 = np.power(C / freqArr_Hz, 2.0)
+    ndata = len(lambda_sq_arr_m2)
 
     # Subtract the RM-thin model to create a residual q & u
     qResidArr = qArr - qModArr
@@ -1258,7 +1319,7 @@ def measure_qu_complexity(
     mDict = {}
     pDict = {}
     m1D, p1D = calc_sigma_add(
-        xArr=lamSqArr_m2[: int(ndata / specF)],
+        xArr=lambda_sq_arr_m2[: int(ndata / specF)],
         yArr=(qResidArr / dqArr)[: int(ndata / specF)],
         dyArr=(dqArr / dqArr)[: int(ndata / specF)],
         yMed=0.0,
@@ -1268,7 +1329,7 @@ def measure_qu_complexity(
     mDict.update(m1D)
     pDict.update(p1D)
     m2D, p2D = calc_sigma_add(
-        xArr=lamSqArr_m2[: int(ndata / specF)],
+        xArr=lambda_sq_arr_m2[: int(ndata / specF)],
         yArr=(uResidArr / duArr)[: int(ndata / specF)],
         dyArr=(duArr / duArr)[: int(ndata / specF)],
         yMed=0.0,
@@ -1287,9 +1348,9 @@ def measure_qu_complexity(
 
 
 # -----------------------------------------------------------------------------#
-def measure_fdf_complexity(phiArr, FDF):
+def measure_fdf_complexity(phi_arr_radm2, FDF):
     # Second moment of clean component spectrum
-    mom2FDF = calc_mom2_FDF(FDF, phiArr)
+    mom2FDF = calc_mom2_FDF(FDF, phi_arr_radm2)
 
     return toscalar(mom2FDF)
 
