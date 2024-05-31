@@ -8,8 +8,13 @@ from typing import Literal, NamedTuple, Optional
 import numpy as np
 from scipy import interpolate
 
+from rm_lite.utils.fitting import FitResult
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
+    FDFParameters,
+    StokesIArray,
+    StokesQArray,
+    StokesUArray,
     compute_rmsynth_params,
     compute_theoretical_noise,
     get_fdf_parameters,
@@ -22,49 +27,32 @@ from rm_lite.utils.synthesis import (
 logger.setLevel("WARNING")
 
 
-class RMSynthResults(NamedTuple):
+class RMSynth1DArrays(NamedTuple):
+    """Resulting arrays from RM-synthesis"""
+
+    phi_arr_radm2: np.ndarray
+    """ Array of Faraday depths """
+    phi2_arr_radm2: np.ndarray
+    """ Double length of Faraday depths """
+    rmsf_array: np.ndarray
+    """ Rotation Measure Spread Function """
+    freq_array_hz: np.ndarray
+    """ Frequency array """
+    weight_array: np.ndarray
+    """ Weight array """
+    fdf_dirty_array: np.ndarray
+    """ Dirty Faraday dispersion function """
+
+
+class RMSynth1DResults(NamedTuple):
     """Results of RM-synthesis"""
 
-    fdf_error_mad: float
-    """Median absolute deviation error of the FDF"""
-    fdf_error_theoretical: float
-    """Theoretical error of the FDF"""
-    peak_pi_fit: float
-    """Peak polarised intensity of the FDF"""
-    peak_pi_error: float
-    """Error on the peak polarised intensity"""
-    peak_pi_fit_debias: float
-    """Debiased peak polarised intensity of the FDF"""
-    peak_pi_fit_snr: float
-    """Signal-to-noise ratio of the peak polarised intensity"""
-    peak_pi_fit_index: float
-    """Index of the fitted peak polarised intensity"""
-    peak_rm_fit: float
-    """Peak Faraday depth of the FDF"""
-    peak_rm_fit_error: float
-    """Error on the peak Faraday depth"""
-    peak_q_fit: float
-    """Peak Stokes Q of the FDF"""
-    peak_q_fit_error: float
-    """Error on the peak Stokes Q of the FDF"""
-    peak_u_fit: float
-    """Peak Stokes U of the FDF"""
-    peak_u_fit_error: float
-    """Error on the peak Stokes U of the FDF"""
-    peak_pa_fit_deg: float
-    """Peak position angle of the FDF in degrees"""
-    peak_pa_fit_deg_error: float
-    """Error on the peak position angle of the FDF in degrees"""
-    peak_pa0_fit_deg: float
-    """Peak deroated position angle of the FDF in degrees"""
-    peak_pa0_fit_deg_error: float
-    """Error on the peak deroated position angle of the FDF in degrees"""
-    reference_freq_hz: float
-    """Reference frequency in Hz"""
-    lam_sq_0_m2: float
-    """Reference wavelength squared in m^2"""
-    stokes_i_fit_params: np.ndarray
-    """Parameters of the Stokes I fit"""
+    fdf_parameters: FDFParameters
+    """ Parameters of the Faraday dispersion function """
+    stokes_i_fit_result: FitResult
+    """ Fit result of the Stokes I spectrum """
+    arrays: RMSynth1DArrays
+    """ Resulting arrays from RM-synthesis """
 
 
 class RMSynthArrays(NamedTuple):
@@ -89,6 +77,11 @@ def run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
 ):
+    stokes_q_array = StokesQArray(stokes_q_array)
+    stokes_u_array = StokesUArray(stokes_u_array)
+    stokes_q_error_array = StokesQArray(stokes_q_error_array)
+    stokes_u_error_array = StokesUArray(stokes_u_error_array)
+
     lambda_sq_arr_m2, lam_sq_0_m2, phi_arr_radm2, weight_array = compute_rmsynth_params(
         freq_array_hz=freq_array_hz,
         pol_array=stokes_q_array + 1j * stokes_u_array,
@@ -100,26 +93,23 @@ def run_rmsynth(
         weight_type=weight_type,
     )
 
-    if stokes_i_array is None:
+    if stokes_i_array is None or stokes_i_error_array is None:
         logger.warning(
-            "Stokes I array not provided. No fractional polarization will be calculated."
+            "Stokes I array/errors not provided. No fractional polarization will be calculated."
         )
-        stokes_i_array = np.ones_like(stokes_q_array)
-        no_nan_idx = (
-            np.isfinite(stokes_q_array)
-            & np.isfinite(stokes_q_error_array)
-            & np.isfinite(stokes_u_array)
-            & np.isfinite(stokes_u_error_array)
-            & np.isfinite(freq_array_hz)
-        )
+        stokes_i_array = StokesIArray(np.ones_like(stokes_q_array))
+        stokes_i_error_array = StokesIArray(np.zeros_like(stokes_q_error_array))
 
-        freq_array_hz = freq_array_hz[no_nan_idx]
+    else:
+        stokes_i_array = StokesIArray(stokes_i_array)
+        stokes_i_error_array = StokesIArray(stokes_i_error_array)
+
     (
         stokes_i_model_array,
-        stokes_q_array,
-        stokes_u_array,
-        stokes_q_error_array,
-        stokes_u_error_array,
+        stokes_q_frac_array,
+        stokes_u_frac_array,
+        stokes_q_frac_error_array,
+        stokes_u_frac_error_array,
         fit_result,
     ) = create_fractional_spectra(
         freq_array_hz=freq_array_hz,
@@ -132,7 +122,9 @@ def run_rmsynth(
         stokes_u_error_array=stokes_u_error_array,
         fit_order=fit_order,
         fit_function=fit_function,
-        stokes_i_model_array=stokes_i_model_array,
+        stokes_i_model_array=StokesIArray(stokes_i_model_array)
+        if stokes_i_model_array
+        else None,
     )
 
     # Compute after any fractional spectra have been created
@@ -140,8 +132,8 @@ def run_rmsynth(
 
     # Perform RM-synthesis on the spectrum
     fdf_dirty_array = rmsynth_nufft(
-        stokes_q_array=stokes_q_array,
-        stokes_u_array=stokes_u_array,
+        stokes_q_array=stokes_q_frac_array,
+        stokes_u_array=stokes_u_frac_array,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         phi_arr_radm2=phi_arr_radm2,
         weight_array=weight_array,
@@ -165,8 +157,8 @@ def run_rmsynth(
     logger.info(f"RM-synthesis completed in {cpu_time*1000:.2f}ms.")
 
     theoretical_noise = compute_theoretical_noise(
-        stokes_q_error_array=stokes_q_error_array,
-        stokes_u_error_array=stokes_u_error_array,
+        stokes_q_error_array=stokes_q_frac_error_array,
+        stokes_u_error_array=stokes_u_frac_error_array,
         weight_array=weight_array,
     )
     if stokes_i_model_array is not None:
@@ -189,27 +181,18 @@ def run_rmsynth(
         lam_sq_0_m2=lam_sq_0_m2,
         fdf_error=theoretical_noise.fdf_error_noise,
     )
-    rmsynth_results = RMSynthResults(
-        fdf_error_mad=fdf_parameters.fdf_error_mad,
-        fdf_error_theoretical=theoretical_noise.fdf_error_noise,
-        peak_pi_fit=fdf_parameters.peak_pi_fit,
-        peak_pi_error=fdf_parameters.peak_pi_error,
-        peak_pi_fit_debias=fdf_parameters.peak_pi_fit_debias,
-        peak_pi_fit_snr=fdf_parameters.peak_pi_fit_snr,
-        peak_pi_fit_index=fdf_parameters.peak_pi_fit_index,
-        peak_rm_fit=fdf_parameters.peak_rm_fit,
-        peak_rm_fit_error=fdf_parameters.peak_rm_fit_error,
-        peak_q_fit=fdf_parameters.peak_q_fit,
-        peak_q_fit_error=theoretical_noise.fdf_q_noise,
-        peak_u_fit=fdf_parameters.peak_u_fit,
-        peak_u_fit_error=theoretical_noise.fdf_u_noise,
-        peak_pa_fit_deg=fdf_parameters.peak_pa_fit_deg,
-        peak_pa_fit_deg_error=fdf_parameters.peak_pa_fit_deg_error,
-        peak_pa0_fit_deg=fdf_parameters.peak_pa0_fit_deg,
-        peak_pa0_fit_deg_error=fdf_parameters.peak_pa0_fit_deg_error,
-        reference_freq_hz=lambda2_to_freq(lam_sq_0_m2),
-        lam_sq_0_m2=lam_sq_0_m2,
-        stokes_i_fit_params=fit_result.params,
+    fdf_arrays = RMSynth1DArrays(
+        phi_arr_radm2=phi_arr_radm2,
+        phi2_arr_radm2=phi_double_arr_radm2,
+        rmsf_array=rmsf_array,
+        freq_array_hz=freq_array_hz,
+        weight_array=weight_array,
+        fdf_dirty_array=fdf_dirty_array,
+    )
+    return RMSynth1DResults(
+        fdf_parameters=fdf_parameters,
+        stokes_i_fit_result=fit_result,
+        arrays=fdf_arrays,
     )
     # mDict["polyCoeffs"] = ",".join(
     #     [str(x.astype(np.float32)) for x in fit_result.params]
