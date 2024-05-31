@@ -3,7 +3,6 @@ from typing import Callable, Literal, NamedTuple, Tuple
 
 import numpy as np
 from astropy.modeling.models import Gaussian1D
-from astropy.stats import akaike_info_criterion_lsq
 from scipy.optimize import curve_fit
 
 from rm_lite.utils.logging import logger

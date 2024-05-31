@@ -7,10 +7,11 @@ import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
 from astropy.stats import mad_std
+from scipy.stats import multivariate_normal
 from tqdm.auto import tqdm, trange
 from uncertainties import unumpy
 
-from rm_lite.utils.fitting import fit_fdf
+from rm_lite.utils.fitting import FitResult, fit_fdf, fit_stokes_i_model
 from rm_lite.utils.logging import logger
 
 
@@ -64,6 +65,7 @@ class FractionalSpectra(NamedTuple):
     stokes_u_frac_array: np.ndarray
     stokes_q_frac_error_array: np.ndarray
     stokes_u_frac_error_array: np.ndarray
+    fit_result: FitResult
 
 
 class FDFParameters(NamedTuple):
@@ -183,7 +185,7 @@ def create_fractional_spectra(
             stokes_i_model_array, stokes_i_model_error
         )
     else:
-        popt, pcov, stokes_i_model_func, aic = fit_stokes_i_model(
+        fit_result = fit_stokes_i_model(
             freq_array_hz,
             ref_freq_hz,
             stokes_i_array,
@@ -191,6 +193,7 @@ def create_fractional_spectra(
             fit_order,
             fit_function,
         )
+        popt, pcov, stokes_i_model_func, aic = fit_result
         error_distribution = multivariate_normal(
             mean=popt, cov=pcov, allow_singular=True
         )
@@ -224,6 +227,7 @@ def create_fractional_spectra(
         stokes_u_frac_array=stokes_u_frac_array,
         stokes_q_frac_error_array=stokes_q_frac_error_array,
         stokes_u_frac_error_array=stokes_u_frac_error_array,
+        fit_result=fit_result,
     )
 
 
