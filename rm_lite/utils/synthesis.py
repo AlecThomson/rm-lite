@@ -6,7 +6,6 @@ from typing import Literal, NamedTuple, Optional
 import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
-from scipy import optimize
 from tqdm.auto import tqdm, trange
 from uncertainties import unumpy
 

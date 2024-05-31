@@ -2,10 +2,7 @@
 # -*- coding: utf-8 -*-
 """Tests for the synthesis utilities"""
 
-from typing import NamedTuple
-
 import numpy as np
-import pytest
 
 from rm_lite.utils.synthesis import (
     freq_to_lambda2,
