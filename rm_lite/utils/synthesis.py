@@ -6,25 +6,81 @@ from typing import Literal, NamedTuple, Optional
 import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
-from astropy.modeling.models import Gaussian1D
 from scipy import optimize
 from tqdm.auto import tqdm, trange
 
 from rm_lite.utils.fitting import (
     calc_mom2_FDF,
-    calc_parabola_vertex,
     create_pqu_spectra_burn,
 )
 from rm_lite.utils.logging import logger
 
 
+class FWHMRMSF(NamedTuple):
+    fwhm_rmsf_radm2: float
+    """The FWHM of the RMSF main lobe"""
+    d_lambda_sq_max_m2: float
+    """The maximum difference in lambda^2 values"""
+    lambda_sq_range_m2: float
+    """The range of lambda^2 values"""
+
+
+class RMsynthResults(NamedTuple):
+    """Results of the RM-synthesis calculation"""
+
+    fdf_dirty_cube: np.ndarray
+    """The Faraday dispersion function cube"""
+    lam_sq_0_m2: float
+    """The reference lambda^2 value"""
+
+
+class RMSFResults(NamedTuple):
+    """Results of the RMSF calculation"""
+
+    rmsf_cube: np.ndarray
+    """The RMSF cube"""
+    phi_double_arr_radm2: np.ndarray
+    """The (double length) Faraday depth array"""
+    fwhm_rmsf_arr: np.ndarray
+    """The FWHM of the RMSF main lobe"""
+    fit_status_array: np.ndarray
+    """The status of the RMSF fit"""
+
+
+class RMCleanResults(NamedTuple):
+    """Results of the RM-CLEAN calculation"""
+
+    cleanFDF: np.ndarray
+    """The cleaned Faraday dispersion function cube"""
+    ccArr: np.ndarray
+    """The clean components cube"""
+    iterCountArr: np.ndarray
+    """The number of iterations for each pixel"""
+    residFDF: np.ndarray
+    """The residual Faraday dispersion function cube"""
+
+
 def freq_to_lambda2(freq_hz: float) -> float:
-    """Convert frequency to lambda^2."""
+    """Convert frequency to lambda^2.
+
+    Args:
+        freq_hz (float): Frequency in Hz
+
+    Returns:
+        float: Wavelength^2 in m^2
+    """
     return (speed_of_light.value / freq_hz) ** 2.0
 
 
 def lambda2_to_freq(lambda_sq_m2: float) -> float:
-    """Convert lambda^2 to frequency."""
+    """Convert lambda^2 to frequency.
+
+    Args:
+        lambda_sq_m2 (float): Wavelength^2 in m^2
+
+    Returns:
+        float: Frequency in Hz
+    """
     return speed_of_light.value / np.sqrt(lambda_sq_m2)
 
 
@@ -44,10 +100,16 @@ def compute_theoretical_noise(
 
 
 class RMSynthParams(NamedTuple):
+    """Parameters for RM-synthesis calculation"""
+
     lambda_sq_arr_m2: np.ndarray
+    """ Wavelength^2 values in m^2 """
     lam_sq_0_m2: float
+    """ Reference wavelength^2 value """
     phi_arr_radm2: np.ndarray
+    """ Faraday depth values in rad/m^2 """
     weight_array: np.ndarray
+    """ Weight array """
 
 
 def compute_rmsynth_params(
@@ -60,6 +122,24 @@ def compute_rmsynth_params(
     super_resolution: bool = False,
     weight_type: Literal["variance", "uniform"] = "variance",
 ) -> RMSynthParams:
+    """Calculate the parameters for RM-synthesis.
+
+    Args:
+        freq_array_hz (np.ndarray): Frequency array in Hz
+        pol_array (np.ndarray): Complex polarisation array
+        stokes_qu_error_array (np.ndarray): Error in Stokes Q and U
+        d_phi_radm2 (Optional[float], optional): Pixel spacing in Faraday depth in rad/m^2. Defaults to None.
+        n_samples (Optional[float], optional): Number of samples across the RMSF main lobe. Defaults to 10.0.
+        phi_max_radm2 (Optional[float], optional): Maximum Faraday depth in rad/m^2. Defaults to None.
+        super_resolution (bool, optional): Use Cotton+Rudnick superresolution. Defaults to False.
+        weight_type (Literal["variance", "uniform"], optional): Type of weighting to use. Defaults to "variance".
+
+    Raises:
+        ValueError: If d_phi_radm2 is not provided and n_samples is None.
+
+    Returns:
+        RMSynthParams: Wavelength^2 values, reference wavelength^2, Faraday depth values, weight array
+    """
     lambda_sq_arr_m2 = freq_to_lambda2(freq_array_hz)
 
     fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
@@ -110,6 +190,15 @@ def make_phi_array(
     phi_max_radm2: float,
     d_phi_radm2: float,
 ) -> np.ndarray:
+    """Construct a Faraday depth array.
+
+    Args:
+        phi_max_radm2 (float): Maximum Faraday depth in rad/m^2
+        d_phi_radm2 (float): Spacing in Faraday depth in rad/m^2
+
+    Returns:
+        np.ndarray: Faraday depth array in rad/m^2
+    """
     # Faraday depth sampling. Zero always centred on middle channel
     n_chan_rm = int(np.round(abs((phi_max_radm2 - 0.0) / d_phi_radm2)) * 2.0 + 1.0)
     max_phi_radm2 = (n_chan_rm - 1.0) * d_phi_radm2 / 2.0
@@ -117,19 +206,19 @@ def make_phi_array(
     return phi_arr_radm2
 
 
-class FWHMRMSF(NamedTuple):
-    fwhm_rmsf_radm2: float
-    """The FWHM of the RMSF main lobe"""
-    d_lambda_sq_max_m2: float
-    """The maximum difference in lambda^2 values"""
-    lambda_sq_range_m2: float
-    """The range of lambda^2 values"""
-
-
 def get_fwhm_rmsf(
     lambda_sq_arr_m2: np.ndarray,
     super_resolution: bool = False,
 ) -> FWHMRMSF:
+    """Calculate the FWHM of the RMSF.
+
+    Args:
+        lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
+        super_resolution (bool, optional): Use Cotton+Rudnick superresolution. Defaults to False.
+
+    Returns:
+        FWHMRMSF: FWHM of the RMSF main lobe, maximum difference in lambda^2 values, range of lambda^2 values
+    """
     lambda_sq_range_m2 = np.nanmax(lambda_sq_arr_m2) - np.nanmin(lambda_sq_arr_m2)
     d_lambda_sq_max_m2 = np.nanmax(np.abs(np.diff(lambda_sq_arr_m2)))
 
@@ -147,22 +236,13 @@ def get_fwhm_rmsf(
     )
 
 
-class RMsynthResults(NamedTuple):
-    """Results of the RM-synthesis calculation"""
-
-    fdf_dirty_cube: np.ndarray
-    """The Faraday dispersion function cube"""
-    lam_sq_0_m2: float
-    """The reference lambda^2 value"""
-
-
 def rmsynth_nufft(
     stokes_q_array: np.ndarray,
     stokes_u_array: np.ndarray,
     lambda_sq_arr_m2: np.ndarray,
     phi_arr_radm2: np.ndarray,
     weight_array: np.ndarray,
-    lam_sq_0_m2: Optional[float] = None,
+    lam_sq_0_m2: float,
     eps: float = 1e-6,
 ) -> np.ndarray:
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
@@ -282,20 +362,6 @@ def rmsynth_nufft(
     fdf_dirty_cube = np.squeeze(fdf_dirty_cube)
 
     return fdf_dirty_cube
-
-
-# -----------------------------------------------------------------------------#
-class RMSFResults(NamedTuple):
-    """Results of the RMSF calculation"""
-
-    rmsf_cube: np.ndarray
-    """The RMSF cube"""
-    phi_double_arr_radm2: np.ndarray
-    """The (double length) Faraday depth array"""
-    fwhm_rmsf_arr: np.ndarray
-    """The FWHM of the RMSF main lobe"""
-    fit_status_array: np.ndarray
-    """The status of the RMSF fit"""
 
 
 def get_rmsf_nufft(
@@ -463,20 +529,6 @@ def get_rmsf_nufft(
         fwhm_rmsf_arr=fwhm_rmsf_arr,
         fit_status_array=fit_status_array,
     )
-
-
-# -----------------------------------------------------------------------------#
-class RMCleanResults(NamedTuple):
-    """Results of the RM-CLEAN calculation"""
-
-    cleanFDF: np.ndarray
-    """The cleaned Faraday dispersion function cube"""
-    ccArr: np.ndarray
-    """The clean components cube"""
-    iterCountArr: np.ndarray
-    """The number of iterations for each pixel"""
-    residFDF: np.ndarray
-    """The residual Faraday dispersion function cube"""
 
 
 def do_rmclean_hogbom(
@@ -788,77 +840,6 @@ class RMcleaner:
         ccArr = np.squeeze(ccArr)
 
         return CleanLoopResults(cleanFDF=cleanFDF, residFDF=residFDF, ccArr=ccArr)
-
-
-# -----------------------------------------------------------------------------#
-def fits_make_lin_axis(head, axis=0, dtype="f4"):
-    """Create an array containing the axis values, assuming a simple linear
-    projection scheme. Axis selection is zero-indexed."""
-
-    axis = int(axis)
-    if head["NAXIS"] < axis + 1:
-        return []
-
-    i = str(int(axis) + 1)
-    start = head["CRVAL" + i] + (1 - head["CRPIX" + i]) * head["CDELT" + i]
-    stop = (
-        head["CRVAL" + i] + (head["NAXIS" + i] - head["CRPIX" + i]) * head["CDELT" + i]
-    )
-    nChan = int(abs(start - stop) / head["CDELT" + i] + 1)
-
-    return np.linspace(start, stop, nChan).astype(dtype)
-
-
-# -----------------------------------------------------------------------------#
-def extrap(x, xp, yp):
-    """
-    Wrapper to allow np.interp to linearly extrapolate at function ends.
-
-    np.interp function with linear extrapolation
-    http://stackoverflow.com/questions/2745329/how-to-make-scipy-interpolate
-    -give-a-an-extrapolated-result-beyond-the-input-ran
-
-    """
-    y = np.interp(x, xp, yp)
-    y = np.where(x < xp[0], yp[0] + (x - xp[0]) * (yp[0] - yp[1]) / (xp[0] - xp[1]), y)
-    y = np.where(
-        x > xp[-1], yp[-1] + (x - xp[-1]) * (yp[-1] - yp[-2]) / (xp[-1] - xp[-2]), y
-    )
-    return y
-
-
-def gaussian(x, amplitude, mean, stddev):
-    return Gaussian1D(amplitude=amplitude, mean=mean, stddev=stddev)(x)
-
-
-def unit_gaussian(x, mean, stddev):
-    return Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x)
-
-
-def unit_centred_gaussian(x, stddev):
-    return Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x)
-
-
-def fit_rmsf(
-    rmsf_to_fit_array: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
-    fwhm_rmsf_radm2: float,
-) -> float:
-    d_phi = phi_double_arr_radm2[1] - phi_double_arr_radm2[0]
-    mask = np.zeros_like(phi_double_arr_radm2, dtype=bool)
-    mask[np.argmax(rmsf_to_fit_array)] = 1
-    fwhm_rmsf_arr_pix = fwhm_rmsf_radm2 / d_phi
-    for i in np.where(mask)[0]:
-        start = int(i - fwhm_rmsf_arr_pix / 2)
-        end = int(i + fwhm_rmsf_arr_pix / 2)
-        mask[start : end + 2] = True
-    popt, pcov = optimize.curve_fit(
-        unit_centred_gaussian,
-        phi_double_arr_radm2[mask],
-        rmsf_to_fit_array[mask],
-        p0=[fwhm_rmsf_radm2],
-    )
-    return popt[0]
 
 
 # -----------------------------------------------------------------------------#

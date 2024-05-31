@@ -3,6 +3,7 @@ import warnings
 from typing import Callable, Literal, NamedTuple, Optional, Tuple
 
 import numpy as np
+from astropy.modeling.models import Gaussian1D
 from astropy.stats import akaike_info_criterion_lsq
 from scipy.optimize import curve_fit
 from scipy.stats import norm, multivariate_normal
@@ -20,6 +21,40 @@ class FitResult(NamedTuple):
     aic: float
 
 
+def gaussian(x, amplitude, mean, stddev):
+    return Gaussian1D(amplitude=amplitude, mean=mean, stddev=stddev)(x)
+
+
+def unit_gaussian(x, mean, stddev):
+    return Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x)
+
+
+def unit_centred_gaussian(x, stddev):
+    return Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x)
+
+
+def fit_rmsf(
+    rmsf_to_fit_array: np.ndarray,
+    phi_double_arr_radm2: np.ndarray,
+    fwhm_rmsf_radm2: float,
+) -> float:
+    d_phi = phi_double_arr_radm2[1] - phi_double_arr_radm2[0]
+    mask = np.zeros_like(phi_double_arr_radm2, dtype=bool)
+    mask[np.argmax(rmsf_to_fit_array)] = 1
+    fwhm_rmsf_arr_pix = fwhm_rmsf_radm2 / d_phi
+    for i in np.where(mask)[0]:
+        start = int(i - fwhm_rmsf_arr_pix / 2)
+        end = int(i + fwhm_rmsf_arr_pix / 2)
+        mask[start : end + 2] = True
+    popt, pcov = curve_fit(
+        unit_centred_gaussian,
+        phi_double_arr_radm2[mask],
+        rmsf_to_fit_array[mask],
+        p0=[fwhm_rmsf_radm2],
+    )
+    return popt[0]
+
+
 def calc_mom2_FDF(FDF, phiArr):
     """
     Calculate the 2nd moment of the polarised intensity FDF. Can be applied to
@@ -31,31 +66,6 @@ def calc_mom2_FDF(FDF, phiArr):
     phiMom2 = np.sqrt(np.sum(np.power((phiArr - phiMean), 2.0) * np.abs(FDF)) / K)
 
     return phiMom2
-
-
-def calc_parabola_vertex(x1, y1, x2, y2, x3, y3):
-    """
-    Calculate the vertex of a parabola given three adjacent points.
-    Normalization of coordinates must be performed first to reduce risk of
-    floating point errors.
-    """
-    midpoint = x2
-    deltax = x2 - x3
-    yscale = y2
-    (x1, x2, x3) = [(x - x2) / deltax for x in (x1, x2, x3)]  # slide spectrum to zero
-    (y1, y2, y3) = [y / yscale for y in (y1, y2, y3)]
-
-    D = (x1 - x2) * (x1 - x3) * (x2 - x3)
-    A = (x3 * (y2 - y1) + x2 * (y1 - y3) + x1 * (y3 - y2)) / D
-    B = (x3 * x3 * (y1 - y2) + x2 * x2 * (y3 - y1) + x1 * x1 * (y2 - y3)) / D
-    C = (
-        x2 * x3 * (x2 - x3) * y1 + x3 * x1 * (x3 - x1) * y2 + x1 * x2 * (x1 - x2) * y3
-    ) / D
-
-    xv = -B / (2.0 * A)
-    yv = C - B * B / (4.0 * A)
-
-    return xv * deltax + midpoint, yv * yscale
 
 
 def renormalize_StokesI_model(
