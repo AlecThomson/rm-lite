@@ -19,11 +19,11 @@ class StokesIArray(np.ndarray):
     pass
 
 
-class Stokesstokes_q_arrayay(np.ndarray):
+class StokesQArray(np.ndarray):
     pass
 
 
-class Stokesstokes_u_arrayay(np.ndarray):
+class StokesUArray(np.ndarray):
     pass
 
 
@@ -73,10 +73,10 @@ class RMCleanResults(NamedTuple):
 
 class FractionalSpectra(NamedTuple):
     stokes_i_model_array: Optional[StokesIArray]
-    stokes_q_frac_array: Stokesstokes_q_arrayay
-    stokes_u_frac_array: Stokesstokes_u_arrayay
-    stokes_q_frac_error_array: Stokesstokes_q_arrayay
-    stokes_u_frac_error_array: Stokesstokes_u_arrayay
+    stokes_q_frac_array: StokesQArray
+    stokes_u_frac_array: StokesUArray
+    stokes_q_frac_error_array: StokesQArray
+    stokes_u_frac_error_array: StokesUArray
     fit_result: FitResult
 
 
@@ -180,11 +180,11 @@ def create_fractional_spectra(
     freq_array_hz: np.ndarray,
     ref_freq_hz: float,
     stokes_i_array: StokesIArray,
-    stokes_q_array: Stokesstokes_q_arrayay,
-    stokes_u_array: Stokesstokes_u_arrayay,
+    stokes_q_array: StokesQArray,
+    stokes_u_array: StokesUArray,
     stokes_i_error_array: StokesIArray,
-    stokes_q_error_array: Stokesstokes_q_arrayay,
-    stokes_u_error_array: Stokesstokes_u_arrayay,
+    stokes_q_error_array: StokesQArray,
+    stokes_u_error_array: StokesUArray,
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_model_array: Optional[StokesIArray] = None,
@@ -260,16 +260,16 @@ def create_fractional_spectra(
         stokes_u_stokes_u_arrayay / stokes_i_model_stokes_u_arrayay
     )
 
-    stokes_q_frac_array = Stokesstokes_q_arrayay(
+    stokes_q_frac_array = StokesQArray(
         unumpy.nominal_values(stokes_q_frac_stokes_u_arrayay)
     )
-    stokes_u_frac_array = Stokesstokes_u_arrayay(
+    stokes_u_frac_array = StokesUArray(
         unumpy.nominal_values(stokes_u_frac_stokes_u_arrayay)
     )
-    stokes_q_frac_error_array = Stokesstokes_q_arrayay(
+    stokes_q_frac_error_array = StokesQArray(
         unumpy.std_devs(stokes_q_frac_stokes_u_arrayay)
     )
-    stokes_u_frac_error_array = Stokesstokes_u_arrayay(
+    stokes_u_frac_error_array = StokesUArray(
         unumpy.std_devs(stokes_u_frac_stokes_u_arrayay)
     )
 
@@ -308,8 +308,8 @@ def lambda2_to_freq(lambda_sq_m2: float) -> float:
 
 
 def compute_theoretical_noise(
-    stokes_q_error_array: Stokesstokes_q_arrayay,
-    stokes_u_error_array: Stokesstokes_u_arrayay,
+    stokes_q_error_array: StokesQArray,
+    stokes_u_error_array: StokesUArray,
     weight_array: np.ndarray,
 ) -> TheoreticalNoise:
     weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
@@ -496,8 +496,8 @@ def get_fwhm_rmsf(
 
 
 def rmsynth_nufft(
-    stokes_q_array: Stokesstokes_q_arrayay,
-    stokes_u_array: Stokesstokes_u_arrayay,
+    stokes_q_array: StokesQArray,
+    stokes_u_array: StokesUArray,
     lambda_sq_arr_m2: np.ndarray,
     phi_arr_radm2: np.ndarray,
     weight_array: np.ndarray,
@@ -507,8 +507,8 @@ def rmsynth_nufft(
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
 
     Args:
-        stokes_q_array (Stokesstokes_q_arrayay): Stokes Q data array
-        stokes_u_array (Stokesstokes_u_arrayay): Stokes U data array
+        stokes_q_array (StokesQArray): Stokes Q data array
+        stokes_u_array (StokesUArray): Stokes U data array
         lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
         phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
         weight_array (np.ndarray): Weight array
@@ -1392,7 +1392,7 @@ def faraday_simple_spectrum(
 
 def measure_qu_complexity(
     freq_arr_hz: np.ndarray,
-    stokes_q_array: np.ndarray,
+    stokes_q_array: StokesQArray,
     stokes_u_array: np.ndarray,
     stokes_q_err_array: np.ndarray,
     stokes_u_err_array: np.ndarray,
