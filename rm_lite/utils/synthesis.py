@@ -7,7 +7,7 @@ from astropy.stats import mad_std
 import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
-from scipy.stats import multivariate_normal
+from scipy.stats import multivariate_normal, scoreatpercentile
 from tqdm.auto import tqdm, trange
 from uncertainties import unumpy
 
@@ -19,11 +19,11 @@ class StokesIArray(np.ndarray):
     pass
 
 
-class StokesQArray(np.ndarray):
+class Stokesstokes_q_arrayay(np.ndarray):
     pass
 
 
-class StokesUArray(np.ndarray):
+class Stokesstokes_u_arrayay(np.ndarray):
     pass
 
 
@@ -73,10 +73,10 @@ class RMCleanResults(NamedTuple):
 
 class FractionalSpectra(NamedTuple):
     stokes_i_model_array: Optional[StokesIArray]
-    stokes_q_frac_array: StokesQArray
-    stokes_u_frac_array: StokesUArray
-    stokes_q_frac_error_array: StokesQArray
-    stokes_u_frac_error_array: StokesUArray
+    stokes_q_frac_array: Stokesstokes_q_arrayay
+    stokes_u_frac_array: Stokesstokes_u_arrayay
+    stokes_q_frac_error_array: Stokesstokes_q_arrayay
+    stokes_u_frac_error_array: Stokesstokes_u_arrayay
     fit_result: FitResult
 
 
@@ -180,11 +180,11 @@ def create_fractional_spectra(
     freq_array_hz: np.ndarray,
     ref_freq_hz: float,
     stokes_i_array: StokesIArray,
-    stokes_q_array: StokesQArray,
-    stokes_u_array: StokesUArray,
+    stokes_q_array: Stokesstokes_q_arrayay,
+    stokes_u_array: Stokesstokes_u_arrayay,
     stokes_i_error_array: StokesIArray,
-    stokes_q_error_array: StokesQArray,
-    stokes_u_error_array: StokesUArray,
+    stokes_q_error_array: Stokesstokes_q_arrayay,
+    stokes_u_error_array: Stokesstokes_u_arrayay,
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_model_array: Optional[StokesIArray] = None,
@@ -209,15 +209,19 @@ def create_fractional_spectra(
     stokes_q_error_array = stokes_q_error_array[no_nan_idx]
     stokes_u_error_array = stokes_u_error_array[no_nan_idx]
 
-    # stokes_i_uarray = unumpy.uarray(stokes_i_array, stokes_i_error_array)
-    stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
-    stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)
+    # stokes_i_stokes_u_arrayay = unumpy.stokes_u_arrayay(stokes_i_array, stokes_i_error_array)
+    stokes_q_stokes_u_arrayay = unumpy.stokes_u_arrayay(
+        stokes_q_array, stokes_q_error_array
+    )
+    stokes_u_stokes_u_arrayay = unumpy.stokes_u_arrayay(
+        stokes_u_array, stokes_u_error_array
+    )
     if stokes_i_model_array is not None:
         if stokes_i_model_error is None:
             raise ValueError(
                 "If `stokes_i_model_array` is provided, `stokes_i_model_error` must also be provided."
             )
-        stokes_i_model_uarray = unumpy.uarray(
+        stokes_i_model_stokes_u_arrayay = unumpy.stokes_u_arrayay(
             stokes_i_model_array, stokes_i_model_error
         )
     else:
@@ -244,18 +248,30 @@ def create_fractional_spectra(
         stokes_i_model_low, stokes_i_model_array, stokes_i_model_high = np.percentile(
             model_samples, [16, 50, 84], axis=0
         )
-        stokes_i_model_uarray = unumpy.uarray(
+        stokes_i_model_stokes_u_arrayay = unumpy.stokes_u_arrayay(
             stokes_i_model_array,
             np.abs((stokes_i_model_high - stokes_i_model_low)),
         )
 
-    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_uarray
-    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_uarray
+    stokes_q_frac_stokes_u_arrayay = (
+        stokes_q_stokes_u_arrayay / stokes_i_model_stokes_u_arrayay
+    )
+    stokes_u_frac_stokes_u_arrayay = (
+        stokes_u_stokes_u_arrayay / stokes_i_model_stokes_u_arrayay
+    )
 
-    stokes_q_frac_array = StokesQArray(unumpy.nominal_values(stokes_q_frac_uarray))
-    stokes_u_frac_array = StokesUArray(unumpy.nominal_values(stokes_u_frac_uarray))
-    stokes_q_frac_error_array = StokesQArray(unumpy.std_devs(stokes_q_frac_uarray))
-    stokes_u_frac_error_array = StokesUArray(unumpy.std_devs(stokes_u_frac_uarray))
+    stokes_q_frac_array = Stokesstokes_q_arrayay(
+        unumpy.nominal_values(stokes_q_frac_stokes_u_arrayay)
+    )
+    stokes_u_frac_array = Stokesstokes_u_arrayay(
+        unumpy.nominal_values(stokes_u_frac_stokes_u_arrayay)
+    )
+    stokes_q_frac_error_array = Stokesstokes_q_arrayay(
+        unumpy.std_devs(stokes_q_frac_stokes_u_arrayay)
+    )
+    stokes_u_frac_error_array = Stokesstokes_u_arrayay(
+        unumpy.std_devs(stokes_u_frac_stokes_u_arrayay)
+    )
 
     return FractionalSpectra(
         stokes_i_model_array=stokes_i_model_array,
@@ -292,8 +308,8 @@ def lambda2_to_freq(lambda_sq_m2: float) -> float:
 
 
 def compute_theoretical_noise(
-    stokes_q_error_array: StokesQArray,
-    stokes_u_error_array: StokesUArray,
+    stokes_q_error_array: Stokesstokes_q_arrayay,
+    stokes_u_error_array: Stokesstokes_u_arrayay,
     weight_array: np.ndarray,
 ) -> TheoreticalNoise:
     weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
@@ -325,6 +341,34 @@ class RMSynthParams(NamedTuple):
     """ Faraday depth values in rad/m^2 """
     weight_array: np.ndarray
     """ Weight array """
+
+
+class SigmaAdd(NamedTuple):
+    """Sigma_add complexity metrics"""
+
+    sigma_add: float
+    """Sigma_add median value"""
+    sigma_add_plus: float
+    """Sigma_add upper quartile"""
+    sigma_add_minus: float
+    """Sigma_add lower quartile"""
+    sigma_add_cdf: np.ndarray
+    """Sigma_add CDF"""
+    sigma_add_pdf: np.ndarray
+    """Sigma_add PDF"""
+    sigma_add_array: np.ndarray
+    """Sigma_add array"""
+
+
+class StokesSigmaAdd(NamedTuple):
+    """Stokes Sigma_add complexity metrics"""
+
+    sigma_add_q: SigmaAdd
+    """Sigma_add for Stokes Q"""
+    sigma_add_u: SigmaAdd
+    """Sigma_add for Stokes U"""
+    sigma_add_p: SigmaAdd
+    """Sigma_add for polarised intensity"""
 
 
 def compute_rmsynth_params(
@@ -452,8 +496,8 @@ def get_fwhm_rmsf(
 
 
 def rmsynth_nufft(
-    stokes_q_array: StokesQArray,
-    stokes_u_array: StokesUArray,
+    stokes_q_array: Stokesstokes_q_arrayay,
+    stokes_u_array: Stokesstokes_u_arrayay,
     lambda_sq_arr_m2: np.ndarray,
     phi_arr_radm2: np.ndarray,
     weight_array: np.ndarray,
@@ -463,8 +507,8 @@ def rmsynth_nufft(
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
 
     Args:
-        stokes_q_array (StokesQArray): Stokes Q data array
-        stokes_u_array (StokesUArray): Stokes U data array
+        stokes_q_array (Stokesstokes_q_arrayay): Stokes Q data array
+        stokes_u_array (Stokesstokes_u_arrayay): Stokes U data array
         lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
         phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
         weight_array (np.ndarray): Weight array
@@ -1064,6 +1108,10 @@ def get_fdf_parameters(
     phi_arr_radm2: np.ndarray,
     fwhm_rmsf_radm2: float,
     freq_array_hz: np.ndarray,
+    stokes_q_array: np.ndarray,
+    stokes_u_array: np.ndarray,
+    stokes_q_error_array: np.ndarray,
+    stokes_u_error_array: np.ndarray,
     lambda_sq_arr_m2: np.ndarray,
     lam_sq_0_m2: float,
     stokes_i_reference_flux: float,
@@ -1172,30 +1220,27 @@ def get_fdf_parameters(
     # Calculate the derotated polarisation angle and uncertainty
     # Uncertainty from Eqn A.20 in Brentjens & De Bruyn 2005
     peak_pa0_fit_deg = (
-        np.degrees(np.radians(peak_pa_fit_deg) - peak_rm_fit * lam_sq_0_m2)
-    ) % 180.0
+        float(np.degrees(np.radians(peak_pa_fit_deg) - peak_rm_fit * lam_sq_0_m2))
+        % 180.0
+    )
     peak_pa0_fit_rad_err = np.sqrt(
         theoretical_noise.fdf_error_noise**2.0
         * n_good_phi
         / (4.0 * (n_good_phi - 2.0) * peak_pi_fit**2.0)
         * ((n_good_phi - 1) / n_good_phi + lam_sq_0_m2**2.0 / lambda_sq_arr_m2_variance)
     )
-    peak_pa0_fit_deg_err = np.degrees(peak_pa0_fit_rad_err)
+    peak_pa0_fit_deg_err = float(np.degrees(peak_pa0_fit_rad_err))
 
-    # # Measure the complexity of the q and u spectra
-    # # Use 'ampPeakPIfitEff' for bias correct PI
-    # mDict["fracPol"] = toscalar(mDict["ampPeakPIfitEff"] / (Ifreq0))
-    # mD, pD = measure_qu_complexity(
-    #     freqArr_Hz=freqArr_Hz,
-    #     qArr=qArr,
-    #     uArr=uArr,
-    #     dqArr=dqArr,
-    #     duArr=duArr,
-    #     fracPol=mDict["fracPol"],
-    #     psi0_deg=mDict["polAngle0Fit_deg"],
-    #     RM_radm2=mDict["phiPeakPIfit_rm2"],
-    # )
-    # mDict.update(mD)
+    stokes_sigma_add = measure_qu_complexity(
+        freq_arr_hz=freq_array_hz,
+        stokes_q_array=stokes_q_array,
+        stokes_u_array=stokes_u_array,
+        stokes_q_err_array=stokes_q_error_array,
+        stokes_u_err_array=stokes_u_error_array,
+        frac_pol=peak_pi_fit_debias / stokes_i_reference_flux,
+        psi0_deg=peak_pa0_fit_deg,
+        rm_radm2=peak_rm_fit,
+    )
 
     return FDFParameters(
         fdf_error_mad=fdf_error_mad,
@@ -1227,217 +1272,187 @@ def get_fdf_parameters(
     )
 
 
-# -----------------------------------------------------------------------------#
-def norm_cdf(mean=0.0, std=1.0, N=50, xArr=None):
-    """Return the CDF of a normal distribution between -6 and 6 sigma, or at
-    the values of an input array."""
+# # -----------------------------------------------------------------------------#
+# def norm_cdf(mean=0.0, std=1.0, N=50, x_array=None):
+#     """Return the CDF of a normal distribution between -6 and 6 sigma, or at
+#     the values of an input array."""
 
-    if xArr is None:
-        x = np.linspace(-6.0 * std, 6.0 * std, N)
-    else:
-        x = xArr
-    y = norm.cdf(x, loc=mean, scale=std)
+#     if x_array is None:
+#         x = np.linspace(-6.0 * std, 6.0 * std, N)
+#     else:
+#         x = x_array
+#     y = norm.cdf(x, loc=mean, scale=std)
 
-    return x, y
-
-
-# -----------------------------------------------------------------------------#
-def cdf_percentile(x, p, q=50.0):
-    """Return the value at a given percentile of a cumulative distribution
-    function."""
-
-    # Determine index where cumulative percentage is achieved
-    try:  # Can fail if NaNs present, so return NaN in this case.
-        i = np.where(p > q / 100.0)[0][0]
-    except:
-        return np.nan
-
-    # If at extremes of the distribution, return the limiting value
-    if i == 0 or i == len(x):
-        return x[i]
-
-    # or interpolate between the two bracketing values in the CDF
-    else:
-        m = (p[i] - p[i - 1]) / (x[i] - x[i - 1])
-        c = p[i] - m * x[i]
-        return (q / 100.0 - c) / m
+#     return x, y
 
 
-# -----------------------------------------------------------------------------#
-def calc_sigma_add(xArr, yArr, dyArr, yMed=None, noise=None, nSamp=1000, suffix=""):
+def cdf_percentile(values: np.ndarray, cdf: np.ndarray, q=50.0) -> float:
+    """Return the value at a given percentile of a cumulative distribution function
+
+    Args:
+        values (np.ndarray): Array of values
+        cdf (np.ndarray): Cumulative distribution function
+        q (float, optional): Percentile. Defaults to 50.0.
+
+    Returns:
+        float: Interpolated value at the given percentile
+    """
+    return np.interp(q / 100.0, cdf, values)
+
+
+def calculate_sigma_add(
+    y_array: np.ndarray,
+    dy_array: np.ndarray,
+    median: Optional[float] = None,
+    noise: Optional[float] = None,
+    n_samples: int = 1000,
+) -> SigmaAdd:
     """Calculate the most likely value of additional scatter, assuming the
     input data is drawn from a normal distribution. The total uncertainty on
     each data point Y_i is modelled as dYtot_i**2 = dY_i**2 + dYadd**2."""
 
     # Measure the median and MADFM of the input data if not provided.
     # Used to overplot a normal distribution when debugging.
-    if yMed is None:
-        yMed = np.median(yArr)
+    if median is None:
+        median = np.nanmedian(y_array)
     if noise is None:
-        noise = MAD(yArr)
+        noise = mad_std(y_array)
 
     # Sample the PDF of the additional noise term from a limit near zero to
     # a limit of the range of the data, including error bars
-    yRng = np.nanmax(yArr + dyArr) - np.nanmin(yArr - dyArr)
-    sigmaAddArr = np.linspace(yRng / nSamp, yRng, nSamp)
+    y_range = np.nanmax(y_array + dy_array) - np.nanmin(y_array - dy_array)
+    sigma_add_arr = np.linspace(y_range / n_samples, y_range, n_samples)
 
     # Model deviation from Gaussian as an additional noise term.
     # Loop through the range of i additional noise samples and calculate
     # chi-squared and sum(ln(sigma_total)), used later to calculate likelihood.
-    nData = len(xArr)
-    chiSqArr = np.zeros_like(sigmaAddArr)
-    lnSigmaSumArr = np.zeros_like(sigmaAddArr)
-    for i, sigmaAdd in enumerate(sigmaAddArr):
-        sigmaSqTot = dyArr**2.0 + sigmaAdd**2.0
-        lnSigmaSumArr[i] = np.nansum(np.log(np.sqrt(sigmaSqTot)))
-        chiSqArr[i] = np.nansum((yArr - yMed) ** 2.0 / sigmaSqTot)
-    dof = nData - 1
-    chiSqRedArr = chiSqArr / dof
+    n_data = len(y_array)
 
-    # Calculate the PDF in log space and normalise the peak to 1
-    lnProbArr = (
-        -np.log(sigmaAddArr)
-        - nData * np.log(2.0 * np.pi) / 2.0
-        - lnSigmaSumArr
-        - chiSqArr / 2.0
+    # Calculate sigma_sq_tot for all sigma_add values
+    sigma_sq_tot = dy_array**2.0 + sigma_add_arr[:, None] ** 2.0
+
+    # Calculate ln_sigma_sum_arr for all sigma_add values
+    ln_sigma_sum_arr = np.nansum(np.log(np.sqrt(sigma_sq_tot)), axis=1)
+
+    # Calculate chi_sq_arr for all sigma_add values
+    chi_sq_arr = np.nansum((y_array - median) ** 2.0 / sigma_sq_tot, axis=1)
+    ln_prob_arr = (
+        -np.log(sigma_add_arr)
+        - n_data * np.log(2.0 * np.pi) / 2.0
+        - ln_sigma_sum_arr
+        - chi_sq_arr / 2.0
     )
-    lnProbArr -= np.nanmax(lnProbArr)
-    probArr = np.exp(lnProbArr)
-
-    # Normalise the area under the PDF to be 1
-    A = np.nansum(probArr * np.diff(sigmaAddArr)[0])
-    probArr /= A
-
-    # Calculate the cumulative PDF
-    CPDF = np.cumsum(probArr) / np.nansum(probArr)
+    ln_prob_arr -= np.nanmax(ln_prob_arr)
+    prob_arr = np.exp(ln_prob_arr)
+    # Normalize the area under the PDF to be 1
+    prob_arr /= np.nansum(prob_arr * np.diff(sigma_add_arr)[0])
+    # Calculate the CDF
+    cdf = np.cumsum(prob_arr) / np.nansum(prob_arr)
 
     # Calculate the mean of the distribution and the +/- 1-sigma limits
-    sigmaAdd = cdf_percentile(x=sigmaAddArr, p=CPDF, q=50.0)
-    sigmaAddMinus = cdf_percentile(x=sigmaAddArr, p=CPDF, q=15.72)
-    sigmaAddPlus = cdf_percentile(x=sigmaAddArr, p=CPDF, q=84.27)
-    mDict = {
-        "sigmaAdd" + suffix: toscalar(sigmaAdd),
-        "dSigmaAddMinus" + suffix: toscalar(sigmaAdd - sigmaAddMinus),
-        "dSigmaAddPlus" + suffix: toscalar(sigmaAddPlus - sigmaAdd),
-    }
+    sigma_add = cdf_percentile(values=sigma_add_arr, cdf=cdf, q=50.0)
+    sigma_add_minus = cdf_percentile(values=sigma_add_arr, cdf=cdf, q=15.72)
+    sigma_add_plus = cdf_percentile(values=sigma_add_arr, cdf=cdf, q=84.27)
 
-    # Return the curves to be plotted in a separate dictionary
-    pltDict = {
-        "sigmaAddArr" + suffix: sigmaAddArr,
-        "chiSqRedArr" + suffix: chiSqRedArr,
-        "probArr" + suffix: probArr,
-        "xArr" + suffix: xArr,
-        "yArr" + suffix: yArr,
-        "dyArr" + suffix: dyArr,
-    }
-
-    return mDict, pltDict
-
-
-def create_pqu_spectra_burn(
-    freqArr_Hz, fracPolArr, psi0Arr_deg, RMArr_radm2, sigmaRMArr_radm2=None
-):
-    """Return fractional P/I, Q/I & U/I spectra for a sum of Faraday thin
-    components (multiple values may be given as a list for each argument).
-    Burn-law external depolarisation may be applied to each
-    component via the optional 'sigmaRMArr_radm2' argument. If
-    sigmaRMArr_radm2=None, all values are set to zero, i.e., no
-    depolarisation."""
-
-    # Convert lists to arrays
-    freqArr_Hz = np.array(freqArr_Hz, dtype="f8")
-    fracPolArr = np.array(fracPolArr, dtype="f8")
-    psi0Arr_deg = np.array(psi0Arr_deg, dtype="f8")
-    RMArr_radm2 = np.array(RMArr_radm2, dtype="f8")
-    if sigmaRMArr_radm2 is None:
-        sigmaRMArr_radm2 = np.zeros_like(fracPolArr)
-    else:
-        sigmaRMArr_radm2 = np.array(sigmaRMArr_radm2, dtype="f8")
-
-    # Calculate some prerequsites
-    nChans = len(freqArr_Hz)
-    nComps = len(fracPolArr)
-    lamArr_m = C / freqArr_Hz
-    lambda_sq_arr_m2 = np.power(lamArr_m, 2.0)
-
-    # Convert the inputs to column vectors
-    fracPolArr = fracPolArr.reshape((nComps, 1))
-    psi0Arr_deg = psi0Arr_deg.reshape((nComps, 1))
-    RMArr_radm2 = RMArr_radm2.reshape((nComps, 1))
-    sigmaRMArr_radm2 = sigmaRMArr_radm2.reshape((nComps, 1))
-
-    # Calculate the p, q and u Spectra for all components
-    pArr = fracPolArr * np.ones((nComps, nChans), dtype="f8")
-    quArr = pArr * (
-        np.exp(2j * (np.radians(psi0Arr_deg) + RMArr_radm2 * lambda_sq_arr_m2))
-        * np.exp(-2.0 * sigmaRMArr_radm2 * np.power(lamArr_m, 4.0))
+    return SigmaAdd(
+        sigma_add=sigma_add,
+        sigma_add_minus=sigma_add_minus,
+        sigma_add_plus=sigma_add_plus,
+        sigma_add_cdf=cdf,
+        sigma_add_pdf=prob_arr,
+        sigma_add_array=sigma_add_arr,
     )
 
-    # Sum along the component axis to create the final spectra
-    quArr = quArr.sum(0)
-    qArr = quArr.real
-    uArr = quArr.imag
-    pArr = np.abs(quArr)
 
-    return pArr, qArr, uArr
+def faraday_simple_spectrum(
+    freq_arr_hz: np.ndarray,
+    frac_pol: float,
+    psi0_deg: float,
+    rm_radm2: float,
+) -> np.ndarray:
+    """Create a simple Faraday spectrum with a single component.
+
+    Args:
+        freq_arr_hz (np.ndarray): Frequency array in Hz
+        frac_pol (float): Fractional polarization
+        psi0_deg (float): Initial polarization angle in degrees
+        rm_radm2 (float): RM in rad/m^2
+
+    Returns:
+        np.ndarray: Complex polarization spectrum
+    """
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
+
+    complex_polarization = frac_pol * np.exp(
+        2j * np.radians(psi0_deg + rm_radm2 * lambda_sq_arr_m2)
+    )
+
+    return complex_polarization
 
 
 def measure_qu_complexity(
-    freqArr_Hz, qArr, uArr, dqArr, duArr, fracPol, psi0_deg, RM_radm2, specF=1
-):
+    freq_arr_hz: np.ndarray,
+    stokes_q_array: np.ndarray,
+    stokes_u_array: np.ndarray,
+    stokes_q_err_array: np.ndarray,
+    stokes_u_err_array: np.ndarray,
+    frac_pol: float,
+    psi0_deg: float,
+    rm_radm2: float,
+) -> StokesSigmaAdd:
     # Create a RM-thin model to subtract
-    pModArr, qModArr, uModArr = create_pqu_spectra_burn(
-        freqArr_Hz=freqArr_Hz,
-        fracPolArr=[fracPol],
-        psi0Arr_deg=[psi0_deg],
-        RMArr_radm2=[RM_radm2],
+    complex_polarisation = faraday_simple_spectrum(
+        freq_arr_hz=freq_arr_hz,
+        frac_pol=frac_pol,
+        psi0_deg=psi0_deg,
+        rm_radm2=rm_radm2,
     )
-    lambda_sq_arr_m2 = np.power(C / freqArr_Hz, 2.0)
-    ndata = len(lambda_sq_arr_m2)
 
     # Subtract the RM-thin model to create a residual q & u
-    qResidArr = qArr - qModArr
-    uResidArr = uArr - uModArr
+    stokes_q_residual = stokes_q_array - complex_polarisation.real
+    stokes_u_residual = stokes_u_array - complex_polarisation.imag
 
-    # Calculate value of additional scatter term for q & u (max likelihood)
-    mDict = {}
-    pDict = {}
-    m1D, p1D = calc_sigma_add(
-        xArr=lambda_sq_arr_m2[: int(ndata / specF)],
-        yArr=(qResidArr / dqArr)[: int(ndata / specF)],
-        dyArr=(dqArr / dqArr)[: int(ndata / specF)],
-        yMed=0.0,
+    sigma_add_q = calculate_sigma_add(
+        y_array=stokes_q_residual / stokes_q_err_array,
+        dy_array=np.ones_like(stokes_q_residual),
+        median=0.0,
         noise=1.0,
-        suffix="Q",
     )
-    mDict.update(m1D)
-    pDict.update(p1D)
-    m2D, p2D = calc_sigma_add(
-        xArr=lambda_sq_arr_m2[: int(ndata / specF)],
-        yArr=(uResidArr / duArr)[: int(ndata / specF)],
-        dyArr=(duArr / duArr)[: int(ndata / specF)],
-        yMed=0.0,
+    sigma_add_u = calculate_sigma_add(
+        y_array=stokes_u_residual / stokes_u_err_array,
+        dy_array=np.ones_like(stokes_u_residual),
+        median=0.0,
         noise=1.0,
-        suffix="U",
     )
-    mDict.update(m2D)
-    pDict.update(p2D)
 
-    # Calculate the deviations statistics
-    # Done as a test for the paper, not usually offered to user.
-    # mDict.update( calc_normal_tests(qResidArr/dqArr, suffix="Q") )
-    # mDict.update( calc_normal_tests(uResidArr/duArr, suffix="U") )
+    sigma_add_p_array = np.hypot(sigma_add_q.sigma_add, sigma_add_u.sigma_add)
+    sigma_add_p_pdf = np.hypot(sigma_add_q.sigma_add_pdf, sigma_add_u.sigma_add_pdf)
+    sigma_add_p_cdf = np.cumsum(sigma_add_p_pdf) / np.nansum(sigma_add_p_pdf)
+    sigma_add_p_val = cdf_percentile(
+        values=sigma_add_p_array, cdf=sigma_add_p_cdf, q=50.0
+    )
+    sigma_add_p_minus = cdf_percentile(
+        values=sigma_add_p_array, cdf=sigma_add_p_cdf, q=15.72
+    )
+    sigma_add_p_plus = cdf_percentile(
+        values=sigma_add_p_array, cdf=sigma_add_p_cdf, q=84.27
+    )
+    sigma_add_p = SigmaAdd(
+        sigma_add=sigma_add_p_val,
+        sigma_add_minus=sigma_add_p_minus,
+        sigma_add_plus=sigma_add_p_plus,
+        sigma_add_cdf=sigma_add_p_cdf,
+        sigma_add_pdf=sigma_add_p_pdf,
+        sigma_add_array=sigma_add_p_array,
+    )
 
-    return mDict, pDict
+    return StokesSigmaAdd(
+        sigma_add_q=sigma_add_q,
+        sigma_add_u=sigma_add_u,
+        sigma_add_p=sigma_add_p,
+    )
 
 
-# -----------------------------------------------------------------------------#
 def measure_fdf_complexity(phi_arr_radm2, FDF):
     # Second moment of clean component spectrum
-    mom2FDF = calc_mom2_FDF(FDF, phi_arr_radm2)
-
-    return toscalar(mom2FDF)
-
-
-# -----------------------------------------------------------------------------#
-# 3D noise functions are still in prototype stage! Proper function is not guaranteed!
+    return calc_mom2_FDF(FDF, phi_arr_radm2)
