@@ -3,6 +3,7 @@
 """RM-synthesis on 1D data"""
 
 import time
+from dataclasses import dataclass
 from typing import Literal, NamedTuple, Optional
 
 import numpy as np
@@ -44,21 +45,6 @@ class RMSynth1DArrays(NamedTuple):
     """ Dirty Faraday dispersion function """
 
 
-class RMSynth1DResults(NamedTuple):
-    """Results of RM-synthesis"""
-
-    fdf_parameters: FDFParameters
-    """ Parameters of the Faraday dispersion function """
-    stokes_i_fit_result: FitResult
-    """ Fit result of the Stokes I spectrum """
-    arrays: RMSynth1DArrays
-    """ Resulting arrays from RM-synthesis """
-
-
-class RMSynthArrays(NamedTuple):
-    """Result arrays from RM-synthesis"""
-
-
 def run_rmsynth(
     stokes_q_array: np.ndarray,
     stokes_u_array: np.ndarray,
@@ -76,7 +62,7 @@ def run_rmsynth(
     do_fit_rmsf=False,
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
-):
+) -> tuple[FDFParameters, RMSynth1DArrays]:
     stokes_q_array = StokesQArray(stokes_q_array)
     stokes_u_array = StokesUArray(stokes_u_array)
     stokes_q_error_array = StokesQArray(stokes_q_error_array)
@@ -177,11 +163,14 @@ def run_rmsynth(
         fdf_array=fdf_dirty_array,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf,
+        freq_array_hz=freq_array_hz,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         lam_sq_0_m2=lam_sq_0_m2,
-        fdf_error=theoretical_noise.fdf_error_noise,
+        stokes_i_reference_flux=stokes_i_reference_flux,
+        theoretical_noise=theoretical_noise,
+        fit_function=fit_function,
     )
-    fdf_arrays = RMSynth1DArrays(
+    rmsyth_arrays = RMSynth1DArrays(
         phi_arr_radm2=phi_arr_radm2,
         phi2_arr_radm2=phi_double_arr_radm2,
         rmsf_array=rmsf_array,
@@ -189,54 +178,8 @@ def run_rmsynth(
         weight_array=weight_array,
         fdf_dirty_array=fdf_dirty_array,
     )
-    return RMSynth1DResults(
-        fdf_parameters=fdf_parameters,
-        stokes_i_fit_result=fit_result,
-        arrays=fdf_arrays,
-    )
-    # mDict["polyCoeffs"] = ",".join(
-    #     [str(x.astype(np.float32)) for x in fit_result.params]
-    # )
-    # mDict["polyCoefferr"] = ",".join(
-    #     [str(x.astype(np.float32)) for x in fit_result.perror]
-    # )
-    # mDict["fit_order"] = fit_result.fit_order
-    # mDict["IfitStat"] = fit_result.fitStatus
-    # mDict["IfitChiSqRed"] = fit_result.chiSqRed
-    # mDict["fit_function"] = fit_function
-    # mDict["lam_sq_0_m2"] = toscalar(lam_sq_0_m2)
-    # mDict["freq0_Hz"] = toscalar(freq0_Hz)
-    # mDict["fwhmRMSF"] = toscalar(fwhmRMSF)
-    # mDict["dQU"] = toscalar(nanmedian(stokes_qu_error_array))
-    # mDict["dFDFth"] = toscalar(dFDFth)
-    # mDict["units"] = units
 
-    # if (fit_result.fitStatus >= 128) and verbose:
-    #     logger.warning("Stokes I model contains negative values!")
-    # elif (fit_result.fitStatus >= 64) and verbose:
-    #     logger.warning("Stokes I model has low signal-to-noise.")
-
-    # # Add information on nature of channels:
-    # good_channels = np.where(np.logical_and(weight_array != 0, np.isfinite(qArr)))[0]
-    # mDict["min_freq"] = float(np.min(freqArr_Hz[good_channels]))
-    # mDict["max_freq"] = float(np.max(freqArr_Hz[good_channels]))
-    # mDict["N_channels"] = good_channels.size
-    # mDict["median_channel_width"] = float(np.median(np.diff(freqArr_Hz)))
-
-    # # Measure the complexity of the q and u spectra
-    # # Use 'ampPeakPIfitEff' for bias correct PI
-    # mDict["fracPol"] = toscalar(mDict["ampPeakPIfitEff"] / (Ifreq0))
-    # mD, pD = measure_qu_complexity(
-    #     freqArr_Hz=freqArr_Hz,
-    #     qArr=qArr,
-    #     uArr=uArr,
-    #     dqArr=dqArr,
-    #     duArr=duArr,
-    #     fracPol=mDict["fracPol"],
-    #     psi0_deg=mDict["polAngle0Fit_deg"],
-    #     RM_radm2=mDict["phiPeakPIfit_rm2"],
-    # )
-    # mDict.update(mD)
+    return fdf_parameters, rmsyth_arrays
 
     # # add array dictionary
     # aDict = dict()
