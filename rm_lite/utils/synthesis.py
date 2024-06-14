@@ -3,10 +3,10 @@
 import gc
 from typing import Literal, NamedTuple, Optional
 
+from astropy.stats import mad_std
 import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
-from astropy.stats import mad_std
 from scipy.stats import multivariate_normal
 from tqdm.auto import tqdm, trange
 from uncertainties import unumpy
@@ -111,6 +111,30 @@ class FDFParameters(NamedTuple):
     """Peak deroated position angle of the FDF in degrees"""
     peak_pa0_fit_deg_error: float
     """Error on the peak deroated position angle of the FDF in degrees"""
+    fit_function: Literal["log", "linear"]
+    """The function used to fit the FDF"""
+    lam_sq_0_m2: float
+    """Reference wavelength^2 value"""
+    ref_freq_hz: float
+    """Reference frequency in Hz"""
+    fwhm_rmsf_radm2: float
+    """The FWHM of the RMSF main lobe"""
+    fdf_error_noise: float
+    """Theoretical noise of the FDF"""
+    fdf_q_noise: float
+    """Theoretical noise of the real FDF"""
+    fdf_u_noise: float
+    """Theoretical noise of the imaginary FDF"""
+    min_freq_hz: float
+    """Minimum frequency in Hz"""
+    max_freq_hz: float
+    """Maximum frequency in Hz"""
+    n_channels: int
+    """Number of channels"""
+    median_d_freq_hz: float
+    """Channel width in Hz"""
+    frac_pol: float
+    """Fractional linear polarisation"""
 
 
 class TheoreticalNoise(NamedTuple):
@@ -1039,9 +1063,12 @@ def get_fdf_parameters(
     fdf_array: np.ndarray,
     phi_arr_radm2: np.ndarray,
     fwhm_rmsf_radm2: float,
+    freq_array_hz: np.ndarray,
     lambda_sq_arr_m2: np.ndarray,
     lam_sq_0_m2: float,
-    fdf_error: Optional[float] = None,
+    stokes_i_reference_flux: float,
+    theoretical_noise: TheoreticalNoise,
+    fit_function: Literal["log", "linear"],
     bias_correction_snr: float = 5.0,
 ) -> FDFParameters:
     """
@@ -1068,20 +1095,19 @@ def get_fdf_parameters(
         np.concatenate([fdf_array[mask].real, fdf_array[mask].imag])
     )
 
-    # Default to using the measured FDF if a noise value has not been provided
-    if fdf_error is None:
-        fdf_error = fdf_error_mad
-
-    n_good_chan = np.isfinite(fdf_array).sum()
+    n_good_phi = np.isfinite(fdf_array).sum()
     lambda_sq_arr_m2_variance = (
-        np.sum(lambda_sq_arr_m2**2.0) - np.sum(lambda_sq_arr_m2) ** 2.0 / n_good_chan
-    ) / (n_good_chan - 1)
+        np.sum(lambda_sq_arr_m2**2.0) - np.sum(lambda_sq_arr_m2) ** 2.0 / n_good_phi
+    ) / (n_good_phi - 1)
+
+    good_chan_idx = np.isfinite(freq_array_hz)
+    n_good_chan = good_chan_idx.sum()
 
     if not (peak_pi_index > 0 and peak_pi_index < len(abs_fdf_array) - 1):
         return FDFParameters(
             fdf_error_mad=fdf_error_mad,
             peak_pi_fit=np.nan,
-            peak_pi_error=fdf_error,
+            peak_pi_error=theoretical_noise.fdf_error_noise,
             peak_pi_fit_debias=np.nan,
             peak_pi_fit_snr=np.nan,
             peak_pi_fit_index=np.nan,
@@ -1093,13 +1119,25 @@ def get_fdf_parameters(
             peak_pa_fit_deg_error=np.nan,
             peak_pa0_fit_deg=np.nan,
             peak_pa0_fit_deg_error=np.nan,
+            fit_function=fit_function,
+            lam_sq_0_m2=lam_sq_0_m2,
+            ref_freq_hz=lambda2_to_freq(lam_sq_0_m2),
+            fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+            fdf_error_noise=theoretical_noise.fdf_error_noise,
+            fdf_q_noise=theoretical_noise.fdf_q_noise,
+            fdf_u_noise=theoretical_noise.fdf_u_noise,
+            min_freq_hz=freq_array_hz[good_chan_idx].min(),
+            max_freq_hz=freq_array_hz[good_chan_idx].max(),
+            n_channels=n_good_chan,
+            median_d_freq_hz=np.nanmedian(np.diff(freq_array_hz[good_chan_idx])),
+            frac_pol=np.nan,
         )
     peak_pi_fit, peak_rm_fit, _ = fit_fdf(
         fdf_to_fit_array=abs_fdf_array,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_fdf_radm2=fwhm_rmsf_radm2,
     )
-    peak_pi_fit_snr = peak_pi_fit / fdf_error
+    peak_pi_fit_snr = peak_pi_fit / theoretical_noise.fdf_error_noise
     # In rare cases, a parabola can be fitted to the edge of the spectrum,
     # producing a unreasonably large RM and polarized intensity.
     # In these cases, everything should get NaN'd out.
@@ -1108,12 +1146,16 @@ def get_fdf_parameters(
         peak_pi_fit = np.nan
 
     # Error on fitted Faraday depth (RM) is same as channel, but using fitted PI
-    peak_rm_fit_err = fwhm_rmsf_radm2 * fdf_error / (2.0 * peak_pi_fit)
+    peak_rm_fit_err = (
+        fwhm_rmsf_radm2 * theoretical_noise.fdf_error_noise / (2.0 * peak_pi_fit)
+    )
 
     # Correct the peak for polarisation bias (POSSUM report 11)
     peak_pi_fit_debias = peak_pi_fit
     if peak_pi_fit_snr >= bias_correction_snr:
-        peak_pi_fit_debias = np.sqrt(peak_pi_fit**2.0 - 2.3 * fdf_error**2.0)
+        peak_pi_fit_debias = np.sqrt(
+            peak_pi_fit**2.0 - 2.3 * theoretical_noise.fdf_error_noise**2.0
+        )
 
     # Calculate the polarisation angle from the fitted peak
     # Uncertainty from Eqn A.12 in Brentjens & De Bruyn 2005
@@ -1123,7 +1165,9 @@ def get_fdf_parameters(
     peak_u_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_array.imag)
     peak_q_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_array.real)
     peak_pa_fit_deg = 0.5 * np.degrees(np.arctan2(peak_u_fit, peak_q_fit)) % 180
-    peak_pa_fit_deg_err = np.degrees(fdf_error / (2.0 * peak_pi_fit))
+    peak_pa_fit_deg_err = np.degrees(
+        theoretical_noise.fdf_error_noise / (2.0 * peak_pi_fit)
+    )
 
     # Calculate the derotated polarisation angle and uncertainty
     # Uncertainty from Eqn A.20 in Brentjens & De Bruyn 2005
@@ -1131,15 +1175,27 @@ def get_fdf_parameters(
         np.degrees(np.radians(peak_pa_fit_deg) - peak_rm_fit * lam_sq_0_m2)
     ) % 180.0
     peak_pa0_fit_rad_err = np.sqrt(
-        fdf_error**2.0
-        * n_good_chan
-        / (4.0 * (n_good_chan - 2.0) * peak_pi_fit**2.0)
-        * (
-            (n_good_chan - 1) / n_good_chan
-            + lam_sq_0_m2**2.0 / lambda_sq_arr_m2_variance
-        )
+        theoretical_noise.fdf_error_noise**2.0
+        * n_good_phi
+        / (4.0 * (n_good_phi - 2.0) * peak_pi_fit**2.0)
+        * ((n_good_phi - 1) / n_good_phi + lam_sq_0_m2**2.0 / lambda_sq_arr_m2_variance)
     )
     peak_pa0_fit_deg_err = np.degrees(peak_pa0_fit_rad_err)
+
+    # # Measure the complexity of the q and u spectra
+    # # Use 'ampPeakPIfitEff' for bias correct PI
+    # mDict["fracPol"] = toscalar(mDict["ampPeakPIfitEff"] / (Ifreq0))
+    # mD, pD = measure_qu_complexity(
+    #     freqArr_Hz=freqArr_Hz,
+    #     qArr=qArr,
+    #     uArr=uArr,
+    #     dqArr=dqArr,
+    #     duArr=duArr,
+    #     fracPol=mDict["fracPol"],
+    #     psi0_deg=mDict["polAngle0Fit_deg"],
+    #     RM_radm2=mDict["phiPeakPIfit_rm2"],
+    # )
+    # mDict.update(mD)
 
     return FDFParameters(
         fdf_error_mad=fdf_error_mad,
@@ -1156,6 +1212,18 @@ def get_fdf_parameters(
         peak_pa_fit_deg_error=peak_pa_fit_deg_err,
         peak_pa0_fit_deg=peak_pa0_fit_deg,
         peak_pa0_fit_deg_error=peak_pa0_fit_deg_err,
+        fit_function=fit_function,
+        lam_sq_0_m2=lam_sq_0_m2,
+        ref_freq_hz=lambda2_to_freq(lam_sq_0_m2),
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_error_noise=theoretical_noise.fdf_error_noise,
+        fdf_q_noise=theoretical_noise.fdf_q_noise,
+        fdf_u_noise=theoretical_noise.fdf_u_noise,
+        min_freq_hz=freq_array_hz[good_chan_idx].min(),
+        max_freq_hz=freq_array_hz[good_chan_idx].max(),
+        n_channels=n_good_chan,
+        median_d_freq_hz=np.nanmedian(np.diff(freq_array_hz[good_chan_idx])),
+        frac_pol=peak_pi_fit_debias / stokes_i_reference_flux,
     )
 
 
