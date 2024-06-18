@@ -4,7 +4,7 @@
 
 import time
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional, Tuple
 
 import numpy as np
 from scipy import interpolate
@@ -62,7 +62,7 @@ def run_rmsynth(
     do_fit_rmsf=False,
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
-) -> tuple[FDFParameters, RMSynth1DArrays]:
+) -> Tuple[FDFParameters, RMSynth1DArrays]:
     stokes_q_array = StokesQArray(stokes_q_array)
     stokes_u_array = StokesUArray(stokes_u_array)
     stokes_q_error_array = StokesQArray(stokes_q_error_array)
@@ -164,6 +164,10 @@ def run_rmsynth(
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf,
         freq_array_hz=freq_array_hz,
+        stokes_q_array=stokes_q_array,
+        stokes_u_array=stokes_u_array,
+        stokes_q_error_array=stokes_q_error_array,
+        stokes_u_error_array=stokes_u_error_array,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         lam_sq_0_m2=lam_sq_0_m2,
         stokes_i_reference_flux=stokes_i_reference_flux,
@@ -180,55 +184,3 @@ def run_rmsynth(
     )
 
     return fdf_parameters, rmsyth_arrays
-
-    # # add array dictionary
-    # aDict = dict()
-    # aDict["phi_arr_radm2"] = phi_arr_radm2
-    # aDict["phi2Arr_radm2"] = phi2Arr_radm2
-    # aDict["RMSFArr"] = RMSFArr
-    # aDict["freqArr_Hz"] = freqArr_Hz
-    # aDict["weight_array"] = weight_array
-    # aDict["dirtyFDF"] = dirtyFDF
-
-    # if verbose:
-    #     # Print the results to the screen
-    #     log()
-    #     log("-" * 80)
-    #     log("RESULTS:\n")
-    #     log("FWHM RMSF = %.4g rad/m^2" % (mDict["fwhmRMSF"]))
-
-    #     log(
-    #         "Pol Angle = %.4g (+/-%.4g) deg"
-    #         % (mDict["polAngleFit_deg"], mDict["dPolAngleFit_deg"])
-    #     )
-    #     log(
-    #         "Pol Angle 0 = %.4g (+/-%.4g) deg"
-    #         % (mDict["polAngle0Fit_deg"], mDict["dPolAngle0Fit_deg"])
-    #     )
-    #     log(
-    #         "Peak FD = %.4g (+/-%.4g) rad/m^2"
-    #         % (mDict["phiPeakPIfit_rm2"], mDict["dPhiPeakPIfit_rm2"])
-    #     )
-    #     log("freq0_GHz = %.4g " % (mDict["freq0_Hz"] / 1e9))
-    #     log("I freq0 = %.4g %s" % (mDict["Ifreq0"], units))
-    #     log(
-    #         "Peak PI = %.4g (+/-%.4g) %s"
-    #         % (mDict["ampPeakPIfit"], mDict["dAmpPeakPIfit"], units)
-    #     )
-    #     log("QU Noise = %.4g %s" % (mDict["dQU"], units))
-    #     log("FDF Noise (theory)   = %.4g %s" % (mDict["dFDFth"], units))
-    #     log("FDF Noise (Corrected MAD) = %.4g %s" % (mDict["dFDFcorMAD"], units))
-    #     log("FDF SNR = %.4g " % (mDict["snrPIfit"]))
-    #     log(
-    #         "sigma_add(q) = %.4g (+%.4g, -%.4g)"
-    #         % (mDict["sigmaAddQ"], mDict["dSigmaAddPlusQ"], mDict["dSigmaAddMinusQ"])
-    #     )
-    #     log(
-    #         "sigma_add(u) = %.4g (+%.4g, -%.4g)"
-    #         % (mDict["sigmaAddU"], mDict["dSigmaAddPlusU"], mDict["dSigmaAddMinusU"])
-    #     )
-    #     log("Fitted polynomial order = {} ".format(mDict["fit_order"]))
-    #     log()
-    #     log("-" * 80)
-
-    # return mDict, aDict
