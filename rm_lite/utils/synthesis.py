@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""RM-synthesis utils"""
+
 import gc
 from typing import Literal, NamedTuple, Optional
 
@@ -8,23 +10,34 @@ import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
 from scipy.stats import multivariate_normal, scoreatpercentile
+from scipy.interpolate import interp1d
 from tqdm.auto import tqdm, trange
 from uncertainties import unumpy
 
-from rm_lite.utils.fitting import FitResult, fit_fdf, fit_stokes_i_model
+from rm_lite.utils.fitting import FitResult, fit_fdf, fit_stokes_i_model, Gaussian1D
 from rm_lite.utils.logging import logger
 
 
 class StokesIArray(np.ndarray):
-    pass
+    def __new__(cls, input_array):
+        return np.asarray(input_array).view(cls)
+
+    def __array_finalize__(self, obj) -> None:
+        if obj is None:
+            return
+        # This attribute should be maintained!
+        default_attributes = {"attr": 1}
+        self.__dict__.update(default_attributes)
 
 
 class StokesQArray(np.ndarray):
-    pass
+    def __new__(cls, input_array):
+        return np.asarray(input_array).view(cls)
 
 
 class StokesUArray(np.ndarray):
-    pass
+    def __new__(cls, input_array):
+        return np.asarray(input_array).view(cls)
 
 
 class FWHM(NamedTuple):
@@ -56,19 +69,6 @@ class RMSFResults(NamedTuple):
     """The FWHM of the RMSF main lobe"""
     fit_status_array: np.ndarray
     """The status of the RMSF fit"""
-
-
-class RMCleanResults(NamedTuple):
-    """Results of the RM-CLEAN calculation"""
-
-    cleanFDF: np.ndarray
-    """The cleaned Faraday dispersion function cube"""
-    ccArr: np.ndarray
-    """The clean components cube"""
-    iterCountArr: np.ndarray
-    """The number of iterations for each pixel"""
-    resifdf_error: np.ndarray
-    """The residual Faraday dispersion function cube"""
 
 
 class FractionalSpectra(NamedTuple):
@@ -135,6 +135,27 @@ class FDFParameters(NamedTuple):
     """Channel width in Hz"""
     frac_pol: float
     """Fractional linear polarisation"""
+
+    def __str__(self):
+        return (
+            f"RMSF FWHM: {self.fwhm_rmsf_radm2:.2f}\n"
+            f"Peak pI: {self.peak_pi_fit:.2f} ± {self.peak_pi_error:.2f}\n"
+            f"Peak RM: {self.peak_rm_fit:.2f} ± {self.peak_rm_fit_error:.2f}\n"
+            f"Peak PA: {self.peak_pa_fit_deg:.2f} ± {self.peak_pa_fit_deg_error:.2f}\n"
+            f"Peak PA0: {self.peak_pa0_fit_deg:.2f} ± {self.peak_pa0_fit_deg_error:.2f}\n"
+            f"Peak Q: {self.peak_q_fit:.2f} ± {self.fdf_q_noise:.2f}, Peak U: {self.peak_u_fit:.2f} ± {self.fdf_u_noise:.2f}\n"
+            f"freq0: {self.ref_freq_hz:.2f}, lam0: {self.lam_sq_0_m2:.2f}\n"
+            f"Fit function: {self.fit_function}\n"
+            f"Frac pol: {self.frac_pol:.2f}\n"
+            f"pI error (MAD): {self.fdf_error_mad:.2f}\n"
+            f"pI error (noise): {self.fdf_error_noise:.2f}\n"
+            f"pI SNR: {self.peak_pi_fit_snr:.2f}\n"
+            f"Min freq: {self.min_freq_hz:.2f}, Max freq: {self.max_freq_hz:.2f}\n"
+            f"n_channels: {self.n_channels}, Median d_freq: {self.median_d_freq_hz:.2f}\n"
+        )
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class TheoreticalNoise(NamedTuple):
@@ -210,12 +231,8 @@ def create_fractional_spectra(
     stokes_u_error_array = stokes_u_error_array[no_nan_idx]
 
     # stokes_i_stokes_u_arrayay = unumpy.stokes_u_arrayay(stokes_i_array, stokes_i_error_array)
-    stokes_q_stokes_u_arrayay = unumpy.stokes_u_arrayay(
-        stokes_q_array, stokes_q_error_array
-    )
-    stokes_u_stokes_u_arrayay = unumpy.stokes_u_arrayay(
-        stokes_u_array, stokes_u_error_array
-    )
+    stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
+    stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)
     if stokes_i_model_array is not None:
         if stokes_i_model_error is None:
             raise ValueError(
@@ -248,30 +265,18 @@ def create_fractional_spectra(
         stokes_i_model_low, stokes_i_model_array, stokes_i_model_high = np.percentile(
             model_samples, [16, 50, 84], axis=0
         )
-        stokes_i_model_stokes_u_arrayay = unumpy.stokes_u_arrayay(
+        stokes_i_model_stokes_u_arrayay = unumpy.uarray(
             stokes_i_model_array,
             np.abs((stokes_i_model_high - stokes_i_model_low)),
         )
 
-    stokes_q_frac_stokes_u_arrayay = (
-        stokes_q_stokes_u_arrayay / stokes_i_model_stokes_u_arrayay
-    )
-    stokes_u_frac_stokes_u_arrayay = (
-        stokes_u_stokes_u_arrayay / stokes_i_model_stokes_u_arrayay
-    )
+    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_stokes_u_arrayay
+    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_stokes_u_arrayay
 
-    stokes_q_frac_array = StokesQArray(
-        unumpy.nominal_values(stokes_q_frac_stokes_u_arrayay)
-    )
-    stokes_u_frac_array = StokesUArray(
-        unumpy.nominal_values(stokes_u_frac_stokes_u_arrayay)
-    )
-    stokes_q_frac_error_array = StokesQArray(
-        unumpy.std_devs(stokes_q_frac_stokes_u_arrayay)
-    )
-    stokes_u_frac_error_array = StokesUArray(
-        unumpy.std_devs(stokes_u_frac_stokes_u_arrayay)
-    )
+    stokes_q_frac_array = StokesQArray(unumpy.nominal_values(stokes_q_frac_uarray))
+    stokes_u_frac_array = StokesUArray(unumpy.nominal_values(stokes_u_frac_uarray))
+    stokes_q_frac_error_array = StokesQArray(unumpy.std_devs(stokes_q_frac_uarray))
+    stokes_u_frac_error_array = StokesUArray(unumpy.std_devs(stokes_u_frac_uarray))
 
     return FractionalSpectra(
         stokes_i_model_array=stokes_i_model_array,
@@ -423,9 +428,13 @@ def compute_rmsynth_params(
 
     # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
     if weight_type == "variance":
+        if (stokes_qu_error_array == 0).all():
+            stokes_qu_error_array = np.ones(len(stokes_qu_error_array))
         weight_array = 1.0 / stokes_qu_error_array**2
     else:
         weight_array = np.ones_like(freq_array_hz)
+
+    logger.debug(f"Weighting type: {weight_type}")
 
     mask = ~np.isfinite(pol_array)
     weight_array[mask] = 0.0
@@ -434,8 +443,10 @@ def compute_rmsynth_params(
     # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
     scale_factor = 1.0 / np.nansum(weight_array)
     lam_sq_0_m2 = scale_factor * np.nansum(weight_array * lambda_sq_arr_m2)
-    if not np.isfinite(lam_sq_0_m2):  # Can happen if all channels are NaNs/zeros
-        lam_sq_0_m2 = 0.0
+    if not np.isfinite(lam_sq_0_m2):
+        lam_sq_0_m2 = np.nanmean(lambda_sq_arr_m2)
+
+    logger.debug(f"lam_sq_0_m2 = {lam_sq_0_m2:0.2f} m^2")
 
     return RMSynthParams(
         lambda_sq_arr_m2=lambda_sq_arr_m2,
@@ -463,6 +474,18 @@ def make_phi_array(
     max_phi_radm2 = (n_chan_rm - 1.0) * d_phi_radm2 / 2.0
     phi_arr_radm2 = np.linspace(-max_phi_radm2, max_phi_radm2, n_chan_rm)
     return phi_arr_radm2
+
+
+def make_double_phi_array(
+    phi_arr_radm2: np.ndarray,
+) -> np.ndarray:
+    n_phi = len(phi_arr_radm2)
+    n_ext = np.ceil(n_phi / 2.0)
+    resamp_index = np.arange(2.0 * n_ext + n_phi) - n_ext
+    phi_double_arr_radm2 = interp1d(
+        np.arange(n_phi), phi_arr_radm2, fill_value="extrapolate"
+    )(resamp_index)
+    return phi_double_arr_radm2
 
 
 def get_fwhm_rmsf(
@@ -655,10 +678,7 @@ def get_rmsf_nufft(
     Returns:
         RMSFResults: rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_array
     """
-    phi_double_arr_radm2 = make_phi_array(
-        phi_max_radm2=np.max(phi_arr_radm2) * 2,
-        d_phi_radm2=phi_arr_radm2[1] - phi_arr_radm2[0],
-    )
+    phi_double_arr_radm2 = make_double_phi_array(phi_arr_radm2)
 
     weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -788,319 +808,6 @@ def get_rmsf_nufft(
         fwhm_rmsf_arr=fwhm_rmsf_arr,
         fit_status_array=fit_status_array,
     )
-
-
-def do_rmclean_hogbom(
-    dirtyFDF,
-    phi_arr_radm2,
-    RMSFArr,
-    phi_double_arr_radm2_radm2,
-    fwhm_rmsf_arr,
-    cutoff,
-    maxIter=1000,
-    gain=0.1,
-    mask_array=None,
-    nBits=32,
-    verbose=False,
-    doPlots=False,
-    pool=None,
-    chunksize=None,
-    log=print,
-    window=0,
-) -> RMCleanResults:
-    """Perform Hogbom CLEAN on a cube of complex Faraday dispersion functions
-    given a cube of rotation measure spread functions.
-
-    dirtyFDF       ... 1, 2 or 3D complex FDF array
-    phi_arr_radm2   ... 1D Faraday depth array corresponding to the FDF
-    RMSFArr        ... 1, 2 or 3D complex RMSF array
-    phi_double_arr_radm2_radm2  ... double size 1D Faraday depth array of the RMSF
-    fwhm_rmsf_arr    ... scalar, 1D or 2D array of RMSF main lobe widths
-    cutoff         ... clean cutoff (+ve = absolute values, -ve = sigma) [-1]
-    maxIter        ... maximun number of CLEAN loop interations [1000]
-    gain           ... CLEAN loop gain [0.1]
-    mask_array         ... scalar, 1D or 2D pixel mask array [None]
-    nBits          ... precision of data arrays [32]
-    verbose        ... print feedback during calculation [False]
-    doPlots        ... plot the final CLEAN FDF [False]
-    pool           ... thread pool for multithreading (from schwimmbad) [None]
-    chunksize      ... number of pixels to be given per thread (for 3D) [None]
-    log            ... function to be used to output messages [print]
-    window         ... Only clean in ±RMSF_FWHM window around first peak [False]
-
-    """
-
-    # Default data types
-    dtFloat = "float" + str(nBits)
-    dtComplex = "complex" + str(2 * nBits)
-
-    # Sanity checks on array sizes
-    n_phi = phi_arr_radm2.shape[0]
-    if n_phi != dirtyFDF.shape[0]:
-        logger.error("'phi_arr_radm2' and 'dirtyFDF' are not the same length.")
-        return None, None, None, None
-    n_phi2 = phi_double_arr_radm2_radm2.shape[0]
-    if not n_phi2 == RMSFArr.shape[0]:
-        logger.error("missmatch in 'phi_double_arr_radm2_radm2' and 'RMSFArr' length.")
-        return None, None, None, None
-    if not (n_phi2 >= 2 * n_phi):
-        logger.error("the Faraday depth of the RMSF must be twice the FDF.")
-        return None, None, None, None
-    n_dimension = len(dirtyFDF.shape)
-    if not n_dimension <= 3:
-        logger.error("FDF array dimensions must be <= 3.")
-        return None, None, None, None
-    if not n_dimension == len(RMSFArr.shape):
-        logger.error("the input RMSF and FDF must have the same number of axes.")
-        return None, None, None, None
-    if not RMSFArr.shape[1:] == dirtyFDF.shape[1:]:
-        logger.error("the xy dimesions of the RMSF and FDF must match.")
-        return None, None, None, None
-    if mask_array is not None:
-        if not mask_array.shape == dirtyFDF.shape[1:]:
-            logger.error("pixel mask must match xy dimesnisons of FDF cube.")
-            log(
-                "     FDF[z,y,z] = {:}, Mask[y,x] = {:}.".format(
-                    dirtyFDF.shape, mask_array.shape
-                ),
-                end=" ",
-            )
-
-            return None, None, None, None
-    else:
-        mask_array = np.ones(dirtyFDF.shape[1:], dtype="bool")
-
-    # Reshape the FDF & RMSF array to 3 dimensions and mask array to 2
-    if n_dimension == 1:
-        dirtyFDF = np.reshape(dirtyFDF, (dirtyFDF.shape[0], 1, 1))
-        RMSFArr = np.reshape(RMSFArr, (RMSFArr.shape[0], 1, 1))
-        mask_array = np.reshape(mask_array, (1, 1))
-        fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (1, 1))
-    elif n_dimension == 2:
-        dirtyFDF = np.reshape(dirtyFDF, list(dirtyFDF.shape[:2]) + [1])
-        RMSFArr = np.reshape(RMSFArr, list(RMSFArr.shape[:2]) + [1])
-        mask_array = np.reshape(mask_array, (dirtyFDF.shape[1], 1))
-        fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (dirtyFDF.shape[1], 1))
-    iterCountArr = np.zeros_like(mask_array, dtype="int")
-
-    # Determine which pixels have components above the cutoff
-    abs_fdf_cube = np.abs(np.nan_to_num(dirtyFDF))
-    mskCutoff = np.where(np.max(abs_fdf_cube, axis=0) >= cutoff, 1, 0)
-    xyCoords = np.rot90(np.where(mskCutoff > 0))
-
-    # Feeback to user
-    if verbose:
-        num_pixels = dirtyFDF.shape[-1] * dirtyFDF.shape[-2]
-        nCleanum_pixels = len(xyCoords)
-        log("Cleaning {:}/{:} spectra.".format(nCleanum_pixels, num_pixels))
-
-    # Initialise arrays to hold the residual FDF, clean components, clean FDF
-    # Residual is initially copies of dirty FDF, so that pixels that are not
-    #  processed get correct values (but will be overridden when processed)
-    resifdf_error = dirtyFDF.copy()
-    ccArr = np.zeros(dirtyFDF.shape, dtype=dtComplex)
-    cleanFDF = np.zeros_like(dirtyFDF)
-
-    # Loop through the pixels containing a polarised signal
-    inputs = [[yi, xi, dirtyFDF] for yi, xi in xyCoords]
-    rmc = RMcleaner(
-        RMSFArr,
-        phi_double_arr_radm2_radm2,
-        phi_arr_radm2,
-        fwhm_rmsf_arr,
-        iterCountArr,
-        maxIter,
-        gain,
-        cutoff,
-        nBits,
-        verbose,
-        window,
-    )
-
-    if pool is None:
-        output = []
-        for pix in inputs:
-            output.append(rmc.cleanloop(pix))
-    else:
-        output = list(
-            tqdm(
-                pool.imap(
-                    rmc.cleanloop,
-                    inputs,
-                    chunksize=chunksize if chunksize is not None else 1,
-                ),
-                desc="RM-CLEANing",
-                disable=not verbose,
-                total=len(inputs),
-            )
-        )
-        pool.close()
-    # Put data back in correct shape
-    #    ccArr = np.reshape(np.rot90(np.stack([model for _, _, model in output]), k=-1),dirtyFDF.shape)
-    #    cleanFDF = np.reshape(np.rot90(np.stack([clean for clean, _, _ in output]), k=-1),dirtyFDF.shape)
-    #    resifdf_error = np.reshape(np.rot90(np.stack([resid for _, resid, _ in output]), k=-1),dirtyFDF.shape)
-    for i in range(len(inputs)):
-        yi = inputs[i][0]
-        xi = inputs[i][1]
-        ccArr[:, yi, xi] = output[i][2]
-        cleanFDF[:, yi, xi] = output[i][0]
-        resifdf_error[:, yi, xi] = output[i][1]
-
-    # Restore the residual to the CLEANed FDF (moved outside of loop:
-    # will now work for pixels/spectra without clean components)
-    cleanFDF += resifdf_error
-
-    # Remove redundant dimensions
-    cleanFDF = np.squeeze(cleanFDF)
-    ccArr = np.squeeze(ccArr)
-    iterCountArr = np.squeeze(iterCountArr)
-    resifdf_error = np.squeeze(resifdf_error)
-
-    return RMCleanResults(cleanFDF, ccArr, iterCountArr, resifdf_error)
-
-
-# -----------------------------------------------------------------------------#
-class CleanLoopResults(NamedTuple):
-    """Results of the RM-CLEAN loop"""
-
-    cleanFDF: np.ndarray
-    """The cleaned Faraday dispersion function cube"""
-    resifdf_error: np.ndarray
-    """The residual Faraday dispersion function cube"""
-    ccArr: np.ndarray
-    """The clean components cube"""
-
-
-class RMcleaner:
-    """Allows do_rmclean_hogbom to be run in parallel
-    Designed around use of schwimmbad parallelization tools.
-    """
-
-    def __init__(
-        self,
-        RMSFArr,
-        phi_double_arr_radm2_radm2,
-        phi_arr_radm2,
-        fwhm_rmsf_arr,
-        iterCountArr,
-        maxIter=1000,
-        gain=0.1,
-        cutoff=0,
-        nbits=32,
-        verbose=False,
-        window=0,
-    ):
-        self.RMSFArr = RMSFArr
-        self.phi_double_arr_radm2_radm2 = phi_double_arr_radm2_radm2
-        self.phi_arr_radm2 = phi_arr_radm2
-        self.fwhm_rmsf_arr = fwhm_rmsf_arr
-        self.iterCountArr = iterCountArr
-        self.maxIter = maxIter
-        self.gain = gain
-        self.cutoff = cutoff
-        self.verbose = verbose
-        self.nbits = nbits
-        self.window = window
-
-    def cleanloop(self, args) -> CleanLoopResults:
-        return self._cleanloop(*args)
-
-    def _cleanloop(self, yi, xi, dirtyFDF) -> CleanLoopResults:
-        dirtyFDF = dirtyFDF[:, yi, xi]
-        # Initialise arrays to hold the residual FDF, clean components, clean FDF
-        resifdf_error = dirtyFDF.copy()
-        ccArr = np.zeros_like(dirtyFDF)
-        cleanFDF = np.zeros_like(dirtyFDF)
-        RMSFArr = self.RMSFArr[:, yi, xi]
-        fwhm_rmsf_arr = self.fwhm_rmsf_arr[yi, xi]
-
-        # Find the index of the peak of the RMSF
-        indxMaxRMSF = np.nanargmax(RMSFArr)
-
-        # Calculate the padding in the sampled RMSF
-        # Assumes only integer shifts and symmetric
-        n_phiPad = int(
-            (len(self.phi_double_arr_radm2_radm2) - len(self.phi_arr_radm2)) / 2
-        )
-
-        iterCount = 0
-        while np.max(np.abs(resifdf_error)) >= self.cutoff and iterCount < self.maxIter:
-            # Get the absolute peak channel, values and Faraday depth
-            indxPeakFDF = np.argmax(np.abs(resifdf_error))
-            peakFDFval = resifdf_error[indxPeakFDF]
-            phiPeak = self.phi_arr_radm2[indxPeakFDF]
-
-            # A clean component is "loop-gain * peakFDFval
-            CC = self.gain * peakFDFval
-            ccArr[indxPeakFDF] += CC
-
-            # At which channel is the CC located at in the RMSF?
-            indxPeakRMSF = indxPeakFDF + n_phiPad
-
-            # Shift the RMSF & clip so that its peak is centred above this CC
-            shiftedRMSFArr = np.roll(RMSFArr, indxPeakRMSF - indxMaxRMSF)[
-                n_phiPad:-n_phiPad
-            ]
-
-            # Subtract the product of the CC shifted RMSF from the residual FDF
-            resifdf_error -= CC * shiftedRMSFArr
-
-            # Restore the CC * a Gaussian to the cleaned FDF
-            cleanFDF += gauss1D(CC, phiPeak, fwhm_rmsf_arr)(self.phi_arr_radm2)
-            iterCount += 1
-            self.iterCountArr[yi, xi] = iterCount
-
-        # Create a mask for the pixels that have been cleaned
-        mask = np.abs(ccArr) > 0
-        delta_phi = self.phi_arr_radm2[1] - self.phi_arr_radm2[0]
-        fwhm_rmsf_arr_pix = fwhm_rmsf_arr / delta_phi
-        for i in np.where(mask)[0]:
-            start = int(i - fwhm_rmsf_arr_pix / 2)
-            end = int(i + fwhm_rmsf_arr_pix / 2)
-            mask[start:end] = True
-        resifdf_error_mask = np.ma.array(resifdf_error, mask=~mask)
-        # Clean again within mask
-        while (
-            np.ma.max(np.ma.abs(resifdf_error_mask)) >= self.window
-            and iterCount < self.maxIter
-        ):
-            if resifdf_error_mask.mask.all():
-                break
-            # Get the absolute peak channel, values and Faraday depth
-            indxPeakFDF = np.ma.argmax(np.abs(resifdf_error_mask))
-            peakFDFval = resifdf_error_mask[indxPeakFDF]
-            phiPeak = self.phi_arr_radm2[indxPeakFDF]
-
-            # A clean component is "loop-gain * peakFDFval
-            CC = self.gain * peakFDFval
-            ccArr[indxPeakFDF] += CC
-
-            # At which channel is the CC located at in the RMSF?
-            indxPeakRMSF = indxPeakFDF + n_phiPad
-
-            # Shift the RMSF & clip so that its peak is centred above this CC
-            shiftedRMSFArr = np.roll(RMSFArr, indxPeakRMSF - indxMaxRMSF)[
-                n_phiPad:-n_phiPad
-            ]
-
-            # Subtract the product of the CC shifted RMSF from the residual FDF
-            resifdf_error -= CC * shiftedRMSFArr
-
-            # Restore the CC * a Gaussian to the cleaned FDF
-            cleanFDF += gauss1D(CC, phiPeak, fwhm_rmsf_arr)(self.phi_arr_radm2)
-            iterCount += 1
-            self.iterCountArr[yi, xi] = iterCount
-
-            # Remake masked residual FDF
-            resifdf_error_mask = np.ma.array(resifdf_error, mask=~mask)
-
-        cleanFDF = np.squeeze(cleanFDF)
-        resifdf_error = np.squeeze(resifdf_error)
-        ccArr = np.squeeze(ccArr)
-
-        return CleanLoopResults(
-            cleanFDF=cleanFDF, resifdf_error=resifdf_error, ccArr=ccArr
-        )
 
 
 def get_fdf_parameters(
@@ -1245,7 +952,7 @@ def get_fdf_parameters(
     return FDFParameters(
         fdf_error_mad=fdf_error_mad,
         peak_pi_fit=peak_pi_fit,
-        peak_pi_error=fdf_error,
+        peak_pi_error=theoretical_noise.fdf_error_noise,
         peak_pi_fit_debias=peak_pi_fit_debias,
         peak_pi_fit_snr=peak_pi_fit_snr,
         peak_pi_fit_index=peak_pi_fit_index,
@@ -1384,7 +1091,7 @@ def faraday_simple_spectrum(
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
 
     complex_polarization = frac_pol * np.exp(
-        2j * np.radians(psi0_deg + rm_radm2 * lambda_sq_arr_m2)
+        2j * (np.deg2rad(psi0_deg) + rm_radm2 * lambda_sq_arr_m2)
     )
 
     return complex_polarization
@@ -1425,7 +1132,9 @@ def measure_qu_complexity(
         noise=1.0,
     )
 
-    sigma_add_p_array = np.hypot(sigma_add_q.sigma_add, sigma_add_u.sigma_add)
+    sigma_add_p_array = np.hypot(
+        sigma_add_q.sigma_add_array, sigma_add_u.sigma_add_array
+    )
     sigma_add_p_pdf = np.hypot(sigma_add_q.sigma_add_pdf, sigma_add_u.sigma_add_pdf)
     sigma_add_p_cdf = np.cumsum(sigma_add_p_pdf) / np.nansum(sigma_add_p_pdf)
     sigma_add_p_val = cdf_percentile(
