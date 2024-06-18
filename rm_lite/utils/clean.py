@@ -5,6 +5,9 @@
 from typing import NamedTuple
 
 import numpy as np
+from tqdm.auto import tqdm
+
+from rm_lite.utils.logging import logger
 
 
 class RMCleanResults(NamedTuple):
