@@ -84,7 +84,7 @@ def fit_fdf(
         mask[start : end + 2] = True
 
     amplitude_guess = np.nanmax(fdf_to_fit_array[mask])
-    mean_guess = phi_arr_radm2[np.argmax(fdf_to_fit_array[mask])]
+    mean_guess = phi_arr_radm2[mask][np.argmax(fdf_to_fit_array[mask])]
     stddev_guess = fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2)))
     popt, pcov = curve_fit(
         gaussian,
@@ -92,6 +92,7 @@ def fit_fdf(
         fdf_to_fit_array[mask],
         p0=[amplitude_guess, mean_guess, stddev_guess],
     )
+    logger.debug(f"Fit results: {popt}")
     amplitude_fit, mean_fit, stddev_fit = popt
     return FDFFitResult(
         amplitude_fit=amplitude_fit,
@@ -179,6 +180,8 @@ def static_fit(
         [np.inf] * (fit_order + 1),
     )
     bounds[0][0] = 0.0
+    if (stokes_i_error_array == 0).all():
+        stokes_i_error_array = None
     popt, pcov = curve_fit(
         fit_func,
         freq_array_hz / ref_freq_hz,
