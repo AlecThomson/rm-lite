@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from typing import Callable, Literal, NamedTuple, Tuple
+from typing import Callable, Literal, NamedTuple, Optional, Tuple
 
 import numpy as np
 from astropy.modeling.models import Gaussian1D
@@ -9,6 +9,8 @@ from scipy.optimize import curve_fit
 from rm_lite.utils.logging import logger
 
 logger.setLevel("INFO")
+
+GAUSSIAN_SIGMA_TO_FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
 
 
 class FitResult(NamedTuple):
@@ -35,15 +37,44 @@ class FDFFitResult(NamedTuple):
     """Standard deviation (Faraday depth) of the best fit model"""
 
 
-def gaussian(x, amplitude, mean, stddev):
+def gaussian(
+    x: np.ndarray,
+    amplitude: float | complex,
+    mean: float,
+    stddev: Optional[float] = None,
+    fwhm: Optional[float] = None,
+) -> np.ndarray:
+    if stddev is None and fwhm is None:
+        raise ValueError("Must provide either stddev or fwhm.")
+    if stddev is None:
+        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
+    if isinstance(amplitude, complex):
+        return Gaussian1D(amplitude=amplitude.real, mean=mean, stddev=stddev)(
+            x
+        ) + 1j * Gaussian1D(amplitude=amplitude.imag, mean=mean, stddev=stddev)(x)
     return Gaussian1D(amplitude=amplitude, mean=mean, stddev=stddev)(x)
 
 
-def unit_gaussian(x, mean, stddev):
+def unit_gaussian(
+    x: np.ndarray,
+    mean: float,
+    stddev: Optional[float] = None,
+    fwhm: Optional[float] = None,
+) -> np.ndarray:
+    if stddev is None and fwhm is None:
+        raise ValueError("Must provide either stddev or fwhm.")
+    if stddev is None:
+        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
     return Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x)
 
 
-def unit_centred_gaussian(x, stddev):
+def unit_centred_gaussian(
+    x: np.ndarray, stddev: Optional[float] = None, fwhm: Optional[float] = None
+) -> np.ndarray:
+    if stddev is None and fwhm is None:
+        raise ValueError("Must provide either stddev or fwhm.")
+    if stddev is None:
+        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
     return Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x)
 
 
