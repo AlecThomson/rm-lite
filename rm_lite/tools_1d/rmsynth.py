@@ -3,13 +3,11 @@
 """RM-synthesis on 1D data"""
 
 import time
-from dataclasses import dataclass
 from typing import Literal, NamedTuple, Optional, Tuple
 
 import numpy as np
 from scipy import interpolate
 
-from rm_lite.utils.fitting import FitResult
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FDFParameters,

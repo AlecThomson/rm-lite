@@ -37,6 +37,18 @@ class FDFFitResult(NamedTuple):
     """Standard deviation (Faraday depth) of the best fit model"""
 
 
+def gaussian_integrand(
+    amplitude: float,
+    stddev: Optional[float] = None,
+    fwhm: Optional[float] = None,
+) -> float:
+    if stddev is None and fwhm is None:
+        raise ValueError("Must provide either stddev or fwhm.")
+    if stddev is None:
+        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
+    return amplitude * stddev * np.sqrt(2 * np.pi)
+
+
 def gaussian(
     x: np.ndarray,
     amplitude: float | complex,
@@ -95,9 +107,9 @@ def fit_rmsf(
         unit_centred_gaussian,
         phi_double_arr_radm2[mask],
         rmsf_to_fit_array[mask],
-        p0=[fwhm_rmsf_radm2 / (2 * np.sqrt(2 * np.log(2)))],
+        p0=[fwhm_rmsf_radm2 / GAUSSIAN_SIGMA_TO_FWHM],
     )
-    return popt[0]
+    return popt[0] * GAUSSIAN_SIGMA_TO_FWHM
 
 
 def fit_fdf(

@@ -9,12 +9,12 @@ from astropy.stats import mad_std
 import finufft
 import numpy as np
 from astropy.constants import c as speed_of_light
-from scipy.stats import multivariate_normal, scoreatpercentile
+from scipy.stats import multivariate_normal
 from scipy.interpolate import interp1d
-from tqdm.auto import tqdm, trange
+from tqdm.auto import trange
 from uncertainties import unumpy
 
-from rm_lite.utils.fitting import FitResult, fit_fdf, fit_stokes_i_model, Gaussian1D
+from rm_lite.utils.fitting import FitResult, fit_fdf, fit_stokes_i_model, fit_rmsf
 from rm_lite.utils.logging import logger
 
 
@@ -376,6 +376,63 @@ class StokesSigmaAdd(NamedTuple):
     """Sigma_add for polarised intensity"""
 
 
+class RMSFParams(NamedTuple):
+    """RM spread function parameters"""
+
+    rmsf_fwhm_theory: float
+    """ Theoretical FWHM of the RMSF """
+    rmsf_fwhm_meas: float
+    """ Measured FWHM of the RMSF """
+    phi_max: float
+    """ Maximum Faraday depth """
+    phi_max_scale: float
+    """ Maximum Faraday depth scale """
+
+
+def compute_rmsf_params(
+    freq_array_hz: np.ndarray,
+    weight_array: np.ndarray,
+    super_resolution: bool = False,
+) -> RMSFParams:
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_array_hz)
+    # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
+    # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
+    scale_factor = 1.0 / np.nansum(weight_array)
+    lam_sq_0_m2 = scale_factor * np.nansum(weight_array * lambda_sq_arr_m2)
+    if not np.isfinite(lam_sq_0_m2):
+        lam_sq_0_m2 = np.nanmean(lambda_sq_arr_m2)
+    if super_resolution:
+        lam_sq_0_m2 = 0.0
+
+    lambda_sq_m2_max = np.nanmax(lambda_sq_arr_m2)
+    lambda_sq_m2_min = np.nanmin(lambda_sq_arr_m2)
+    delta_lambda_sq_m2 = np.median(np.abs(np.diff(lambda_sq_arr_m2)))
+
+    rmsf_fwhm_theory = 3.8 / (lambda_sq_m2_max - lambda_sq_m2_min)
+    phi_max = np.sqrt(3.0) / delta_lambda_sq_m2
+    phi_max_scale = np.pi / lambda_sq_m2_min
+    dphi = 0.1 * rmsf_fwhm_theory
+
+    phi_array_radm2 = make_phi_array(phi_max * 10 * 2, dphi)
+
+    rmsf_results = get_rmsf_nufft(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        phi_arr_radm2=phi_array_radm2,
+        weight_array=weight_array,
+        lam_sq_0_m2=lam_sq_0_m2,
+        super_resolution=super_resolution,
+    )
+
+    rmsf_fwhm_meas = float(rmsf_results.fwhm_rmsf_arr)
+
+    return RMSFParams(
+        rmsf_fwhm_theory=rmsf_fwhm_theory,
+        rmsf_fwhm_meas=rmsf_fwhm_meas,
+        phi_max=phi_max,
+        phi_max_scale=phi_max_scale,
+    )
+
+
 def compute_rmsynth_params(
     freq_array_hz: np.ndarray,
     pol_array: np.ndarray,
@@ -622,8 +679,9 @@ def rmsynth_nufft(
         finufft.nufft1d3(
             x=exponent,
             c=np.ascontiguousarray(pol_cube.T),
-            s=(phi_arr_radm2[::-1] * 2).astype(exponent.dtype),
+            s=(phi_arr_radm2 * 2).astype(exponent.dtype),
             eps=eps,
+            isign=-1,
         )
         * scale_array[..., None]
     ).T
@@ -644,6 +702,92 @@ def rmsynth_nufft(
     fdf_dirty_cube = np.squeeze(fdf_dirty_cube)
 
     return fdf_dirty_cube
+
+
+def inverse_rmsynth_nufft(
+    fdf_q_array: StokesQArray,
+    fdf_u_array: StokesUArray,
+    lambda_sq_arr_m2: np.ndarray,
+    phi_arr_radm2: np.ndarray,
+    lam_sq_0_m2: float,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """Inverse RM-synthesis - FDF to Stokes Q and U in wavelength^2 space.
+
+    Args:
+        fdf_q_array (StokesQArray): FDF Stokes Q data array
+        fdf_u_array (StokesUArray): FDF Stokes U data array
+        lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
+        phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
+        lam_sq_0_m2 (float): Reference wavelength^2 value
+        eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
+
+    Raises:
+        ValueError: If the Stokes Q and U data arrays are not the same shape.
+        ValueError: If the data dimensions are > 3.
+        ValueError: If the data depth does not match the lambda^2 vector.
+
+    Returns:
+        np.ndarray: Complex polarisation array in wavelength^2 space
+    """
+    if not fdf_q_array.shape == fdf_u_array.shape:
+        raise ValueError("Stokes Q and U data arrays must be the same shape.")
+
+    n_dims = len(fdf_q_array.shape)
+    if not n_dims <= 3:
+        raise ValueError(f"Data dimensions must be <= 3. Got {n_dims}")
+
+    if not fdf_q_array.shape[0] == phi_arr_radm2.shape[0]:
+        raise ValueError(
+            f"Data depth does not match Faraday depth vector ({fdf_q_array.shape[0]} vs {phi_arr_radm2.shape[0]})."
+        )
+
+    # Reshape the data arrays to 2 dimensions
+    if n_dims == 1:
+        fdf_q_array = np.reshape(fdf_q_array, (fdf_q_array.shape[0], 1))
+        fdf_u_array = np.reshape(fdf_u_array, (fdf_u_array.shape[0], 1))
+    elif n_dims == 3:
+        old_data_shape = fdf_q_array.shape
+        fdf_q_array = np.reshape(
+            fdf_q_array,
+            (
+                fdf_q_array.shape[0],
+                fdf_q_array.shape[1] * fdf_q_array.shape[2],
+            ),
+        )
+        fdf_u_array = np.reshape(
+            fdf_u_array,
+            (
+                fdf_u_array.shape[0],
+                fdf_u_array.shape[1] * fdf_u_array.shape[2],
+            ),
+        )
+
+    fdf_pol_cube = fdf_q_array + 1j * fdf_u_array
+    exponent = (lambda_sq_arr_m2 - lam_sq_0_m2).astype(
+        f"float{fdf_pol_cube.itemsize*8/2:.0f}"
+    )
+    pol_cube_inv = (
+        finufft.nufft1d3(
+            x=(phi_arr_radm2 * 2).astype(exponent.dtype),
+            c=fdf_pol_cube.T.astype(complex),
+            s=exponent,
+            eps=eps,
+            isign=1,
+        )
+    ).T
+
+    # Restore if 3D shape
+    if n_dims == 3:
+        pol_cube_inv = np.reshape(
+            pol_cube_inv,
+            (pol_cube_inv.shape[0], old_data_shape[1], old_data_shape[2]),
+        )
+
+    # Remove redundant dimensions in the FDF array
+    pol_cube_inv = np.squeeze(pol_cube_inv)
+
+    return pol_cube_inv
 
 
 def get_rmsf_nufft(
@@ -977,20 +1121,6 @@ def get_fdf_parameters(
         median_d_freq_hz=np.nanmedian(np.diff(freq_array_hz[good_chan_idx])),
         frac_pol=peak_pi_fit_debias / stokes_i_reference_flux,
     )
-
-
-# # -----------------------------------------------------------------------------#
-# def norm_cdf(mean=0.0, std=1.0, N=50, x_array=None):
-#     """Return the CDF of a normal distribution between -6 and 6 sigma, or at
-#     the values of an input array."""
-
-#     if x_array is None:
-#         x = np.linspace(-6.0 * std, 6.0 * std, N)
-#     else:
-#         x = x_array
-#     y = norm.cdf(x, loc=mean, scale=std)
-
-#     return x, y
 
 
 def cdf_percentile(values: np.ndarray, cdf: np.ndarray, q=50.0) -> float:
