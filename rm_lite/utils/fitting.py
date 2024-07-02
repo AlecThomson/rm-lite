@@ -37,6 +37,14 @@ class FDFFitResult(NamedTuple):
     """Standard deviation (Faraday depth) of the best fit model"""
 
 
+def fwhm_to_sigma(fwhm: float) -> float:
+    return fwhm / GAUSSIAN_SIGMA_TO_FWHM
+
+
+def sigma_to_fwhm(sigma: float) -> float:
+    return sigma * GAUSSIAN_SIGMA_TO_FWHM
+
+
 def gaussian_integrand(
     amplitude: float,
     stddev: Optional[float] = None,
@@ -45,7 +53,7 @@ def gaussian_integrand(
     if stddev is None and fwhm is None:
         raise ValueError("Must provide either stddev or fwhm.")
     if stddev is None:
-        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
+        stddev = fwhm_to_sigma(fwhm)
     return amplitude * stddev * np.sqrt(2 * np.pi)
 
 
@@ -59,7 +67,7 @@ def gaussian(
     if stddev is None and fwhm is None:
         raise ValueError("Must provide either stddev or fwhm.")
     if stddev is None:
-        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
+        stddev = fwhm_to_sigma(fwhm)
     if isinstance(amplitude, complex):
         return Gaussian1D(amplitude=amplitude.real, mean=mean, stddev=stddev)(
             x
@@ -76,7 +84,7 @@ def unit_gaussian(
     if stddev is None and fwhm is None:
         raise ValueError("Must provide either stddev or fwhm.")
     if stddev is None:
-        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
+        stddev = fwhm_to_sigma(fwhm)
     return Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x)
 
 
@@ -86,7 +94,7 @@ def unit_centred_gaussian(
     if stddev is None and fwhm is None:
         raise ValueError("Must provide either stddev or fwhm.")
     if stddev is None:
-        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
+        stddev = fwhm_to_sigma(fwhm)
     return Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x)
 
 
@@ -107,9 +115,9 @@ def fit_rmsf(
         unit_centred_gaussian,
         phi_double_arr_radm2[mask],
         rmsf_to_fit_array[mask],
-        p0=[fwhm_rmsf_radm2 / GAUSSIAN_SIGMA_TO_FWHM],
+        p0=[fwhm_to_sigma(fwhm_rmsf_radm2)],
     )
-    return popt[0] * GAUSSIAN_SIGMA_TO_FWHM
+    return sigma_to_fwhm(popt[0])
 
 
 def fit_fdf(

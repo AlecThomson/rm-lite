@@ -8,8 +8,15 @@ from typing import Callable, Dict, Literal, NamedTuple, Optional, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
+from scipy.ndimage import convolve
 
-from rm_lite.utils.fitting import gaussian, gaussian_integrand, unit_centred_gaussian
+from rm_lite.utils.fitting import (
+    GAUSSIAN_SIGMA_TO_FWHM,
+    fwhm_to_sigma,
+    gaussian,
+    gaussian_integrand,
+    unit_centred_gaussian,
+)
 from rm_lite.utils.logging import logger, TqdmToLogger
 from rm_lite.utils.synthesis import compute_rmsf_params
 
@@ -198,6 +205,7 @@ def minor_loop(
     threshold: float,
     start_iter: int = 0,
     update_mask: bool = True,
+    peak_find_array: Optional[np.ndarray] = None,
 ) -> MinorLoopResults:
     # Trust nothing
     resid_fdf_spectrum_mask = resid_fdf_spectrum_mask.copy()
@@ -209,6 +217,12 @@ def minor_loop(
     phi_arr_radm2 = phi_arr_radm2.copy()
     mask_array = ~resid_fdf_spectrum_mask.mask.copy()
     iter_count = start_iter
+
+    if peak_find_array is not None:
+        peak_find_array = peak_find_array.copy()
+        peak_find_array_mask = np.ma.array(peak_find_array, mask=~mask_array)
+    else:
+        peak_find_array_mask = None
 
     # Find the index of the peak of the RMSF
     max_rmsf_index = np.nanargmax(np.abs(rmsf_spectrum))
@@ -235,7 +249,10 @@ def minor_loop(
             )
             break
         # Get the absolute peak channel, values and Faraday depth
-        peak_fdf_index = np.ma.argmax(np.abs(resid_fdf_spectrum_mask))
+        if peak_find_array_mask is not None:
+            peak_fdf_index = np.ma.argmax(np.abs(peak_find_array_mask))
+        else:
+            peak_fdf_index = np.ma.argmax(np.abs(resid_fdf_spectrum_mask))
         peak_fdf = resid_fdf_spectrum_mask[peak_fdf_index]
         peak_rm = phi_arr_radm2[peak_fdf_index]
 
@@ -254,6 +271,8 @@ def minor_loop(
 
         # Subtract the product of the clean_component shifted RMSF from the residual FDF
         resid_fdf_spectrum -= clean_component * shifted_rmsf_spectrum
+        if peak_find_array is not None:
+            peak_find_array -= np.abs(clean_component * shifted_rmsf_spectrum)
 
         # Restore the clean_component * a Gaussian to the cleaned FDF
         clean_fdf_spectrum += gaussian(
@@ -266,6 +285,8 @@ def minor_loop(
         if update_mask:
             mask_array = np.abs(resid_fdf_spectrum) > mask
         resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
+        if peak_find_array_mask is not None:
+            peak_find_array_mask = np.ma.array(peak_find_array, mask=~mask_array)
 
     return MinorLoopResults(
         clean_fdf_spectrum=clean_fdf_spectrum,
@@ -362,7 +383,7 @@ def _scale_bias_function(
     """
     if scale == 0:
         return 1.0
-    return scale_bias ** (-1 - np.log2(scale / scale_0))
+    return scale_bias ** -(-1 - np.log2(scale / scale_0))
 
 
 def scale_bias_function(
@@ -381,6 +402,10 @@ def scale_bias_function(
     if len(scales) == 1:
         return np.ones_like(scales)
     return _scale_bias_function(scales, scale_0=scales[1], scale_bias=scale_bias)
+
+
+def scale_bias_function_cornwell(scales: np.ndarray) -> np.ndarray:
+    return 1 - 0.6 * scales / scales.max()
 
 
 def hanning(x_array: np.ndarray, length: float) -> np.ndarray:
@@ -441,7 +466,8 @@ def gaussian_scale_kernel_function(
     Returns:
         np.ndarray: Kernel function array (sum normalised)
     """
-    sigma = (3 / 16) * scale * rmsf_fwhm
+    rmsf_sigma = fwhm_to_sigma(rmsf_fwhm)
+    sigma = (3 / 16) * scale * rmsf_sigma
     kernel = unit_centred_gaussian(
         x=phi_double_arr_radm2,
         stddev=sigma,
@@ -488,13 +514,17 @@ def convolve_fdf_scale(
     kernel_func_partial = partial(kernel_func, sum_normalised=sum_normalised)
     kernel_array = kernel_func_partial(phi_double_arr_radm2, scale, fwhm)
 
+    if np.iscomplexobj(fdf_array):
+        kernel_array = kernel_array * (1 + 1j) / np.sqrt(2)
+
     if len(fdf_array) == len(phi_double_arr_radm2):
-        mode = "same"
+        # mode = "same"
+        mode = "reflect"
     else:
-        mode = "valid"
-    conv_spec = np.convolve(fdf_array.real, kernel_array, mode=mode) + 1j * np.convolve(
-        fdf_array.imag, kernel_array, mode=mode
-    )
+        # mode = "valid"
+        mode = "reflect"
+    # conv_spec = np.convolve(fdf_array, kernel_array, mode=mode)
+    conv_spec = convolve(fdf_array, kernel_array, mode=mode)
     if mode == "valid":
         conv_spec = conv_spec[1:-1]
 
@@ -505,12 +535,14 @@ def convolve_fdf_scale(
 
 def find_significant_scale(
     scales: np.ndarray,
-    scale_parameters: np.ndarray,
+    scale_bias: float,
     fdf_array: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
     fwhm: float,
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
 ) -> Tuple[float, float]:
+    scale_parameters = scale_bias_function(scales, scale_bias)
+    # scale_parameters = scale_bias_function_cornwell(scales)
     peaks = np.zeros_like(scales)
     for i, scale in enumerate(scales):
         fdf_conv = convolve_fdf_scale(
@@ -519,16 +551,19 @@ def find_significant_scale(
             fwhm=fwhm,
             phi_double_arr_radm2=phi_double_arr_radm2,
             kernel=kernel,
+            sum_normalised=False,
         )
         peak = np.max(np.abs(fdf_conv))
         peaks[i] = peak
-    activated_index = np.argmax(peaks * scale_parameters)
+    scale_norm = scales.copy()
+    scale_norm[scales == 0] = 1
+    activated_index = np.argmax(peaks * scale_parameters / scale_norm)
     return scales[activated_index], scale_parameters[activated_index]
 
 
 def multiscale_minor_loop(
     scales: np.ndarray,
-    scale_parameters: np.ndarray,
+    scale_bias: float,
     resid_fdf_spectrum_mask: np.ma.MaskedArray,
     phi_arr_radm2: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
@@ -574,7 +609,7 @@ def multiscale_minor_loop(
 
         activated_scale, scale_parameter = find_significant_scale(
             scales=scales,
-            scale_parameters=scale_parameters,
+            scale_bias=scale_bias,
             fdf_array=resid_fdf_spectrum,
             fwhm=rmsf_fwhm,
             phi_double_arr_radm2=phi_double_arr_radm2,
@@ -591,6 +626,7 @@ def multiscale_minor_loop(
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 kernel=kernel,
             )
+        # resid_fdf_spectrum_conv *= scale_parameter
         if activated_scale == 0:
             rmsf_spectrum_conv = rmsf_spectrum.copy()
         else:
@@ -601,11 +637,19 @@ def multiscale_minor_loop(
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 kernel=kernel,
             )
+            # rmsf_spectrum_conv = convolve_fdf_scale(
+            #     scale=activated_scale,
+            #     fdf_array=rmsf_spectrum_conv,
+            #     fwhm=rmsf_fwhm,
+            #     phi_double_arr_radm2=phi_double_arr_radm2,
+            #     kernel=kernel,
+            # )
         scale_factor = np.nanmax(np.abs(rmsf_spectrum_conv))
         rmsf_spectrum_conv /= scale_factor
+        # resid_fdf_spectrum_conv *= scale_factor
 
-        if update_mask:
-            mask_array = np.abs(resid_fdf_spectrum_conv) > mask * scale_factor
+        # if update_mask:
+        #     mask_array = np.abs(resid_fdf_spectrum_conv) > mask * scale_factor
         resid_fdf_spectrum_mask_conv = np.ma.array(
             resid_fdf_spectrum_conv, mask=~mask_array
         )
@@ -618,8 +662,8 @@ def multiscale_minor_loop(
             rmsf_fwhm=float(np.hypot(rmsf_fwhm * activated_scale, rmsf_fwhm)),
             max_iter=max_iter_sub_minor,
             gain=gain,
-            mask=mask * scale_factor,
-            threshold=threshold * scale_factor,
+            mask=mask,
+            threshold=threshold,
             start_iter=iter_count,
             update_mask=update_mask,
         )
@@ -636,6 +680,7 @@ def multiscale_minor_loop(
                 fdf_array=clean_deltas,
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 kernel=kernel,
+                sum_normalised=True,
             )
         model_fdf_spectrum += clean_model
 
@@ -644,12 +689,8 @@ def multiscale_minor_loop(
             phi_double_arr_radm2=phi_double_arr_radm2,
             fwhm_rmsf=rmsf_fwhm,
         )
-        shifted_rmsf = np.convolve(
-            clean_model,
-            rmsf_spectrum,
-            mode="valid",
-        )[1:-1]
-        # shifted_rmsf = sub_minor_results.model_rmsf_spectrum
+        shifted_rmsf = sub_minor_results.model_rmsf_spectrum
+
         clean_fdf_spectrum += clean_spectrum
         resid_fdf_spectrum -= shifted_rmsf
 
@@ -669,7 +710,7 @@ def multiscale_minor_loop(
 
 def multiscale_cycle(
     scales: np.ndarray,
-    scale_parameters: np.ndarray,
+    scale_bias: float,
     phi_arr_radm2: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
     dirty_fdf_spectrum: np.ndarray,
@@ -689,7 +730,7 @@ def multiscale_cycle(
 
     initial_loop_results = multiscale_minor_loop(
         scales=scales,
-        scale_parameters=scale_parameters,
+        scale_bias=scale_bias,
         resid_fdf_spectrum_mask=resid_fdf_spectrum_mask,
         phi_arr_radm2=phi_arr_radm2,
         phi_double_arr_radm2=phi_double_arr_radm2,
@@ -714,7 +755,7 @@ def multiscale_cycle(
     logger.info(f"Starting deep clean...cleaning {mask_array.sum()} pixels")
     deep_loop_results = multiscale_minor_loop(
         scales=scales,
-        scale_parameters=scale_parameters,
+        scale_bias=scale_bias,
         resid_fdf_spectrum_mask=resid_fdf_spectrum_mask,
         phi_arr_radm2=phi_arr_radm2,
         phi_double_arr_radm2=phi_double_arr_radm2,
@@ -853,7 +894,7 @@ def mutliscale_rmclean(
     for yi, xi in tqdm(pixels_to_clean):
         clean_loop_results = multiscale_cycle(
             scales=scales,
-            scale_parameters=scale_bias_function(scales, scale_bias),
+            scale_bias=scale_bias,
             phi_arr_radm2=phi_arr_radm2,
             phi_double_arr_radm2=phi_double_arr_radm2,
             dirty_fdf_spectrum=dirty_fdf_array[:, yi, xi],
