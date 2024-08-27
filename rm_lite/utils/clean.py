@@ -12,6 +12,7 @@ from scipy.ndimage import convolve
 
 from rm_lite.utils.fitting import (
     GAUSSIAN_SIGMA_TO_FWHM,
+    fit_rmsf,
     fwhm_to_sigma,
     gaussian,
     gaussian_integrand,
@@ -216,6 +217,7 @@ def minor_loop(
     rmsf_spectrum = rmsf_spectrum.copy()
     phi_arr_radm2 = phi_arr_radm2.copy()
     mask_array = ~resid_fdf_spectrum_mask.mask.copy()
+    mask_array_original = mask_array.copy()
     iter_count = start_iter
 
     if peak_find_array is not None:
@@ -284,6 +286,8 @@ def minor_loop(
         # Remake masked residual FDF
         if update_mask:
             mask_array = np.abs(resid_fdf_spectrum) > mask
+            # Mask anything that was previously masked
+            mask_array = mask_array & mask_array_original
         resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
         if peak_find_array_mask is not None:
             peak_find_array_mask = np.ma.array(peak_find_array, mask=~mask_array)
@@ -610,62 +614,90 @@ def multiscale_minor_loop(
         activated_scale, scale_parameter = find_significant_scale(
             scales=scales,
             scale_bias=scale_bias,
-            fdf_array=resid_fdf_spectrum,
+            fdf_array=np.abs(resid_fdf_spectrum),
             fwhm=rmsf_fwhm,
             phi_double_arr_radm2=phi_double_arr_radm2,
         )
+        # activated_scale = 20
         logger.info(f"Cleaning activated scale: {activated_scale}")
-
         if activated_scale == 0:
             resid_fdf_spectrum_conv = resid_fdf_spectrum.copy()
+            # peak_find_array = np.abs(resid_fdf_spectrum)
         else:
-            resid_fdf_spectrum_conv = convolve_fdf_scale(
+            resid_fdf_spectrum_conv_abs = convolve_fdf_scale(
                 scale=activated_scale,
-                fdf_array=resid_fdf_spectrum,
+                fdf_array=np.abs(resid_fdf_spectrum),
                 fwhm=rmsf_fwhm,
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 kernel=kernel,
+                sum_normalised=True,
             )
-        # resid_fdf_spectrum_conv *= scale_parameter
-        if activated_scale == 0:
-            rmsf_spectrum_conv = rmsf_spectrum.copy()
-        else:
-            rmsf_spectrum_conv = convolve_fdf_scale(
-                scale=activated_scale,
-                fdf_array=rmsf_spectrum,
-                fwhm=rmsf_fwhm,
-                phi_double_arr_radm2=phi_double_arr_radm2,
-                kernel=kernel,
+            resid_fdf_spectrum_conv = resid_fdf_spectrum_conv_abs * np.exp(
+                1j * np.angle(resid_fdf_spectrum)
             )
-            # rmsf_spectrum_conv = convolve_fdf_scale(
+            # peak_find_array = convolve_fdf_scale(
             #     scale=activated_scale,
-            #     fdf_array=rmsf_spectrum_conv,
+            #     fdf_array=np.abs(resid_fdf_spectrum),
             #     fwhm=rmsf_fwhm,
             #     phi_double_arr_radm2=phi_double_arr_radm2,
             #     kernel=kernel,
             # )
+        # resid_fdf_spectrum_conv *= scale_parameter
+
+        if activated_scale == 0:
+            rmsf_spectrum_conv = rmsf_spectrum.copy()
+        else:
+            rmsf_spectrum_conv_abs = convolve_fdf_scale(
+                scale=activated_scale,
+                fdf_array=np.abs(rmsf_spectrum),
+                fwhm=rmsf_fwhm,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                kernel=kernel,
+                sum_normalised=True,
+            )
+            rmsf_spectrum_conv = rmsf_spectrum_conv_abs * np.exp(
+                1j * np.angle(rmsf_spectrum)
+            )
+
         scale_factor = np.nanmax(np.abs(rmsf_spectrum_conv))
         rmsf_spectrum_conv /= scale_factor
-        # resid_fdf_spectrum_conv *= scale_factor
+        resid_fdf_spectrum_conv /= scale_factor
 
-        # if update_mask:
-        #     mask_array = np.abs(resid_fdf_spectrum_conv) > mask * scale_factor
+        # Redo
+        # rmsf_spectrum_conv = convolve_fdf_scale(
+        #     scale=activated_scale,
+        #     fdf_array=rmsf_spectrum,
+        #     fwhm=rmsf_fwhm,
+        #     phi_double_arr_radm2=phi_double_arr_radm2,
+        #     kernel=kernel,
+        # )
+        # rmsf_spectrum_conv /= np.nanmax(np.abs(rmsf_spectrum_conv))
+
+        if update_mask:
+            mask_array = np.abs(resid_fdf_spectrum_conv) > mask
         resid_fdf_spectrum_mask_conv = np.ma.array(
             resid_fdf_spectrum_conv, mask=~mask_array
         )
 
+        conv_fwhm = fit_rmsf(
+            np.abs(rmsf_spectrum_conv),
+            phi_double_arr_radm2=phi_double_arr_radm2,
+            fwhm_rmsf_radm2=rmsf_fwhm * activated_scale,
+        )
         sub_minor_results = minor_loop(
             resid_fdf_spectrum_mask=resid_fdf_spectrum_mask_conv,
             phi_arr_radm2=phi_arr_radm2,
             phi_double_arr_radm2=phi_double_arr_radm2,
             rmsf_spectrum=rmsf_spectrum_conv,
-            rmsf_fwhm=float(np.hypot(rmsf_fwhm * activated_scale, rmsf_fwhm)),
+            rmsf_fwhm=float(conv_fwhm),
+            # rmsf_fwhm=rmsf_fwhm * activated_scale,
             max_iter=max_iter_sub_minor,
             gain=gain,
-            mask=mask,
+            mask=mask * activated_scale,
             threshold=threshold,
             start_iter=iter_count,
             update_mask=update_mask,
+            # peak_find_array=peak_find_array,
         )
 
         # Convolve the clean components with the RMSF
@@ -690,12 +722,18 @@ def multiscale_minor_loop(
             fwhm_rmsf=rmsf_fwhm,
         )
         shifted_rmsf = sub_minor_results.model_rmsf_spectrum
+        # shifted_rmsf = np.convolve(
+        #     clean_model,
+        #     rmsf_spectrum / gaussian_integrand(1, fwhm=rmsf_fwhm),
+        #     mode="valid",
+        # )[1:-1]
 
         clean_fdf_spectrum += clean_spectrum
         resid_fdf_spectrum -= shifted_rmsf
 
         if update_mask:
             mask_array = np.abs(resid_fdf_spectrum) > mask
+
         resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
 
     return MinorLoopResults(

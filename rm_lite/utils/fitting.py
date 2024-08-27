@@ -103,19 +103,23 @@ def fit_rmsf(
     phi_double_arr_radm2: np.ndarray,
     fwhm_rmsf_radm2: float,
 ) -> float:
+    rmsf_to_fit_array = rmsf_to_fit_array.copy()
+    rmsf_to_fit_array /= np.nanmax(rmsf_to_fit_array)
     d_phi = phi_double_arr_radm2[1] - phi_double_arr_radm2[0]
     mask = np.zeros_like(phi_double_arr_radm2, dtype=bool)
-    mask[np.argmax(rmsf_to_fit_array)] = 1
-    fwhm_rmsf_arr_pix = fwhm_rmsf_radm2 / d_phi
+    mask[np.argmax(rmsf_to_fit_array)] = True
+    sigma_rmsf_radm2 = fwhm_to_sigma(fwhm_rmsf_radm2)
+    sigma_rmsf_arr_pix = sigma_rmsf_radm2 / d_phi
     for i in np.where(mask)[0]:
-        start = int(i - fwhm_rmsf_arr_pix / 2)
-        end = int(i + fwhm_rmsf_arr_pix / 2)
+        start = int(i - sigma_rmsf_arr_pix / 2)
+        end = int(i + sigma_rmsf_arr_pix / 2)
         mask[start : end + 2] = True
     popt, pcov = curve_fit(
         unit_centred_gaussian,
         phi_double_arr_radm2[mask],
         rmsf_to_fit_array[mask],
-        p0=[fwhm_to_sigma(fwhm_rmsf_radm2)],
+        p0=[sigma_rmsf_radm2],
+        bounds=([0], [np.inf]),
     )
     return sigma_to_fwhm(popt[0])
 

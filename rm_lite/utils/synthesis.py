@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """RM-synthesis utils"""
 
-import gc
 from typing import Literal, NamedTuple, Optional
 
 from astropy.stats import mad_std
@@ -668,7 +667,6 @@ def rmsynth_nufft(
 
     # Clean up one cube worth of memory
     del weight_cube
-    gc.collect()
 
     # Do the RM-synthesis on each plane
     # finufft must have matching dtypes, so complex64 matches float32
@@ -897,7 +895,6 @@ def get_rmsf_nufft(
 
     # Clean up one cube worth of memory
     del weight_cube
-    gc.collect()
 
     # Default to the analytical RMSF
     fwhm_rmsf_arr = np.ones(num_pixels) * fwhm_rmsf_radm2
