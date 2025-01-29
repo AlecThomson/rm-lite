@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Logging module for arrakis"""
+
+from __future__ import annotations
 
 import io
 import logging
@@ -17,7 +17,7 @@ class TqdmToLogger(io.StringIO):
     buf = ""
 
     def __init__(self, logger, level=None):
-        super(TqdmToLogger, self).__init__()
+        super().__init__()
         self.logger = logger
         self.level = level or logging.INFO
 
@@ -31,7 +31,7 @@ class TqdmToLogger(io.StringIO):
 class CustomFormatter(logging.Formatter):
     format_str = "%(asctime)s.%(msecs)03d %(module)s - %(funcName)s: %(message)s"
 
-    FORMATS = {
+    FORMATS = {  # noqa: RUF012
         logging.DEBUG: f"%(levelname)s {format_str}",
         logging.INFO: f"%(levelname)s {format_str}",
         logging.WARNING: f"%(levelname)s {format_str}",

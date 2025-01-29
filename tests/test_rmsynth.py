@@ -1,20 +1,21 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Tests for the RM synthesis and related tools"""
+
+from __future__ import annotations
 
 from typing import NamedTuple
 
 import numpy as np
 import pytest
-
 from rm_lite.utils.synthesis import (
     FWHM,
     freq_to_lambda2,
+    get_fwhm_rmsf,
     lambda2_to_freq,
     make_phi_arr,
-    get_fwhm_rmsf,
     rmsynth_nufft,
 )
+
+RNG = np.random.default_rng()
 
 
 class MockData(NamedTuple):
@@ -33,18 +34,18 @@ class MockModel(NamedTuple):
     fwhm: float
 
 
-@pytest.fixture
+@pytest.fixture()
 def racs_model() -> MockModel:
     fwhm = 49.57
-    rm = np.random.uniform(-1000, 1000)
-    pa = np.random.uniform(0, 180)
-    frac_pol = np.random.uniform(0.5, 0.7)
-    flux = np.random.uniform(1, 10)
+    rm = RNG.uniform(-1000, 1000)
+    pa = RNG.uniform(0, 180)
+    frac_pol = RNG.uniform(0.5, 0.7)
+    flux = RNG.uniform(1, 10)
 
     return MockModel(flux, frac_pol, rm, pa, fwhm)
 
 
-@pytest.fixture
+@pytest.fixture()
 def racs_data(racs_model):
     freqs = np.arange(744, 1032, 8) * 1e6
     lsq = freq_to_lambda2(freqs)

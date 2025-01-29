@@ -383,7 +383,7 @@
 #     phiArr_radm2, dirtyFDF, cleanFDF, ccArr, residFDF, cutoff, window, units
 # ):
 #     """
-#     Plotting code for CLEANed Faraday depth spectra.
+#     Plotting code for cleaned Faraday depth spectra.
 #     Inputs:
 #         phiArr_radm2 (array): array of Faraday depth values.
 #         dirty FDF (array): dirty Faraday depth spectrum.
@@ -535,7 +535,7 @@
 #     By default, saves the following files:
 #     _FDFclean.dat: cleaned and restored FDF [Phi, Q, U]
 #     _FDFmodel.dat: clean component FDF [Phi, Q, U]
-#     _RMclean.dat: list of calculated paramaters describing FDF
+#     _RMclean.dat: list of calculated parameters describing FDF
 #     _RMclean.json: dictionary of calculated parameters
 #     """
 

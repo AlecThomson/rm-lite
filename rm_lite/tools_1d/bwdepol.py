@@ -88,7 +88,7 @@
 #     Returns
 #     -------
 #     intergral_lim: complex
-#                    intergral limit
+#                    integral limit
 
 #     """
 #     funct1 = freq * np.exp(2.0j * phi * ((C / freq) ** 2))
@@ -143,7 +143,7 @@
 #     Returns
 #     -------
 #     ban: float
-#          seperation between first two channel centers
+#          separation between first two channel centers
 
 #     """
 #     ban = freq_arr[1] - freq_arr[0]
@@ -248,14 +248,14 @@
 #          Faraday depth value in rad/m^2
 
 #     xi_knot: float
-#              inital polarization angle in radians
+#              initial polarization angle in radians
 
 #     p: float
 #        polarzied intensity
 
 #     Returns
 #     -------
-#     avg_p_tilda: complex
+#     avg_p_tilde: complex
 #                  the average complex polarization, for the bandwidth,
 #                  real is Q, imaginary is U
 
@@ -273,9 +273,9 @@
 #     )  # check orig for xi_knot
 
 #     i = p * (yb - ya)
-#     avg_p_tilda = i / ban
+#     avg_p_tilde = i / ban
 
-#     return avg_p_tilda
+#     return avg_p_tilde
 
 
 # def bwdepol_simulation(peak_rm, freqArr_Hz, widths_Hz):
@@ -296,20 +296,20 @@
 #     Returns
 #     -------
 #     data:
-#          Dirty FDF for the simulated data formated as a list of arrays
+#          Dirty FDF for the simulated data formatted as a list of arrays
 #          [freq_Hz, q, u,  dq, du]
 
 #     """
 #     if widths_Hz == None:
 #         widths_Hz = estimate_channel_bandwidth(freqArr_Hz)
 
-#     p_tilda = analytical_chan_pol(freqArr_Hz, widths_Hz, peak_rm)
+#     p_tilde = analytical_chan_pol(freqArr_Hz, widths_Hz, peak_rm)
 #     size_f = len(freqArr_Hz)
 #     dq = np.ones(size_f)
 #     du = np.ones(size_f)
 
 #     # format  = [freq_Hz, q, u,  dq, du]
-#     data = [freqArr_Hz, np.real(p_tilda), np.imag(p_tilda), dq, du]
+#     data = [freqArr_Hz, np.real(p_tilde), np.imag(p_tilde), dq, du]
 #     return data
 
 
@@ -348,7 +348,7 @@
 
 
 # def gauss(p, peak_rm):
-#     """Return a fucntion to evaluate a Gaussian with parameters
+#     """Return a function to evaluate a Gaussian with parameters
 #     off set by peak_rm
 
 #     Parameters
@@ -361,7 +361,7 @@
 
 #     Returns
 #     -------
-#     rfun: fuction
+#     rfun: function
 #           Gaussian with specified parameters, off set my peak_rm
 
 #     """
@@ -827,7 +827,7 @@
 #     ----------
 #     dataQ           ... 1, 2 or 3D Stokes Q data array
 #     dataU           ... 1, 2 or 3D Stokes U data array
-#     lambdaSqArr_m2  ... vector of wavelength^2 values (assending freq order)
+#     lambdaSqArr_m2  ... vector of wavelength^2 values (ascending freq order)
 #     phiArr_radm2    ... vector of trial Faraday depth values
 #     weightArr       ... vector of weights, default [None] is Uniform (all 1s)
 #     nBits           ... precision of data arrays [32]

@@ -276,7 +276,7 @@
 #     prefixOut="",
 #     outDir="",
 #     nBits=32,
-#     write_seperate_FDF=True,
+#     write_separate_FDF=True,
 #     not_rmsynth=False,
 #     not_rmsf=False,
 #     do_peakmaps=True,
@@ -300,7 +300,7 @@
 #         fitRMSF (bool): Fit a Gaussian to the RMSF?
 #         prefixOut (str): Prefix for filenames.
 #         outDir (str): Directory to save files.
-#         write_seperate_FDF (bool): Write Q, U, and PI separately?
+#         write_separate_FDF (bool): Write Q, U, and PI separately?
 #         verbose (bool): Verbosity.
 #         not_rmsynth (bool): Just do RMSF and ignore RM synthesis?
 #         not_rmsf (bool): Just do RM synthesis and ignore RMSF? -- one of these must be False
@@ -313,7 +313,7 @@
 #         FDF_maxPI.fits: 2D map of peak polarized intensity per pixel.
 #         FDF_peakRM.fits: 2D map of Faraday depth of highest peak, per pixel.
 
-#         write_seperate_FDF=True: [default]
+#         write_separate_FDF=True: [default]
 #         FDF_dirty.fits is split into three constituent components:
 #             FDF_real_dirty.fits: Stokes Q
 #             FDF_im_dirty.fits: Stokes U
@@ -323,7 +323,7 @@
 #             RM_tot.fits: polarized intensity view of RMSF
 #             RMSF_FWHM.fits: 2D map of width of RMSF main lobe
 
-#         write_seperate_FDF=False:
+#         write_separate_FDF=False:
 #             FDF_dirty.fits: FDF, in 3 extensions: Q,U, and PI.
 #             RMSF.fits: 4 extensions; first 3 are RMSF cubes [Q, U, PI]
 #                                  4th is 2D map of RMSF FWHM.
@@ -359,7 +359,7 @@
 #         if verbose:
 #             log("Saving the dirty FDF, RMSF and ancillary FITS files.")
 
-#     # Default data typess
+#     # Default data types
 #     dtFloat = "float" + str(nBits)
 #     dtComplex = "complex" + str(2 * nBits)
 
@@ -422,7 +422,7 @@
 #         # Move Faraday depth axis to appropriate position to match header.
 #         FDFcube = np.moveaxis(FDFcube, 0, Ndim - freq_axis)
 
-#         if write_seperate_FDF:  # more memory efficient as well
+#         if write_separate_FDF:  # more memory efficient as well
 #             header = _setStokes(header, "Q")
 #             hdu0 = pf.PrimaryHDU(FDFcube.real.astype(dtFloat), header)
 #             fitsFileOut = outDir + "/" + prefixOut + "FDF_real_dirty.fits"
@@ -505,7 +505,7 @@
 #             "Axis left in to avoid FITS errors",
 #         )
 #         rmheader["CUNIT" + str(freq_axis)] = ""
-#         rmheader["CRVAL" + str(freq_axis)] = 0  # doesnt mean anything
+#         rmheader["CRVAL" + str(freq_axis)] = 0  # doesn't mean anything
 #         stokes_axis = None
 #         for axis in range(1, rmheader["NAXIS"] + 1):
 #             if "STOKES" in rmheader[f"CTYPE{axis}"]:
@@ -516,7 +516,7 @@
 #                 "Axis left in to avoid FITS errors",
 #             )
 
-#         if write_seperate_FDF:  # more memory efficient as well
+#         if write_separate_FDF:  # more memory efficient as well
 #             header = _setStokes(header, "Q")
 #             hdu0 = pf.PrimaryHDU(RMSFcube.real.astype(dtFloat), header)
 #             fitsFileOut = outDir + "/" + prefixOut + "RMSF_real.fits"
@@ -902,7 +902,7 @@
 #     )
 #     parser.add_argument(
 #         "-f",
-#         dest="write_seperate_FDF",
+#         dest="write_separate_FDF",
 #         action="store_false",
 #         help="Store different Stokes as FITS extensions [False, store as separate files].",
 #     )
@@ -966,7 +966,7 @@
 #         fitRMSF=False,
 #         prefixOut=args.prefixOut,
 #         outDir=dataDir,
-#         write_seperate_FDF=args.write_seperate_FDF,
+#         write_separate_FDF=args.write_separate_FDF,
 #         not_rmsf=args.not_RMSF,
 #         nBits=32,
 #         verbose=verbose,

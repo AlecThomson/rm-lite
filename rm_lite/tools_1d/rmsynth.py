@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """RM-synthesis on 1D data"""
 
+from __future__ import annotations
+
 import time
-from typing import Literal, NamedTuple, Optional, Tuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 from scipy import interpolate
@@ -16,11 +16,11 @@ from rm_lite.utils.synthesis import (
     StokesUArray,
     compute_rmsynth_params,
     compute_theoretical_noise,
+    create_fractional_spectra,
     get_fdf_parameters,
     get_rmsf_nufft,
     lambda2_to_freq,
     rmsynth_nufft,
-    create_fractional_spectra,
 )
 
 logger.setLevel("WARNING")
@@ -49,18 +49,18 @@ def run_rmsynth(
     stokes_q_error_arr: np.ndarray,
     stokes_u_error_arr: np.ndarray,
     freq_arr_hz: np.ndarray,
-    stokes_i_arr: Optional[np.ndarray] = None,
-    stokes_i_error_arr: Optional[np.ndarray] = None,
-    stokes_i_model_arr: Optional[np.ndarray] = None,
+    stokes_i_arr: np.ndarray | None = None,
+    stokes_i_error_arr: np.ndarray | None = None,
+    stokes_i_model_arr: np.ndarray | None = None,
     fit_order: int = 2,
-    phi_max_radm2: Optional[float] = None,
-    d_phi_radm2: Optional[float] = None,
-    n_samples: Optional[float] = 10.0,
+    phi_max_radm2: float | None = None,
+    d_phi_radm2: float | None = None,
+    n_samples: float | None = 10.0,
     weight_type: Literal["variance", "uniform"] = "variance",
     do_fit_rmsf=False,
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
-) -> Tuple[FDFParameters, RMSynth1DArrays]:
+) -> tuple[FDFParameters, RMSynth1DArrays]:
     stokes_q_arr = StokesQArray(stokes_q_arr)
     stokes_u_arr = StokesUArray(stokes_u_arr)
     stokes_q_error_arr = StokesQArray(stokes_q_error_arr)
@@ -112,7 +112,7 @@ def run_rmsynth(
         else None,
     )
 
-    # Index down all arryas to remove NaNs
+    # Index down all arrays to remove NaNs
     freq_arr_hz = freq_arr_hz[no_nan_idx]
     lambda_sq_arr_m2 = lambda_sq_arr_m2[no_nan_idx]
     weight_arr = weight_arr[no_nan_idx]
@@ -153,7 +153,7 @@ def run_rmsynth(
 
     tock = time.time()
     cpu_time = tock - tick
-    logger.info(f"RM-synthesis completed in {cpu_time*1000:.2f}ms.")
+    logger.info(f"RM-synthesis completed in {cpu_time * 1000:.2f}ms.")
 
     theoretical_noise = compute_theoretical_noise(
         stokes_q_error_arr=stokes_q_frac_error_arr,

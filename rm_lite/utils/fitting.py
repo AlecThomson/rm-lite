@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
-from typing import Callable, Literal, NamedTuple, Optional, Tuple
+from __future__ import annotations
+
+from typing import Callable, Literal, NamedTuple
 
 import numpy as np
 from astropy.modeling.models import Gaussian1D
@@ -47,13 +48,17 @@ def sigma_to_fwhm(sigma: float) -> float:
 
 def gaussian_integrand(
     amplitude: float,
-    stddev: Optional[float] = None,
-    fwhm: Optional[float] = None,
+    stddev: float | None = None,
+    fwhm: float | None = None,
 ) -> float:
     if stddev is None and fwhm is None:
-        raise ValueError("Must provide either stddev or fwhm.")
-    if stddev is None:
+        msg = "Must provide either stddev or fwhm."
+        raise ValueError(msg)
+    if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
+    if stddev is None:
+        msg = "stddev cannot be None"
+        raise ValueError(msg)
     return amplitude * stddev * np.sqrt(2 * np.pi)
 
 
@@ -61,12 +66,13 @@ def gaussian(
     x: np.ndarray,
     amplitude: float | complex,
     mean: float,
-    stddev: Optional[float] = None,
-    fwhm: Optional[float] = None,
+    stddev: float | None = None,
+    fwhm: float | None = None,
 ) -> np.ndarray:
     if stddev is None and fwhm is None:
-        raise ValueError("Must provide either stddev or fwhm.")
-    if stddev is None:
+        msg = "Must provide either stddev or fwhm."
+        raise ValueError(msg)
+    if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
     if isinstance(amplitude, complex):
         return Gaussian1D(amplitude=amplitude.real, mean=mean, stddev=stddev)(
@@ -78,22 +84,24 @@ def gaussian(
 def unit_gaussian(
     x: np.ndarray,
     mean: float,
-    stddev: Optional[float] = None,
-    fwhm: Optional[float] = None,
+    stddev: float | None = None,
+    fwhm: float | None = None,
 ) -> np.ndarray:
     if stddev is None and fwhm is None:
-        raise ValueError("Must provide either stddev or fwhm.")
-    if stddev is None:
+        msg = "Must provide either stddev or fwhm."
+        raise ValueError(msg)
+    if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
     return Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x)
 
 
 def unit_centred_gaussian(
-    x: np.ndarray, stddev: Optional[float] = None, fwhm: Optional[float] = None
+    x: np.ndarray, stddev: float | None = None, fwhm: float | None = None
 ) -> np.ndarray:
     if stddev is None and fwhm is None:
-        raise ValueError("Must provide either stddev or fwhm.")
-    if stddev is None:
+        msg = "Must provide either stddev or fwhm."
+        raise ValueError(msg)
+    if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
     return Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x)
 
@@ -159,9 +167,8 @@ def fit_fdf(
 def polynomial(order: int) -> Callable:
     def poly_func(x: np.ndarray, *params) -> np.ndarray:
         if len(params) != order + 1:
-            raise ValueError(
-                f"Polynomial function of order {order} requires {order + 1} parameters, {len(params)} given."
-            )
+            msg = f"Polynomial function of order {order} requires {order + 1} parameters, {len(params)} given."
+            raise ValueError(msg)
         result = 0
         for i in range(order + 1):
             result += params[i] * x**i
@@ -173,9 +180,8 @@ def polynomial(order: int) -> Callable:
 def power_law(order: int) -> Callable:
     def power_func(x: np.ndarray, *params) -> np.ndarray:
         if len(params) != order + 1:
-            raise ValueError(
-                f"Power law function of order {order} requires {order + 1} parameters, {len(params)} given."
-            )
+            msg = f"Power law function of order {order} requires {order + 1} parameters, {len(params)} given."
+            raise ValueError(msg)
         power = 0
         for i in range(1, order + 1):
             power += params[i] * np.log10(x) ** i
@@ -184,7 +190,7 @@ def power_law(order: int) -> Callable:
     return power_func
 
 
-def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> Tuple[float, int, int]:
+def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> tuple[float, int, int]:
     """Find the best AIC for a set of AICs using Occam's razor."""
     # Find the best AIC
     best_aic_idx = int(np.nanargmin(aics))
@@ -223,9 +229,8 @@ def static_fit(
     elif fit_type == "log":
         fit_func = power_law(fit_order)
     else:
-        raise ValueError(
-            f"Unknown fit type {fit_type} provided. Must be 'log' or 'linear'."
-        )
+        msg = f"Unknown fit type {fit_type} provided. Must be 'log' or 'linear'."  # type: ignore[unreachable]
+        raise ValueError(msg)
 
     logger.debug(f"Fitting Stokes I model with {fit_type} model of order {fit_order}.")
     initital_guess = np.zeros(fit_order + 1)
@@ -272,7 +277,7 @@ def dynamic_fit(
     n_parameters = orders + 1
     fit_results = []
 
-    for i, order in enumerate(orders):
+    for _i, order in enumerate(orders):
         fit_result = static_fit(
             freq_arr_hz,
             ref_freq_hz,

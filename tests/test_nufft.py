@@ -1,13 +1,15 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """Tests for the NUFFT sections"""
 
+from __future__ import annotations
+
+import contextlib
 import logging
 from time import time
 from typing import NamedTuple
 
 import numpy as np
-from rm_lite.utils.synthesis import make_phi_arr, rmsynth_nufft, get_rmsf_nufft
+from rm_lite.utils.fitting import fit_rmsf
+from rm_lite.utils.synthesis import get_rmsf_nufft, make_phi_arr, rmsynth_nufft
 from tqdm import trange
 
 logger = logging.getLogger(__name__)
@@ -55,7 +57,7 @@ def do_rmsynth_planes_old(
 
     dataQ           ... 1, 2 or 3D Stokes Q data array
     dataU           ... 1, 2 or 3D Stokes U data array
-    lambdaSqArr_m2  ... vector of wavelength^2 values (assending freq order)
+    lambdaSqArr_m2  ... vector of wavelength^2 values (ascending freq order)
     phiArr_radm2    ... vector of trial Faraday depth values
     weightArr       ... vector of weights, default [None] is Uniform (all 1s)
     nBits           ... precision of data arrays [32]
@@ -74,21 +76,19 @@ def do_rmsynth_planes_old(
     weightArr = np.where(np.isnan(weightArr), 0.0, weightArr)
 
     # Sanity check on array sizes
-    if not weightArr.shape == lambdaSqArr_m2.shape:
+    if weightArr.shape != lambdaSqArr_m2.shape:
         log("Err: Lambda^2 and weight arrays must be the same shape.")
         return None, None
-    if not dataQ.shape == dataU.shape:
+    if dataQ.shape != dataU.shape:
         log("Err: Stokes Q and U data arrays must be the same shape.")
         return None, None
     nDims = len(dataQ.shape)
     if not nDims <= 3:
         log("Err: data dimensions must be <= 3.")
         return None, None
-    if not dataQ.shape[0] == lambdaSqArr_m2.shape[0]:
+    if dataQ.shape[0] != lambdaSqArr_m2.shape[0]:
         log(
-            "Err: Data depth does not match lambda^2 vector ({} vs {}).".format(
-                dataQ.shape[0], lambdaSqArr_m2.shape[0]
-            ),
+            f"Err: Data depth does not match lambda^2 vector ({dataQ.shape[0]} vs {lambdaSqArr_m2.shape[0]}).",
             end=" ",
         )
         log("     Check that data is in [z, y, x] order.")
@@ -167,10 +167,9 @@ def extrap(x, xp, yp):
 
     y = np.interp(x, xp, yp)
     y = np.where(x < xp[0], yp[0] + (x - xp[0]) * (yp[0] - yp[1]) / (xp[0] - xp[1]), y)
-    y = np.where(
+    return np.where(
         x > xp[-1], yp[-1] + (x - xp[-1]) * (yp[-1] - yp[-2]) / (xp[-1] - xp[-2]), y
     )
-    return y
 
 
 def get_rmsf_planes_old(
@@ -196,7 +195,7 @@ def get_rmsf_planes_old(
     time. By default the routine returns the analytical width of the RMSF main
     lobe but can also use MPFIT to fit a Gaussian.
 
-    lambdaSqArr_m2  ... vector of wavelength^2 values (assending freq order)
+    lambdaSqArr_m2  ... vector of wavelength^2 values (ascending freq order)
     phiArr_radm2    ... vector of trial Faraday depth values
     weightArr       ... vector of weights, default [None] is no weighting
     maskArr         ... cube of mask values used to shape return cube [None]
@@ -236,13 +235,13 @@ def get_rmsf_planes_old(
         nDims = len(mskArr.shape)
 
     # Sanity checks on array sizes
-    if not weightArr.shape == lambdaSqArr_m2.shape:
+    if weightArr.shape != lambdaSqArr_m2.shape:
         log("Err: wavelength^2 and weight arrays must be the same shape.")
         return None, None, None, None
     if not nDims <= 3:
         log("Err: mask dimensions must be <= 3.")
         return None, None, None, None
-    if not mskArr.shape[0] == lambdaSqArr_m2.shape[0]:
+    if mskArr.shape[0] != lambdaSqArr_m2.shape[0]:
         log(
             f"Err: mask depth does not match lambda^2 vector ({mskArr.shape[0]} vs {lambdaSqArr_m2.shape[-1]}).",
             end=" ",
@@ -273,14 +272,10 @@ def get_rmsf_planes_old(
 
     # Check for isolated clumps of flags (# flags in a plane not 0 or nPix)
     flagTotals = np.unique(xySum).tolist()
-    try:
+    with contextlib.suppress(Exception):
         flagTotals.remove(0)
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         flagTotals.remove(nPix)
-    except Exception:
-        pass
     do1Dcalc = True
     if len(flagTotals) > 0:
         do1Dcalc = False
@@ -306,16 +301,6 @@ def get_rmsf_planes_old(
 
         # Fit the RMSF main lobe
         fitStatus = -1
-        if fitRMSF:
-            if verbose:
-                log("Fitting Gaussian to the main lobe.")
-            mp = fit_rmsf(phi2Arr, RMSFArr.real if fitRMSFreal else np.abs(RMSFArr))
-            if mp is None or mp.status < 1:
-                log("Err: failed to fit the RMSF.")
-                log("     Defaulting to analytical value.")
-            else:
-                fwhmRMSF = mp.params[2]
-                fitStatus = mp.status
 
         # Replicate along X and Y axes
         RMSFcube = np.tile(RMSFArr[:, np.newaxis, np.newaxis], (1, nY, nX))
@@ -397,7 +382,7 @@ def make_fake_data() -> FakeData:
 
 
 def test_rmsynth() -> None:
-    """Test the NUFFT RM-synthesis routine agaist DFT."""
+    """Test the NUFFT RM-synthesis routine against DFT."""
     fake_data = make_fake_data()
     for eps in [1e-4, 1e-5, 1e-6, 1e-8]:
         tick = time()
@@ -411,7 +396,8 @@ def test_rmsynth() -> None:
             eps=eps,
         )
         tock = time()
-        logger.info(f"Time taken for NUFFT: {(tock - tick)*1000:0.2f} ms")
+        msg = f"Time taken for NUFFT: {(tock - tick) * 1000:0.2f} ms"
+        logger.info(msg)
 
         tick = time()
         FDFcube_old, lam0Sq_m2_old = do_rmsynth_planes_old(
@@ -423,7 +409,8 @@ def test_rmsynth() -> None:
             lam0Sq_m2=fake_data.lsq_0,
         )
         tock = time()
-        logger.info(f"Time taken for DFT: {(tock - tick)*1000:0.2f} ms")
+        msg = f"Time taken for DFT: {(tock - tick) * 1000:0.2f} ms"
+        logger.info(msg)
 
         # fiNUFFT can't go below 1e-8 in precision!
         if eps == 1e-8:
@@ -433,7 +420,7 @@ def test_rmsynth() -> None:
 
 
 def test_rmsf():
-    """Test the NUFFT RMSF routine agaist DFT."""
+    """Test the NUFFT RMSF routine against DFT."""
     fake_data = make_fake_data()
     for eps in [1e-4, 1e-5, 1e-6, 1e-8]:
         tick = time()
@@ -445,7 +432,8 @@ def test_rmsf():
             eps=eps,
         )
         tock = time()
-        logger.info(f"Time taken for NUFFT: {(tock - tick)*1000:0.2f} ms")
+        msg = f"Time taken for NUFFT: {(tock - tick) * 1000:0.2f} ms"
+        logger.info(msg)
 
         tick = time()
         RMSFcube_old, phi2Arr_old, fwhmRMSFArr_old, statArr_old = get_rmsf_planes_old(
@@ -455,7 +443,8 @@ def test_rmsf():
             lam0Sq_m2=fake_data.lsq_0,
         )
         tock = time()
-        logger.info(f"Time taken for DFT: {(tock - tick)*1000:0.2f} ms")
+        msg = f"Time taken for DFT: {(tock - tick) * 1000:0.2f} ms"
+        logger.info(msg)
 
         # fiNUFFT can't go below 1e-8 in precision!
         for new, old in zip(
@@ -465,5 +454,6 @@ def test_rmsf():
             if eps == 1e-8:
                 assert np.allclose(new, old, rtol=eps * 10, atol=eps * 10)
             else:
-                logger.info(f"{new=},{old=}")
+                msg = f"{new=},{old=}"
+                logger.info(msg)
                 assert np.allclose(new, old, rtol=eps * 2, atol=eps * 2)

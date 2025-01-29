@@ -13,7 +13,7 @@
 # #                                                                             #
 # #   main           ... parse command line arguments and initiate procedure    #
 # #   run_qufit      ... main function of the QU-fitting procedure              #
-# #   prior_call     ... return the prior tranform fucntion given prior limits  #
+# #   prior_call     ... return the prior transform function given prior limits  #
 # #   lnlike_call    ... return a function to evaluate ln(like) given the data  #
 # #   chisq_model    ... calculate the chi-squared for the model                #
 # #   wrap_chains    ... wrap and shift chains of periodic parameters           #

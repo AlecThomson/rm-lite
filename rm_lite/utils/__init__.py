@@ -1,5 +1,6 @@
-#! /usr/bin/env python
 """Dependencies for RM utilities"""
+
+from __future__ import annotations
 
 from importlib.metadata import version
 

@@ -156,7 +156,7 @@
 #         ccArr = np.expand_dims(ccArr, axis=tuple(range(old_Ndim - new_Ndim)))
 #         residFDF = np.expand_dims(residFDF, axis=tuple(range(old_Ndim - new_Ndim)))
 #     # New dimensions are added to the beginning of the axis ordering
-#     # (revserse of FITS ordering)
+#     # (reverse of FITS ordering)
 
 #     # Move the FDF axis to it's original spot. Hopefully this means that all
 #     # axes are in their original place after all of that.
@@ -189,7 +189,7 @@
 #             FDF_CC.fits: RMCLEAN components, in 3 extensions: Q,U, and PI.
 #             CLEAN_nIter.fits: RMCLEAN iterations.
 
-#         write_seperate_FDF=True:
+#         write_separate_FDF=True:
 #             FDF_clean_real.fits and FDF_CC.fits are split into
 #             three constituent components:
 #                 FDF_clean_real.fits: Stokes Q
@@ -208,7 +208,7 @@
 #     Kwargs:
 #         prefixOut (str): Prefix for filenames.
 #         outDir (str): Directory to save files.
-#         write_seperate_FDF (bool): Write Q, U, and PI separately?
+#         write_separate_FDF (bool): Write Q, U, and PI separately?
 #         verbose (bool): Verbosity.
 #         log (function): Which logging function to use.
 #     """
@@ -338,7 +338,7 @@
 
 # # Old method (for multi-extension files)
 # def find_axes(header):
-#     """Idenfities how many axes are present in a FITS file, and which is the
+#     """Identifies how many axes are present in a FITS file, and which is the
 #     Faraday depth axis. Necessary for bookkeeping on cube dimensionality,
 #     given that RM-clean only supports 3D cubes, but data may be 4D files."""
 #     Ndim = header["NAXIS"]

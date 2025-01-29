@@ -1,24 +1,26 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Tests for the synthesis utilities"""
 
-import numpy as np
+from __future__ import annotations
 
+import numpy as np
+from matplotlib.pylab import Generator
 from rm_lite.utils.synthesis import (
     freq_to_lambda2,
     lambda2_to_freq,
     make_phi_arr,
 )
 
+RNG: Generator = np.random.default_rng()
+
 
 def test_freq_lsq_freq():
-    freqs = np.random.uniform(1e6, 10e9, 1000)
+    freqs = RNG.uniform(1e6, 10e9, 1000)
 
     assert np.allclose(lambda2_to_freq(freq_to_lambda2(freqs)), freqs)
 
 
 def test_lsq_freq_lsq():
-    lambda2s = np.random.uniform(1e-6, 1, 1000)
+    lambda2s = RNG.uniform(1e-6, 1, 1000)
 
     assert np.allclose(freq_to_lambda2(lambda2_to_freq(lambda2s)), lambda2s)
 

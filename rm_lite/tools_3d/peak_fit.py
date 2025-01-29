@@ -1,5 +1,4 @@
 # #!/usr/bin/env python3
-# # -*- coding: utf-8 -*-
 # """
 # # NAME:     RMpeakfit_3D.py                                                   #
 # #                                                                             #
@@ -245,7 +244,7 @@
 
 
 # def find_axes(header):
-#     """Idenfities how many axes are present in a FITS file, and which is the
+#     """Identifies how many axes are present in a FITS file, and which is the
 #     Faraday depth axis. Necessary for bookkeeping on cube dimensionality,
 #     given that RM-clean only supports 3D cubes, but data may be 4D files."""
 #     Ndim = header["NAXIS"]

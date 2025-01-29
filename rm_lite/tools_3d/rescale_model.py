@@ -1,5 +1,4 @@
 # #!/usr/bin/env python3
-# # -*- coding: utf-8 -*-
 
 # #                                                                             #
 # # NAME:     rescale_I_model_3D.py                                             #
@@ -69,7 +68,7 @@
 #     variations in reference frequency (depends a lot on the model, but 10%
 #     seems to be a good rule of thumb).
 #     The new reference frequency can either be from lambda^2_0 from an FDF cube,
-#     which will create Stokes I maps that match the coresponding frequency,
+#     which will create Stokes I maps that match the corresponding frequency,
 #     a constant value given by the user, or unspecified (in which case the tool
 #     will make all pixels have a common reference frequency at the mean input reference frequency).
 #     The input files are assumed to be the products of do_fitIcube, with the usual filenames.

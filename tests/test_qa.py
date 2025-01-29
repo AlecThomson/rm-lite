@@ -1,5 +1,4 @@
 # #!/usr/bin/env python3
-# # -*- coding: utf-8 -*-
 # """
 # QA testing tools for RM-tools.
 # These tools are intended to produce test simulated data sets, and run them
@@ -305,7 +304,7 @@
 
 #     def _test_f2_QUfit_values(self):
 #         # I have temporarily disabled this test because it causes a lot of problems
-#         # with values not being consistant across different runs.
+#         # with values not being consistent across different runs.
 #         err_limit = 0.05  # 5%
 
 #         for model in self.models:
