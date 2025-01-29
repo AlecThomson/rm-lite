@@ -95,6 +95,7 @@ def run_rmsynth(
         stokes_q_frac_error_array,
         stokes_u_frac_error_array,
         fit_result,
+        no_nan_idx,
     ) = create_fractional_spectra(
         freq_array_hz=freq_array_hz,
         ref_freq_hz=lambda2_to_freq(lam_sq_0_m2),
@@ -110,6 +111,20 @@ def run_rmsynth(
         if stokes_i_model_array
         else None,
     )
+
+    # Index down all arryas to remove NaNs
+    freq_array_hz = freq_array_hz[no_nan_idx]
+    lambda_sq_arr_m2 = lambda_sq_arr_m2[no_nan_idx]
+    weight_array = weight_array[no_nan_idx]
+    stokes_q_array = stokes_q_array[no_nan_idx]
+    stokes_u_array = stokes_u_array[no_nan_idx]
+    stokes_q_error_array = stokes_q_error_array[no_nan_idx]
+    stokes_u_error_array = stokes_u_error_array[no_nan_idx]
+    stokes_i_array = stokes_i_array[no_nan_idx]
+    stokes_i_error_array = stokes_i_error_array[no_nan_idx]
+
+    assert stokes_q_frac_array.shape == stokes_u_frac_array.shape
+    assert stokes_q_frac_array.shape == lambda_sq_arr_m2.shape
 
     # Compute after any fractional spectra have been created
     tick = time.time()
@@ -131,7 +146,8 @@ def run_rmsynth(
         weight_array=weight_array,
         lam_sq_0_m2=lam_sq_0_m2,
         super_resolution=super_resolution,
-        mask_array=~np.isfinite(stokes_q_array) | ~np.isfinite(stokes_u_array),
+        mask_array=~np.isfinite(stokes_q_frac_array)
+        | ~np.isfinite(stokes_u_frac_array),
         do_fit_rmsf=do_fit_rmsf or super_resolution,
         do_fit_rmsf_real=super_resolution,
     )
@@ -146,6 +162,7 @@ def run_rmsynth(
         weight_array=weight_array,
     )
     if stokes_i_model_array is not None:
+        assert freq_array_hz.shape == stokes_i_model_array.shape
         stokes_i_model = interpolate.interp1d(freq_array_hz, stokes_i_model_array)
         stokes_i_reference_flux = stokes_i_model(lambda2_to_freq(lam_sq_0_m2))
         fdf_dirty_array *= stokes_i_reference_flux

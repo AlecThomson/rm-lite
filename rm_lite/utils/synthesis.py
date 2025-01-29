@@ -77,6 +77,7 @@ class FractionalSpectra(NamedTuple):
     stokes_q_frac_error_array: StokesQArray
     stokes_u_frac_error_array: StokesUArray
     fit_result: FitResult
+    no_nan_idx: np.ndarray
 
 
 class FDFParameters(NamedTuple):
@@ -233,10 +234,12 @@ def create_fractional_spectra(
     stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
     stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)
     if stokes_i_model_array is not None:
+        stokes_i_model_array = stokes_i_model_array[no_nan_idx]
         if stokes_i_model_error is None:
             raise ValueError(
                 "If `stokes_i_model_array` is provided, `stokes_i_model_error` must also be provided."
             )
+        stokes_i_model_error = stokes_i_model_error[no_nan_idx]
         stokes_i_model_stokes_u_arrayay = unumpy.stokes_u_arrayay(
             stokes_i_model_array, stokes_i_model_error
         )
@@ -277,6 +280,11 @@ def create_fractional_spectra(
     stokes_q_frac_error_array = StokesQArray(unumpy.std_devs(stokes_q_frac_uarray))
     stokes_u_frac_error_array = StokesUArray(unumpy.std_devs(stokes_u_frac_uarray))
 
+    assert len(stokes_i_array) == len(stokes_q_frac_array)
+    assert len(stokes_i_array) == len(stokes_u_frac_array)
+    assert len(stokes_i_array) == len(stokes_q_frac_error_array)
+    assert len(stokes_i_array) == len(stokes_u_frac_error_array)
+
     return FractionalSpectra(
         stokes_i_model_array=stokes_i_model_array,
         stokes_q_frac_array=stokes_q_frac_array,
@@ -284,6 +292,7 @@ def create_fractional_spectra(
         stokes_q_frac_error_array=stokes_q_frac_error_array,
         stokes_u_frac_error_array=stokes_u_frac_error_array,
         fit_result=fit_result,
+        no_nan_idx=no_nan_idx,
     )
 
 
