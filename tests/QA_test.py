@@ -31,14 +31,14 @@
 # THREED_PATH = TEST_PATH / "simdata" / "3D"
 
 
-# def Faraday_thin_complex_polarization(freq_array, RM, Polint, initial_angle):
-#     """freq_array = channel frequencies in Hz
+# def Faraday_thin_complex_polarization(freq_arr, RM, Polint, initial_angle):
+#     """freq_arr = channel frequencies in Hz
 #     RM = source RM in rad m^-2
 #     Polint = polarized intensity in whatever units
 #     initial angle = pre-rotation polarization angle (in degrees)"""
-#     l2_array = (299792458.0 / freq_array) ** 2
-#     Q = Polint * np.cos(2 * (np.outer(l2_array, RM) + np.deg2rad(initial_angle)))
-#     U = Polint * np.sin(2 * (np.outer(l2_array, RM) + np.deg2rad(initial_angle)))
+#     l2_arr = (299792458.0 / freq_arr) ** 2
+#     Q = Polint * np.cos(2 * (np.outer(l2_arr, RM) + np.deg2rad(initial_angle)))
+#     U = Polint * np.sin(2 * (np.outer(l2_arr, RM) + np.deg2rad(initial_angle)))
 #     return np.squeeze(np.transpose(Q + 1j * U))
 
 

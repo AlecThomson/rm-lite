@@ -33,25 +33,25 @@ class RMSynth1DArrays(NamedTuple):
     """ Array of Faraday depths """
     phi2_arr_radm2: np.ndarray
     """ Double length of Faraday depths """
-    rmsf_array: np.ndarray
+    rmsf_arr: np.ndarray
     """ Rotation Measure Spread Function """
-    freq_array_hz: np.ndarray
+    freq_arr_hz: np.ndarray
     """ Frequency array """
-    weight_array: np.ndarray
+    weight_arr: np.ndarray
     """ Weight array """
-    fdf_dirty_array: np.ndarray
+    fdf_dirty_arr: np.ndarray
     """ Dirty Faraday dispersion function """
 
 
 def run_rmsynth(
-    stokes_q_array: np.ndarray,
-    stokes_u_array: np.ndarray,
-    stokes_q_error_array: np.ndarray,
-    stokes_u_error_array: np.ndarray,
-    freq_array_hz: np.ndarray,
-    stokes_i_array: Optional[np.ndarray] = None,
-    stokes_i_error_array: Optional[np.ndarray] = None,
-    stokes_i_model_array: Optional[np.ndarray] = None,
+    stokes_q_arr: np.ndarray,
+    stokes_u_arr: np.ndarray,
+    stokes_q_error_arr: np.ndarray,
+    stokes_u_error_arr: np.ndarray,
+    freq_arr_hz: np.ndarray,
+    stokes_i_arr: Optional[np.ndarray] = None,
+    stokes_i_error_arr: Optional[np.ndarray] = None,
+    stokes_i_model_arr: Optional[np.ndarray] = None,
     fit_order: int = 2,
     phi_max_radm2: Optional[float] = None,
     d_phi_radm2: Optional[float] = None,
@@ -61,15 +61,15 @@ def run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     super_resolution=False,
 ) -> Tuple[FDFParameters, RMSynth1DArrays]:
-    stokes_q_array = StokesQArray(stokes_q_array)
-    stokes_u_array = StokesUArray(stokes_u_array)
-    stokes_q_error_array = StokesQArray(stokes_q_error_array)
-    stokes_u_error_array = StokesUArray(stokes_u_error_array)
+    stokes_q_arr = StokesQArray(stokes_q_arr)
+    stokes_u_arr = StokesUArray(stokes_u_arr)
+    stokes_q_error_arr = StokesQArray(stokes_q_error_arr)
+    stokes_u_error_arr = StokesUArray(stokes_u_error_arr)
 
-    lambda_sq_arr_m2, lam_sq_0_m2, phi_arr_radm2, weight_array = compute_rmsynth_params(
-        freq_array_hz=freq_array_hz,
-        pol_array=stokes_q_array + 1j * stokes_u_array,
-        stokes_qu_error_array=np.abs(stokes_q_error_array + stokes_u_error_array) / 2.0,
+    lambda_sq_arr_m2, lam_sq_0_m2, phi_arr_radm2, weight_arr = compute_rmsynth_params(
+        freq_arr_hz=freq_arr_hz,
+        pol_arr=stokes_q_arr + 1j * stokes_u_arr,
+        stokes_qu_error_arr=np.abs(stokes_q_error_arr + stokes_u_error_arr) / 2.0,
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
         phi_max_radm2=phi_max_radm2,
@@ -77,77 +77,76 @@ def run_rmsynth(
         weight_type=weight_type,
     )
 
-    if stokes_i_array is None or stokes_i_error_array is None:
+    if stokes_i_arr is None or stokes_i_error_arr is None:
         logger.warning(
             "Stokes I array/errors not provided. No fractional polarization will be calculated."
         )
-        stokes_i_array = StokesIArray(np.ones_like(stokes_q_array))
-        stokes_i_error_array = StokesIArray(np.zeros_like(stokes_q_error_array))
+        stokes_i_arr = StokesIArray(np.ones_like(stokes_q_arr))
+        stokes_i_error_arr = StokesIArray(np.zeros_like(stokes_q_error_arr))
 
     else:
-        stokes_i_array = StokesIArray(stokes_i_array)
-        stokes_i_error_array = StokesIArray(stokes_i_error_array)
+        stokes_i_arr = StokesIArray(stokes_i_arr)
+        stokes_i_error_arr = StokesIArray(stokes_i_error_arr)
 
     (
-        stokes_i_model_array,
-        stokes_q_frac_array,
-        stokes_u_frac_array,
-        stokes_q_frac_error_array,
-        stokes_u_frac_error_array,
+        stokes_i_model_arr,
+        stokes_q_frac_arr,
+        stokes_u_frac_arr,
+        stokes_q_frac_error_arr,
+        stokes_u_frac_error_arr,
         fit_result,
         no_nan_idx,
     ) = create_fractional_spectra(
-        freq_array_hz=freq_array_hz,
+        freq_arr_hz=freq_arr_hz,
         ref_freq_hz=lambda2_to_freq(lam_sq_0_m2),
-        stokes_i_array=stokes_i_array,
-        stokes_q_array=stokes_q_array,
-        stokes_u_array=stokes_u_array,
-        stokes_i_error_array=stokes_i_error_array,
-        stokes_q_error_array=stokes_q_error_array,
-        stokes_u_error_array=stokes_u_error_array,
+        stokes_i_arr=stokes_i_arr,
+        stokes_q_arr=stokes_q_arr,
+        stokes_u_arr=stokes_u_arr,
+        stokes_i_error_arr=stokes_i_error_arr,
+        stokes_q_error_arr=stokes_q_error_arr,
+        stokes_u_error_arr=stokes_u_error_arr,
         fit_order=fit_order,
         fit_function=fit_function,
-        stokes_i_model_array=StokesIArray(stokes_i_model_array)
-        if stokes_i_model_array
+        stokes_i_model_arr=StokesIArray(stokes_i_model_arr)
+        if stokes_i_model_arr
         else None,
     )
 
     # Index down all arryas to remove NaNs
-    freq_array_hz = freq_array_hz[no_nan_idx]
+    freq_arr_hz = freq_arr_hz[no_nan_idx]
     lambda_sq_arr_m2 = lambda_sq_arr_m2[no_nan_idx]
-    weight_array = weight_array[no_nan_idx]
-    stokes_q_array = stokes_q_array[no_nan_idx]
-    stokes_u_array = stokes_u_array[no_nan_idx]
-    stokes_q_error_array = stokes_q_error_array[no_nan_idx]
-    stokes_u_error_array = stokes_u_error_array[no_nan_idx]
-    stokes_i_array = stokes_i_array[no_nan_idx]
-    stokes_i_error_array = stokes_i_error_array[no_nan_idx]
+    weight_arr = weight_arr[no_nan_idx]
+    stokes_q_arr = stokes_q_arr[no_nan_idx]
+    stokes_u_arr = stokes_u_arr[no_nan_idx]
+    stokes_q_error_arr = stokes_q_error_arr[no_nan_idx]
+    stokes_u_error_arr = stokes_u_error_arr[no_nan_idx]
+    stokes_i_arr = stokes_i_arr[no_nan_idx]
+    stokes_i_error_arr = stokes_i_error_arr[no_nan_idx]
 
-    assert stokes_q_frac_array.shape == stokes_u_frac_array.shape
-    assert stokes_q_frac_array.shape == lambda_sq_arr_m2.shape
+    assert stokes_q_frac_arr.shape == stokes_u_frac_arr.shape
+    assert stokes_q_frac_arr.shape == lambda_sq_arr_m2.shape
 
     # Compute after any fractional spectra have been created
     tick = time.time()
 
     # Perform RM-synthesis on the spectrum
-    fdf_dirty_array = rmsynth_nufft(
-        stokes_q_array=stokes_q_frac_array,
-        stokes_u_array=stokes_u_frac_array,
+    fdf_dirty_arr = rmsynth_nufft(
+        stokes_q_arr=stokes_q_frac_arr,
+        stokes_u_arr=stokes_u_frac_arr,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         phi_arr_radm2=phi_arr_radm2,
-        weight_array=weight_array,
+        weight_arr=weight_arr,
         lam_sq_0_m2=0 if super_resolution else lam_sq_0_m2,
     )
 
     # Calculate the Rotation Measure Spread Function
-    rmsf_array, phi_double_arr_radm2, fwhm_rmsf, fit_status_array = get_rmsf_nufft(
+    rmsf_arr, phi_double_arr_radm2, fwhm_rmsf, fit_status_arr = get_rmsf_nufft(
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         phi_arr_radm2=phi_arr_radm2,
-        weight_array=weight_array,
+        weight_arr=weight_arr,
         lam_sq_0_m2=lam_sq_0_m2,
         super_resolution=super_resolution,
-        mask_array=~np.isfinite(stokes_q_frac_array)
-        | ~np.isfinite(stokes_u_frac_array),
+        mask_arr=~np.isfinite(stokes_q_frac_arr) | ~np.isfinite(stokes_u_frac_arr),
         do_fit_rmsf=do_fit_rmsf or super_resolution,
         do_fit_rmsf_real=super_resolution,
     )
@@ -157,15 +156,15 @@ def run_rmsynth(
     logger.info(f"RM-synthesis completed in {cpu_time*1000:.2f}ms.")
 
     theoretical_noise = compute_theoretical_noise(
-        stokes_q_error_array=stokes_q_frac_error_array,
-        stokes_u_error_array=stokes_u_frac_error_array,
-        weight_array=weight_array,
+        stokes_q_error_arr=stokes_q_frac_error_arr,
+        stokes_u_error_arr=stokes_u_frac_error_arr,
+        weight_arr=weight_arr,
     )
-    if stokes_i_model_array is not None:
-        assert freq_array_hz.shape == stokes_i_model_array.shape
-        stokes_i_model = interpolate.interp1d(freq_array_hz, stokes_i_model_array)
+    if stokes_i_model_arr is not None:
+        assert freq_arr_hz.shape == stokes_i_model_arr.shape
+        stokes_i_model = interpolate.interp1d(freq_arr_hz, stokes_i_model_arr)
         stokes_i_reference_flux = stokes_i_model(lambda2_to_freq(lam_sq_0_m2))
-        fdf_dirty_array *= stokes_i_reference_flux
+        fdf_dirty_arr *= stokes_i_reference_flux
         theoretical_noise = theoretical_noise.with_options(
             fdf_error_noise=theoretical_noise.fdf_error_noise * stokes_i_reference_flux,
             fdf_q_noise=theoretical_noise.fdf_q_noise * stokes_i_reference_flux,
@@ -175,27 +174,27 @@ def run_rmsynth(
     # Measure the parameters of the dirty FDF
     # Use the theoretical noise to calculate uncertainties
     fdf_parameters = get_fdf_parameters(
-        fdf_array=fdf_dirty_array,
+        fdf_arr=fdf_dirty_arr,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf,
-        freq_array_hz=freq_array_hz,
-        stokes_q_array=stokes_q_array,
-        stokes_u_array=stokes_u_array,
-        stokes_q_error_array=stokes_q_error_array,
-        stokes_u_error_array=stokes_u_error_array,
+        freq_arr_hz=freq_arr_hz,
+        stokes_q_arr=stokes_q_arr,
+        stokes_u_arr=stokes_u_arr,
+        stokes_q_error_arr=stokes_q_error_arr,
+        stokes_u_error_arr=stokes_u_error_arr,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         lam_sq_0_m2=lam_sq_0_m2,
         stokes_i_reference_flux=stokes_i_reference_flux,
         theoretical_noise=theoretical_noise,
         fit_function=fit_function,
     )
-    rmsyth_arrays = RMSynth1DArrays(
+    rmsyth_arrs = RMSynth1DArrays(
         phi_arr_radm2=phi_arr_radm2,
         phi2_arr_radm2=phi_double_arr_radm2,
-        rmsf_array=rmsf_array,
-        freq_array_hz=freq_array_hz,
-        weight_array=weight_array,
-        fdf_dirty_array=fdf_dirty_array,
+        rmsf_arr=rmsf_arr,
+        freq_arr_hz=freq_arr_hz,
+        weight_arr=weight_arr,
+        fdf_dirty_arr=fdf_dirty_arr,
     )
 
-    return fdf_parameters, rmsyth_arrays
+    return fdf_parameters, rmsyth_arrs

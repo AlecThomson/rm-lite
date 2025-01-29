@@ -11,7 +11,7 @@ from rm_lite.utils.synthesis import (
     FWHM,
     freq_to_lambda2,
     lambda2_to_freq,
-    make_phi_array,
+    make_phi_arr,
     get_fwhm_rmsf,
     rmsynth_nufft,
 )
@@ -76,16 +76,16 @@ def test_get_fwhm_rmsf(racs_data, racs_model):
 
 
 def test_rmsynth_nufft(racs_data: MockData, racs_model: MockModel):
-    phis = make_phi_array(
+    phis = make_phi_arr(
         phi_max_radm2=1000,
         d_phi_radm2=1,
     )
     fdf_dirty = rmsynth_nufft(
-        stokes_q_array=racs_data.stokes_q,
-        stokes_u_array=racs_data.stokes_u,
+        stokes_q_arr=racs_data.stokes_q,
+        stokes_u_arr=racs_data.stokes_u,
         lambda_sq_arr_m2=racs_data.lsq,
         phi_arr_radm2=phis,
-        weight_array=np.ones_like(racs_data.stokes_q),
+        weight_arr=np.ones_like(racs_data.stokes_q),
         lam_sq_0_m2=np.mean(racs_data.lsq),
     )
 

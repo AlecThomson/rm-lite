@@ -7,7 +7,7 @@ from time import time
 from typing import NamedTuple
 
 import numpy as np
-from rm_lite.utils.synthesis import make_phi_array, rmsynth_nufft, get_rmsf_nufft
+from rm_lite.utils.synthesis import make_phi_arr, rmsynth_nufft, get_rmsf_nufft
 from tqdm import trange
 
 logger = logging.getLogger(__name__)
@@ -216,7 +216,7 @@ def get_rmsf_planes_old(
 
     # For cleaning the RMSF should extend by 1/2 on each side in phi-space
     if double:
-        phi2Arr = make_phi_array(
+        phi2Arr = make_phi_arr(
             phiArr_radm2.max() * 2, phiArr_radm2[1] - phiArr_radm2[0]
         )
     else:
@@ -402,11 +402,11 @@ def test_rmsynth() -> None:
     for eps in [1e-4, 1e-5, 1e-6, 1e-8]:
         tick = time()
         FDFcube = rmsynth_nufft(
-            stokes_q_array=fake_data.stokes_q,
-            stokes_u_array=fake_data.stokes_u,
+            stokes_q_arr=fake_data.stokes_q,
+            stokes_u_arr=fake_data.stokes_u,
             lambda_sq_arr_m2=fake_data.lsq,
             phi_arr_radm2=fake_data.phis,
-            weight_array=fake_data.weights,
+            weight_arr=fake_data.weights,
             lam_sq_0_m2=fake_data.lsq_0,
             eps=eps,
         )
@@ -440,7 +440,7 @@ def test_rmsf():
         RMSFcube, phi2Arr, fwhmRMSFArr, statArr = get_rmsf_nufft(
             lambda_sq_arr_m2=fake_data.lsq,
             phi_arr_radm2=fake_data.phis,
-            weight_array=fake_data.weights,
+            weight_arr=fake_data.weights,
             lam_sq_0_m2=fake_data.lsq_0,
             eps=eps,
         )

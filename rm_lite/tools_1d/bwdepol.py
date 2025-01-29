@@ -131,13 +131,13 @@
 #     return (1 / channel_width) * (int_b - int_a)
 
 
-# def estimate_channel_bandwidth(freq_array):
+# def estimate_channel_bandwidth(freq_arr):
 #     """Estimates the bandwidth per channel given the spacing between channel
 #     centers. Only looks at the first 2 channels.
 
 #     Parameters
 #     ----------
-#     freq_array: array-like
+#     freq_arr: array-like
 #                 array of channel centers
 
 #     Returns
@@ -146,7 +146,7 @@
 #          seperation between first two channel centers
 
 #     """
-#     ban = freq_array[1] - freq_array[0]
+#     ban = freq_arr[1] - freq_arr[0]
 #     return ban
 
 

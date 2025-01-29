@@ -42,7 +42,7 @@
 
 # import astropy.io.fits as pf
 # import numpy as np
-# from tools_3d.make_freq_file import get_freq_array
+# from tools_3d.make_freq_file import get_freq_arr
 # from tqdm.contrib.concurrent import process_map
 # from utils.util_FITS import strip_fits_dims
 
@@ -168,7 +168,7 @@
 #         )
 #     else:
 #         print("Frequency file not provided. Deriving frequencies from the fits header.")
-#         freqArr_Hz = get_freq_array(I_filename)
+#         freqArr_Hz = get_freq_arr(I_filename)
 
 #     # Run polynomial fitting on the spectra
 #     make_model_I(

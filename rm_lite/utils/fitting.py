@@ -99,15 +99,15 @@ def unit_centred_gaussian(
 
 
 def fit_rmsf(
-    rmsf_to_fit_array: np.ndarray,
+    rmsf_to_fit_arr: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
     fwhm_rmsf_radm2: float,
 ) -> float:
-    rmsf_to_fit_array = rmsf_to_fit_array.copy()
-    rmsf_to_fit_array /= np.nanmax(rmsf_to_fit_array)
+    rmsf_to_fit_arr = rmsf_to_fit_arr.copy()
+    rmsf_to_fit_arr /= np.nanmax(rmsf_to_fit_arr)
     d_phi = phi_double_arr_radm2[1] - phi_double_arr_radm2[0]
     mask = np.zeros_like(phi_double_arr_radm2, dtype=bool)
-    mask[np.argmax(rmsf_to_fit_array)] = True
+    mask[np.argmax(rmsf_to_fit_arr)] = True
     sigma_rmsf_radm2 = fwhm_to_sigma(fwhm_rmsf_radm2)
     sigma_rmsf_arr_pix = sigma_rmsf_radm2 / d_phi
     for i in np.where(mask)[0]:
@@ -117,7 +117,7 @@ def fit_rmsf(
     popt, pcov = curve_fit(
         unit_centred_gaussian,
         phi_double_arr_radm2[mask],
-        rmsf_to_fit_array[mask],
+        rmsf_to_fit_arr[mask],
         p0=[sigma_rmsf_radm2],
         bounds=([0], [np.inf]),
     )
@@ -125,26 +125,26 @@ def fit_rmsf(
 
 
 def fit_fdf(
-    fdf_to_fit_array: np.ndarray,
+    fdf_to_fit_arr: np.ndarray,
     phi_arr_radm2: np.ndarray,
     fwhm_fdf_radm2: float,
 ) -> FDFFitResult:
     d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
     mask = np.zeros_like(phi_arr_radm2, dtype=bool)
-    mask[np.argmax(fdf_to_fit_array)] = 1
+    mask[np.argmax(fdf_to_fit_arr)] = 1
     fwhm_fdf_arr_pix = fwhm_fdf_radm2 / d_phi
     for i in np.where(mask)[0]:
         start = int(i - fwhm_fdf_arr_pix / 2)
         end = int(i + fwhm_fdf_arr_pix / 2)
         mask[start : end + 2] = True
 
-    amplitude_guess = np.nanmax(fdf_to_fit_array[mask])
-    mean_guess = phi_arr_radm2[mask][np.argmax(fdf_to_fit_array[mask])]
+    amplitude_guess = np.nanmax(fdf_to_fit_arr[mask])
+    mean_guess = phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])]
     stddev_guess = fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2)))
     popt, pcov = curve_fit(
         gaussian,
         phi_arr_radm2[mask],
-        fdf_to_fit_array[mask],
+        fdf_to_fit_arr[mask],
         p0=[amplitude_guess, mean_guess, stddev_guess],
     )
     logger.debug(f"Fit results: {popt}")
@@ -211,10 +211,10 @@ def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> Tuple[float, int, in
 
 
 def static_fit(
-    freq_array_hz: np.ndarray,
+    freq_arr_hz: np.ndarray,
     ref_freq_hz: float,
-    stokes_i_array: np.ndarray,
-    stokes_i_error_array: np.ndarray,
+    stokes_i_arr: np.ndarray,
+    stokes_i_error_arr: np.ndarray,
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
@@ -229,27 +229,27 @@ def static_fit(
 
     logger.debug(f"Fitting Stokes I model with {fit_type} model of order {fit_order}.")
     initital_guess = np.zeros(fit_order + 1)
-    initital_guess[0] = np.nanmean(stokes_i_array)
+    initital_guess[0] = np.nanmean(stokes_i_arr)
     bounds = (
         [-np.inf] * (fit_order + 1),
         [np.inf] * (fit_order + 1),
     )
     bounds[0][0] = 0.0
-    if (stokes_i_error_array == 0).all():
-        stokes_i_error_array = None
+    if (stokes_i_error_arr == 0).all():
+        stokes_i_error_arr = None
     popt, pcov = curve_fit(
         fit_func,
-        freq_array_hz / ref_freq_hz,
-        stokes_i_array,
-        sigma=stokes_i_error_array,
+        freq_arr_hz / ref_freq_hz,
+        stokes_i_arr,
+        sigma=stokes_i_error_arr,
         absolute_sigma=True,
         p0=initital_guess,
         bounds=bounds,
     )
-    stokes_i_model_array = fit_func(freq_array_hz / ref_freq_hz, *popt)
-    ssr = np.sum((stokes_i_array - stokes_i_model_array) ** 2)
+    stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
+    ssr = np.sum((stokes_i_arr - stokes_i_model_arr) ** 2)
     aic = akaike_info_criterion_lsq(
-        ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_array_hz)
+        ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz)
     )
 
     return FitResult(
@@ -261,10 +261,10 @@ def static_fit(
 
 
 def dynamic_fit(
-    freq_array_hz: np.ndarray,
+    freq_arr_hz: np.ndarray,
     ref_freq_hz: float,
-    stokes_i_array: np.ndarray,
-    stokes_i_error_array: np.ndarray,
+    stokes_i_arr: np.ndarray,
+    stokes_i_error_arr: np.ndarray,
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
@@ -274,10 +274,10 @@ def dynamic_fit(
 
     for i, order in enumerate(orders):
         fit_result = static_fit(
-            freq_array_hz,
+            freq_arr_hz,
             ref_freq_hz,
-            stokes_i_array,
-            stokes_i_error_array,
+            stokes_i_arr,
+            stokes_i_error_arr,
             order,
             fit_type,
         )
@@ -295,28 +295,28 @@ def dynamic_fit(
 
 
 def fit_stokes_i_model(
-    freq_array_hz: np.ndarray,
+    freq_arr_hz: np.ndarray,
     ref_freq_hz: float,
-    stokes_i_array: np.ndarray,
-    stokes_i_error_array: np.ndarray,
+    stokes_i_arr: np.ndarray,
+    stokes_i_error_arr: np.ndarray,
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
     if fit_order < 0:
         return dynamic_fit(
-            freq_array_hz,
+            freq_arr_hz,
             ref_freq_hz,
-            stokes_i_array,
-            stokes_i_error_array,
+            stokes_i_arr,
+            stokes_i_error_arr,
             abs(fit_order),
             fit_type,
         )
 
     return static_fit(
-        freq_array_hz,
+        freq_arr_hz,
         ref_freq_hz,
-        stokes_i_array,
-        stokes_i_error_array,
+        stokes_i_arr,
+        stokes_i_error_arr,
         fit_order,
         fit_type,
     )

@@ -18,10 +18,10 @@ from rm_lite.utils.logging import logger
 
 
 class StokesIArray(np.ndarray):
-    def __new__(cls, input_array):
-        return np.asarray(input_array).view(cls)
+    def __new__(cls, input_arr):
+        return np.asarray(input_arr).view(cls)
 
-    def __array_finalize__(self, obj) -> None:
+    def __arr_finalize__(self, obj) -> None:
         if obj is None:
             return
         # This attribute should be maintained!
@@ -30,13 +30,13 @@ class StokesIArray(np.ndarray):
 
 
 class StokesQArray(np.ndarray):
-    def __new__(cls, input_array):
-        return np.asarray(input_array).view(cls)
+    def __new__(cls, input_arr):
+        return np.asarray(input_arr).view(cls)
 
 
 class StokesUArray(np.ndarray):
-    def __new__(cls, input_array):
-        return np.asarray(input_array).view(cls)
+    def __new__(cls, input_arr):
+        return np.asarray(input_arr).view(cls)
 
 
 class FWHM(NamedTuple):
@@ -66,16 +66,16 @@ class RMSFResults(NamedTuple):
     """The (double length) Faraday depth array"""
     fwhm_rmsf_arr: np.ndarray
     """The FWHM of the RMSF main lobe"""
-    fit_status_array: np.ndarray
+    fit_status_arr: np.ndarray
     """The status of the RMSF fit"""
 
 
 class FractionalSpectra(NamedTuple):
-    stokes_i_model_array: Optional[StokesIArray]
-    stokes_q_frac_array: StokesQArray
-    stokes_u_frac_array: StokesUArray
-    stokes_q_frac_error_array: StokesQArray
-    stokes_u_frac_error_array: StokesUArray
+    stokes_i_model_arr: Optional[StokesIArray]
+    stokes_q_frac_arr: StokesQArray
+    stokes_u_frac_arr: StokesUArray
+    stokes_q_frac_error_arr: StokesQArray
+    stokes_u_frac_error_arr: StokesUArray
     fit_result: FitResult
     no_nan_idx: np.ndarray
 
@@ -198,57 +198,57 @@ def calc_mom2_FDF(FDF, phi_arr_radm2):
 
 
 def create_fractional_spectra(
-    freq_array_hz: np.ndarray,
+    freq_arr_hz: np.ndarray,
     ref_freq_hz: float,
-    stokes_i_array: StokesIArray,
-    stokes_q_array: StokesQArray,
-    stokes_u_array: StokesUArray,
-    stokes_i_error_array: StokesIArray,
-    stokes_q_error_array: StokesQArray,
-    stokes_u_error_array: StokesUArray,
+    stokes_i_arr: StokesIArray,
+    stokes_q_arr: StokesQArray,
+    stokes_u_arr: StokesUArray,
+    stokes_i_error_arr: StokesIArray,
+    stokes_q_error_arr: StokesQArray,
+    stokes_u_error_arr: StokesUArray,
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
-    stokes_i_model_array: Optional[StokesIArray] = None,
+    stokes_i_model_arr: Optional[StokesIArray] = None,
     stokes_i_model_error: Optional[StokesIArray] = None,
     n_error_samples: int = 10_000,
 ) -> FractionalSpectra:
     no_nan_idx = (
-        np.isfinite(stokes_i_array)
-        & np.isfinite(stokes_i_error_array)
-        & np.isfinite(stokes_q_array)
-        & np.isfinite(stokes_q_error_array)
-        & np.isfinite(stokes_u_array)
-        & np.isfinite(stokes_u_error_array)
-        & np.isfinite(freq_array_hz)
+        np.isfinite(stokes_i_arr)
+        & np.isfinite(stokes_i_error_arr)
+        & np.isfinite(stokes_q_arr)
+        & np.isfinite(stokes_q_error_arr)
+        & np.isfinite(stokes_u_arr)
+        & np.isfinite(stokes_u_error_arr)
+        & np.isfinite(freq_arr_hz)
     )
     logger.debug(f"{ref_freq_hz=}")
-    freq_array_hz = freq_array_hz[no_nan_idx]
-    stokes_i_array = stokes_i_array[no_nan_idx]
-    stokes_q_array = stokes_q_array[no_nan_idx]
-    stokes_u_array = stokes_u_array[no_nan_idx]
-    stokes_i_error_array = stokes_i_error_array[no_nan_idx]
-    stokes_q_error_array = stokes_q_error_array[no_nan_idx]
-    stokes_u_error_array = stokes_u_error_array[no_nan_idx]
+    freq_arr_hz = freq_arr_hz[no_nan_idx]
+    stokes_i_arr = stokes_i_arr[no_nan_idx]
+    stokes_q_arr = stokes_q_arr[no_nan_idx]
+    stokes_u_arr = stokes_u_arr[no_nan_idx]
+    stokes_i_error_arr = stokes_i_error_arr[no_nan_idx]
+    stokes_q_error_arr = stokes_q_error_arr[no_nan_idx]
+    stokes_u_error_arr = stokes_u_error_arr[no_nan_idx]
 
-    # stokes_i_stokes_u_arrayay = unumpy.stokes_u_arrayay(stokes_i_array, stokes_i_error_array)
-    stokes_q_uarray = unumpy.uarray(stokes_q_array, stokes_q_error_array)
-    stokes_u_uarray = unumpy.uarray(stokes_u_array, stokes_u_error_array)
-    if stokes_i_model_array is not None:
-        stokes_i_model_array = stokes_i_model_array[no_nan_idx]
+    # stokes_i_stokes_u_array = unumpy.stokes_u_array(stokes_i_arr, stokes_i_error_arr)
+    stokes_q_uarray = unumpy.uarray(stokes_q_arr, stokes_q_error_arr)
+    stokes_u_uarray = unumpy.uarray(stokes_u_arr, stokes_u_error_arr)
+    if stokes_i_model_arr is not None:
+        stokes_i_model_arr = stokes_i_model_arr[no_nan_idx]
         if stokes_i_model_error is None:
             raise ValueError(
-                "If `stokes_i_model_array` is provided, `stokes_i_model_error` must also be provided."
+                "If `stokes_i_model_arr` is provided, `stokes_i_model_error` must also be provided."
             )
         stokes_i_model_error = stokes_i_model_error[no_nan_idx]
-        stokes_i_model_stokes_u_arrayay = unumpy.stokes_u_arrayay(
-            stokes_i_model_array, stokes_i_model_error
+        stokes_i_model_stokes_u_array = unumpy.stokes_u_array(
+            stokes_i_model_arr, stokes_i_model_error
         )
     else:
         fit_result = fit_stokes_i_model(
-            freq_array_hz,
+            freq_arr_hz,
             ref_freq_hz,
-            stokes_i_array,
-            stokes_i_error_array,
+            stokes_i_arr,
+            stokes_i_error_arr,
             fit_order,
             fit_function,
         )
@@ -260,37 +260,37 @@ def create_fractional_spectra(
 
         model_samples = np.array(
             [
-                stokes_i_model_func(freq_array_hz / ref_freq_hz, *sample)
+                stokes_i_model_func(freq_arr_hz / ref_freq_hz, *sample)
                 for sample in error_samples
             ]
         )
-        stokes_i_model_low, stokes_i_model_array, stokes_i_model_high = np.percentile(
+        stokes_i_model_low, stokes_i_model_arr, stokes_i_model_high = np.percentile(
             model_samples, [16, 50, 84], axis=0
         )
-        stokes_i_model_stokes_u_arrayay = unumpy.uarray(
-            stokes_i_model_array,
+        stokes_i_model_stokes_u_array = unumpy.uarray(
+            stokes_i_model_arr,
             np.abs((stokes_i_model_high - stokes_i_model_low)),
         )
 
-    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_stokes_u_arrayay
-    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_stokes_u_arrayay
+    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_stokes_u_array
+    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_stokes_u_array
 
-    stokes_q_frac_array = StokesQArray(unumpy.nominal_values(stokes_q_frac_uarray))
-    stokes_u_frac_array = StokesUArray(unumpy.nominal_values(stokes_u_frac_uarray))
-    stokes_q_frac_error_array = StokesQArray(unumpy.std_devs(stokes_q_frac_uarray))
-    stokes_u_frac_error_array = StokesUArray(unumpy.std_devs(stokes_u_frac_uarray))
+    stokes_q_frac_arr = StokesQArray(unumpy.nominal_values(stokes_q_frac_uarray))
+    stokes_u_frac_arr = StokesUArray(unumpy.nominal_values(stokes_u_frac_uarray))
+    stokes_q_frac_error_arr = StokesQArray(unumpy.std_devs(stokes_q_frac_uarray))
+    stokes_u_frac_error_arr = StokesUArray(unumpy.std_devs(stokes_u_frac_uarray))
 
-    assert len(stokes_i_array) == len(stokes_q_frac_array)
-    assert len(stokes_i_array) == len(stokes_u_frac_array)
-    assert len(stokes_i_array) == len(stokes_q_frac_error_array)
-    assert len(stokes_i_array) == len(stokes_u_frac_error_array)
+    assert len(stokes_i_arr) == len(stokes_q_frac_arr)
+    assert len(stokes_i_arr) == len(stokes_u_frac_arr)
+    assert len(stokes_i_arr) == len(stokes_q_frac_error_arr)
+    assert len(stokes_i_arr) == len(stokes_u_frac_error_arr)
 
     return FractionalSpectra(
-        stokes_i_model_array=stokes_i_model_array,
-        stokes_q_frac_array=stokes_q_frac_array,
-        stokes_u_frac_array=stokes_u_frac_array,
-        stokes_q_frac_error_array=stokes_q_frac_error_array,
-        stokes_u_frac_error_array=stokes_u_frac_error_array,
+        stokes_i_model_arr=stokes_i_model_arr,
+        stokes_q_frac_arr=stokes_q_frac_arr,
+        stokes_u_frac_arr=stokes_u_frac_arr,
+        stokes_q_frac_error_arr=stokes_q_frac_error_arr,
+        stokes_u_frac_error_arr=stokes_u_frac_error_arr,
         fit_result=fit_result,
         no_nan_idx=no_nan_idx,
     )
@@ -321,21 +321,20 @@ def lambda2_to_freq(lambda_sq_m2: float) -> float:
 
 
 def compute_theoretical_noise(
-    stokes_q_error_array: StokesQArray,
-    stokes_u_error_array: StokesUArray,
-    weight_array: np.ndarray,
+    stokes_q_error_arr: StokesQArray,
+    stokes_u_error_arr: StokesUArray,
+    weight_arr: np.ndarray,
 ) -> TheoreticalNoise:
-    weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
-    stokes_qu_error_array = np.abs(stokes_q_error_array + stokes_u_error_array) / 2.0
-    stokes_qu_error_array = np.nan_to_num(
-        stokes_qu_error_array, nan=0.0, posinf=0.0, neginf=0.0
+    weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
+    stokes_qu_error_arr = np.abs(stokes_q_error_arr + stokes_u_error_arr) / 2.0
+    stokes_qu_error_arr = np.nan_to_num(
+        stokes_qu_error_arr, nan=0.0, posinf=0.0, neginf=0.0
     )
     fdf_error_noise = np.sqrt(
-        np.nansum(weight_array**2 * stokes_qu_error_array**2)
-        / (np.sum(weight_array)) ** 2
+        np.nansum(weight_arr**2 * stokes_qu_error_arr**2) / (np.sum(weight_arr)) ** 2
     )
-    fdf_q_noise = np.average(stokes_q_error_array, weights=weight_array)
-    fdf_u_noise = np.average(stokes_u_error_array, weights=weight_array)
+    fdf_q_noise = np.average(stokes_q_error_arr, weights=weight_arr)
+    fdf_u_noise = np.average(stokes_u_error_arr, weights=weight_arr)
     return TheoreticalNoise(
         fdf_error_noise=fdf_error_noise,
         fdf_q_noise=fdf_q_noise,
@@ -352,7 +351,7 @@ class RMSynthParams(NamedTuple):
     """ Reference wavelength^2 value """
     phi_arr_radm2: np.ndarray
     """ Faraday depth values in rad/m^2 """
-    weight_array: np.ndarray
+    weight_arr: np.ndarray
     """ Weight array """
 
 
@@ -369,7 +368,7 @@ class SigmaAdd(NamedTuple):
     """Sigma_add CDF"""
     sigma_add_pdf: np.ndarray
     """Sigma_add PDF"""
-    sigma_add_array: np.ndarray
+    sigma_add_arr: np.ndarray
     """Sigma_add array"""
 
 
@@ -398,15 +397,15 @@ class RMSFParams(NamedTuple):
 
 
 def compute_rmsf_params(
-    freq_array_hz: np.ndarray,
-    weight_array: np.ndarray,
+    freq_arr_hz: np.ndarray,
+    weight_arr: np.ndarray,
     super_resolution: bool = False,
 ) -> RMSFParams:
-    lambda_sq_arr_m2 = freq_to_lambda2(freq_array_hz)
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
     # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
-    scale_factor = 1.0 / np.nansum(weight_array)
-    lam_sq_0_m2 = scale_factor * np.nansum(weight_array * lambda_sq_arr_m2)
+    scale_factor = 1.0 / np.nansum(weight_arr)
+    lam_sq_0_m2 = scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2)
     if not np.isfinite(lam_sq_0_m2):
         lam_sq_0_m2 = np.nanmean(lambda_sq_arr_m2)
     if super_resolution:
@@ -421,12 +420,12 @@ def compute_rmsf_params(
     phi_max_scale = np.pi / lambda_sq_m2_min
     dphi = 0.1 * rmsf_fwhm_theory
 
-    phi_array_radm2 = make_phi_array(phi_max * 10 * 2, dphi)
+    phi_arr_radm2 = make_phi_arr(phi_max * 10 * 2, dphi)
 
     rmsf_results = get_rmsf_nufft(
         lambda_sq_arr_m2=lambda_sq_arr_m2,
-        phi_arr_radm2=phi_array_radm2,
-        weight_array=weight_array,
+        phi_arr_radm2=phi_arr_radm2,
+        weight_arr=weight_arr,
         lam_sq_0_m2=lam_sq_0_m2,
         super_resolution=super_resolution,
     )
@@ -442,9 +441,9 @@ def compute_rmsf_params(
 
 
 def compute_rmsynth_params(
-    freq_array_hz: np.ndarray,
-    pol_array: np.ndarray,
-    stokes_qu_error_array: np.ndarray,
+    freq_arr_hz: np.ndarray,
+    pol_arr: np.ndarray,
+    stokes_qu_error_arr: np.ndarray,
     d_phi_radm2: Optional[float] = None,
     n_samples: Optional[float] = 10.0,
     phi_max_radm2: Optional[float] = None,
@@ -454,9 +453,9 @@ def compute_rmsynth_params(
     """Calculate the parameters for RM-synthesis.
 
     Args:
-        freq_array_hz (np.ndarray): Frequency array in Hz
-        pol_array (np.ndarray): Complex polarisation array
-        stokes_qu_error_array (np.ndarray): Error in Stokes Q and U
+        freq_arr_hz (np.ndarray): Frequency array in Hz
+        pol_arr (np.ndarray): Complex polarisation array
+        stokes_qu_error_arr (np.ndarray): Error in Stokes Q and U
         d_phi_radm2 (Optional[float], optional): Pixel spacing in Faraday depth in rad/m^2. Defaults to None.
         n_samples (Optional[float], optional): Number of samples across the RMSF main lobe. Defaults to 10.0.
         phi_max_radm2 (Optional[float], optional): Maximum Faraday depth in rad/m^2. Defaults to None.
@@ -469,7 +468,7 @@ def compute_rmsynth_params(
     Returns:
         RMSynthParams: Wavelength^2 values, reference wavelength^2, Faraday depth values, weight array
     """
-    lambda_sq_arr_m2 = freq_to_lambda2(freq_array_hz)
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
 
     fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
         lambda_sq_arr_m2, super_resolution
@@ -485,7 +484,7 @@ def compute_rmsynth_params(
             phi_max_radm2, fwhm_rmsf_radm2 * 10.0
         )  # Force the minimum phiMax to 10 FWHM
 
-    phi_arr_radm2 = make_phi_array(phi_max_radm2, d_phi_radm2)
+    phi_arr_radm2 = make_phi_arr(phi_max_radm2, d_phi_radm2)
 
     logger.debug(
         f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
@@ -493,21 +492,21 @@ def compute_rmsynth_params(
 
     # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
     if weight_type == "variance":
-        if (stokes_qu_error_array == 0).all():
-            stokes_qu_error_array = np.ones(len(stokes_qu_error_array))
-        weight_array = 1.0 / stokes_qu_error_array**2
+        if (stokes_qu_error_arr == 0).all():
+            stokes_qu_error_arr = np.ones(len(stokes_qu_error_arr))
+        weight_arr = 1.0 / stokes_qu_error_arr**2
     else:
-        weight_array = np.ones_like(freq_array_hz)
+        weight_arr = np.ones_like(freq_arr_hz)
 
     logger.debug(f"Weighting type: {weight_type}")
 
-    mask = ~np.isfinite(pol_array)
-    weight_array[mask] = 0.0
+    mask = ~np.isfinite(pol_arr)
+    weight_arr[mask] = 0.0
 
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
     # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
-    scale_factor = 1.0 / np.nansum(weight_array)
-    lam_sq_0_m2 = scale_factor * np.nansum(weight_array * lambda_sq_arr_m2)
+    scale_factor = 1.0 / np.nansum(weight_arr)
+    lam_sq_0_m2 = scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2)
     if not np.isfinite(lam_sq_0_m2):
         lam_sq_0_m2 = np.nanmean(lambda_sq_arr_m2)
 
@@ -517,11 +516,11 @@ def compute_rmsynth_params(
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         lam_sq_0_m2=lam_sq_0_m2,
         phi_arr_radm2=phi_arr_radm2,
-        weight_array=weight_array,
+        weight_arr=weight_arr,
     )
 
 
-def make_phi_array(
+def make_phi_arr(
     phi_max_radm2: float,
     d_phi_radm2: float,
 ) -> np.ndarray:
@@ -541,7 +540,7 @@ def make_phi_array(
     return phi_arr_radm2
 
 
-def make_double_phi_array(
+def make_double_phi_arr(
     phi_arr_radm2: np.ndarray,
 ) -> np.ndarray:
     n_phi = len(phi_arr_radm2)
@@ -584,22 +583,22 @@ def get_fwhm_rmsf(
 
 
 def rmsynth_nufft(
-    stokes_q_array: StokesQArray,
-    stokes_u_array: StokesUArray,
+    stokes_q_arr: StokesQArray,
+    stokes_u_arr: StokesUArray,
     lambda_sq_arr_m2: np.ndarray,
     phi_arr_radm2: np.ndarray,
-    weight_array: np.ndarray,
+    weight_arr: np.ndarray,
     lam_sq_0_m2: float,
     eps: float = 1e-6,
 ) -> np.ndarray:
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
 
     Args:
-        stokes_q_array (StokesQArray): Stokes Q data array
-        stokes_u_array (StokesUArray): Stokes U data array
+        stokes_q_arr (StokesQArray): Stokes Q data array
+        stokes_u_arr (StokesUArray): Stokes U data array
         lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
         phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
-        weight_array (np.ndarray): Weight array
+        weight_arr (np.ndarray): Weight array
         lam_sq_0_m2 (Optional[float], optional): Reference wavelength^2 in m^2. Defaults to None.
         eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
 
@@ -612,50 +611,50 @@ def rmsynth_nufft(
     Returns:
         np.ndarray: Dirty Faraday dispersion function cube
     """
-    weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
+    weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Sanity check on array sizes
-    if not weight_array.shape == lambda_sq_arr_m2.shape:
+    if not weight_arr.shape == lambda_sq_arr_m2.shape:
         raise ValueError(
-            f"Weight and lambda^2 arrays must be the same shape. Got {weight_array.shape} and {lambda_sq_arr_m2.shape}"
+            f"Weight and lambda^2 arrays must be the same shape. Got {weight_arr.shape} and {lambda_sq_arr_m2.shape}"
         )
 
-    if not stokes_q_array.shape == stokes_u_array.shape:
+    if not stokes_q_arr.shape == stokes_u_arr.shape:
         raise ValueError("Stokes Q and U data arrays must be the same shape.")
 
-    n_dims = len(stokes_q_array.shape)
+    n_dims = len(stokes_q_arr.shape)
     if not n_dims <= 3:
         raise ValueError(f"Data dimensions must be <= 3. Got {n_dims}")
 
-    if not stokes_q_array.shape[0] == lambda_sq_arr_m2.shape[0]:
+    if not stokes_q_arr.shape[0] == lambda_sq_arr_m2.shape[0]:
         raise ValueError(
-            f"Data depth does not match lambda^2 vector ({stokes_q_array.shape[0]} vs {lambda_sq_arr_m2.shape[0]})."
+            f"Data depth does not match lambda^2 vector ({stokes_q_arr.shape[0]} vs {lambda_sq_arr_m2.shape[0]})."
         )
 
     # Reshape the data arrays to 2 dimensions
     if n_dims == 1:
-        stokes_q_array = np.reshape(stokes_q_array, (stokes_q_array.shape[0], 1))
-        stokes_u_array = np.reshape(stokes_u_array, (stokes_u_array.shape[0], 1))
+        stokes_q_arr = np.reshape(stokes_q_arr, (stokes_q_arr.shape[0], 1))
+        stokes_u_arr = np.reshape(stokes_u_arr, (stokes_u_arr.shape[0], 1))
     elif n_dims == 3:
-        old_data_shape = stokes_q_array.shape
-        stokes_q_array = np.reshape(
-            stokes_q_array,
+        old_data_shape = stokes_q_arr.shape
+        stokes_q_arr = np.reshape(
+            stokes_q_arr,
             (
-                stokes_q_array.shape[0],
-                stokes_q_array.shape[1] * stokes_q_array.shape[2],
+                stokes_q_arr.shape[0],
+                stokes_q_arr.shape[1] * stokes_q_arr.shape[2],
             ),
         )
-        stokes_u_array = np.reshape(
-            stokes_u_array,
+        stokes_u_arr = np.reshape(
+            stokes_u_arr,
             (
-                stokes_u_array.shape[0],
-                stokes_u_array.shape[1] * stokes_u_array.shape[2],
+                stokes_u_arr.shape[0],
+                stokes_u_arr.shape[1] * stokes_u_arr.shape[2],
             ),
         )
 
     # Create a complex polarised cube, B&dB Eqns. (8) and (14)
     # Array has dimensions [nFreq, nY * nX]
-    pol_cube = (stokes_q_array + 1j * stokes_u_array) * weight_array[:, np.newaxis]
+    pol_cube = (stokes_q_arr + 1j * stokes_u_arr) * weight_arr[:, np.newaxis]
 
     # Check for NaNs (flagged data) in the cube & set to zero
     mask_cube = ~np.isfinite(pol_cube)
@@ -664,15 +663,15 @@ def rmsynth_nufft(
     # If full planes are flagged then set corresponding weights to zero
     mask_planes = np.sum(~mask_cube, axis=1)
     mask_planes = np.where(mask_planes == 0, 0, 1)
-    weight_array *= mask_planes
+    weight_arr *= mask_planes
 
     # The K value used to scale each FDF spectrum must take into account
     # flagged voxels data in the datacube and can be position dependent
-    weight_cube = np.invert(mask_cube) * weight_array[:, np.newaxis]
+    weight_cube = np.invert(mask_cube) * weight_arr[:, np.newaxis]
     with np.errstate(divide="ignore", invalid="ignore"):
-        scale_array = np.true_divide(1.0, np.sum(weight_cube, axis=0))
-        scale_array[scale_array == np.inf] = 0
-        scale_array = np.nan_to_num(scale_array)
+        scale_arr = np.true_divide(1.0, np.sum(weight_cube, axis=0))
+        scale_arr[scale_arr == np.inf] = 0
+        scale_arr = np.nan_to_num(scale_arr)
 
     # Clean up one cube worth of memory
     del weight_cube
@@ -690,7 +689,7 @@ def rmsynth_nufft(
             eps=eps,
             isign=-1,
         )
-        * scale_array[..., None]
+        * scale_arr[..., None]
     ).T
 
     # Check for pixels that have Re(FDF)=Im(FDF)=0. across ALL Faraday depths
@@ -712,8 +711,8 @@ def rmsynth_nufft(
 
 
 def inverse_rmsynth_nufft(
-    fdf_q_array: StokesQArray,
-    fdf_u_array: StokesUArray,
+    fdf_q_arr: StokesQArray,
+    fdf_u_arr: StokesUArray,
     lambda_sq_arr_m2: np.ndarray,
     phi_arr_radm2: np.ndarray,
     lam_sq_0_m2: float,
@@ -722,8 +721,8 @@ def inverse_rmsynth_nufft(
     """Inverse RM-synthesis - FDF to Stokes Q and U in wavelength^2 space.
 
     Args:
-        fdf_q_array (StokesQArray): FDF Stokes Q data array
-        fdf_u_array (StokesUArray): FDF Stokes U data array
+        fdf_q_arr (StokesQArray): FDF Stokes Q data array
+        fdf_u_arr (StokesUArray): FDF Stokes U data array
         lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
         phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
         lam_sq_0_m2 (float): Reference wavelength^2 value
@@ -737,40 +736,40 @@ def inverse_rmsynth_nufft(
     Returns:
         np.ndarray: Complex polarisation array in wavelength^2 space
     """
-    if not fdf_q_array.shape == fdf_u_array.shape:
+    if not fdf_q_arr.shape == fdf_u_arr.shape:
         raise ValueError("Stokes Q and U data arrays must be the same shape.")
 
-    n_dims = len(fdf_q_array.shape)
+    n_dims = len(fdf_q_arr.shape)
     if not n_dims <= 3:
         raise ValueError(f"Data dimensions must be <= 3. Got {n_dims}")
 
-    if not fdf_q_array.shape[0] == phi_arr_radm2.shape[0]:
+    if not fdf_q_arr.shape[0] == phi_arr_radm2.shape[0]:
         raise ValueError(
-            f"Data depth does not match Faraday depth vector ({fdf_q_array.shape[0]} vs {phi_arr_radm2.shape[0]})."
+            f"Data depth does not match Faraday depth vector ({fdf_q_arr.shape[0]} vs {phi_arr_radm2.shape[0]})."
         )
 
     # Reshape the data arrays to 2 dimensions
     if n_dims == 1:
-        fdf_q_array = np.reshape(fdf_q_array, (fdf_q_array.shape[0], 1))
-        fdf_u_array = np.reshape(fdf_u_array, (fdf_u_array.shape[0], 1))
+        fdf_q_arr = np.reshape(fdf_q_arr, (fdf_q_arr.shape[0], 1))
+        fdf_u_arr = np.reshape(fdf_u_arr, (fdf_u_arr.shape[0], 1))
     elif n_dims == 3:
-        old_data_shape = fdf_q_array.shape
-        fdf_q_array = np.reshape(
-            fdf_q_array,
+        old_data_shape = fdf_q_arr.shape
+        fdf_q_arr = np.reshape(
+            fdf_q_arr,
             (
-                fdf_q_array.shape[0],
-                fdf_q_array.shape[1] * fdf_q_array.shape[2],
+                fdf_q_arr.shape[0],
+                fdf_q_arr.shape[1] * fdf_q_arr.shape[2],
             ),
         )
-        fdf_u_array = np.reshape(
-            fdf_u_array,
+        fdf_u_arr = np.reshape(
+            fdf_u_arr,
             (
-                fdf_u_array.shape[0],
-                fdf_u_array.shape[1] * fdf_u_array.shape[2],
+                fdf_u_arr.shape[0],
+                fdf_u_arr.shape[1] * fdf_u_arr.shape[2],
             ),
         )
 
-    fdf_pol_cube = fdf_q_array + 1j * fdf_u_array
+    fdf_pol_cube = fdf_q_arr + 1j * fdf_u_arr
     exponent = (lambda_sq_arr_m2 - lam_sq_0_m2).astype(
         f"float{fdf_pol_cube.itemsize*8/2:.0f}"
     )
@@ -800,10 +799,10 @@ def inverse_rmsynth_nufft(
 def get_rmsf_nufft(
     lambda_sq_arr_m2: np.ndarray,
     phi_arr_radm2: np.ndarray,
-    weight_array: np.ndarray,
+    weight_arr: np.ndarray,
     lam_sq_0_m2: float,
     super_resolution: bool = False,
-    mask_array: Optional[np.ndarray] = None,
+    mask_arr: Optional[np.ndarray] = None,
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real=False,
     eps: float = 1e-6,
@@ -813,10 +812,10 @@ def get_rmsf_nufft(
     Args:
         lambda_sq_arr_m2 (np.ndarray): Wavelength^2 values in m^2
         phi_arr_radm2 (np.ndarray): Faraday depth values in rad/m^2
-        weight_array (np.ndarray): Weight array
+        weight_arr (np.ndarray): Weight array
         lam_sq_0_m2 (float): Reference wavelength^2 value
         super_resolution (bool, optional): Use superresolution. Defaults to False.
-        mask_array (Optional[np.ndarray], optional): Mask array. Defaults to None.
+        mask_arr (Optional[np.ndarray], optional): Mask array. Defaults to None.
         do_fit_rmsf (bool, optional): Fit the RMSF with a Gaussian. Defaults to False.
         do_fit_rmsf_real (bool, optional): Fit the *real* part of the. Defaults to False.
         eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
@@ -827,46 +826,46 @@ def get_rmsf_nufft(
         ValueError: If the mask depth does not match the lambda^2 vector.
 
     Returns:
-        RMSFResults: rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_array
+        RMSFResults: rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_arr
     """
-    phi_double_arr_radm2 = make_double_phi_array(phi_arr_radm2)
+    phi_double_arr_radm2 = make_double_phi_arr(phi_arr_radm2)
 
-    weight_array = np.nan_to_num(weight_array, nan=0.0, posinf=0.0, neginf=0.0)
+    weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Set the mask array (default to 1D, no masked channels)
-    if mask_array is None:
-        mask_array = np.zeros_like(lambda_sq_arr_m2, dtype=bool)
+    if mask_arr is None:
+        mask_arr = np.zeros_like(lambda_sq_arr_m2, dtype=bool)
         n_dimension = 1
     else:
-        mask_array = mask_array.astype(bool)
-        n_dimension = len(mask_array.shape)
+        mask_arr = mask_arr.astype(bool)
+        n_dimension = len(mask_arr.shape)
 
     # Sanity checks on array sizes
-    if not weight_array.shape == lambda_sq_arr_m2.shape:
+    if not weight_arr.shape == lambda_sq_arr_m2.shape:
         raise ValueError("wavelength^2 and weight arrays must be the same shape.")
 
     if not n_dimension <= 3:
         raise ValueError("mask dimensions must be <= 3.")
 
-    if not mask_array.shape[0] == lambda_sq_arr_m2.shape[0]:
+    if not mask_arr.shape[0] == lambda_sq_arr_m2.shape[0]:
         raise ValueError(
-            f"Mask depth does not match lambda^2 vector ({mask_array.shape[0]} vs {lambda_sq_arr_m2.shape[-1]})."
+            f"Mask depth does not match lambda^2 vector ({mask_arr.shape[0]} vs {lambda_sq_arr_m2.shape[-1]})."
         )
 
     # Reshape the mask array to 2 dimensions
     if n_dimension == 1:
-        mask_array = np.reshape(mask_array, (mask_array.shape[0], 1))
+        mask_arr = np.reshape(mask_arr, (mask_arr.shape[0], 1))
     elif n_dimension == 3:
-        old_data_shape = mask_array.shape
-        mask_array = np.reshape(
-            mask_array, (mask_array.shape[0], mask_array.shape[1] * mask_array.shape[2])
+        old_data_shape = mask_arr.shape
+        mask_arr = np.reshape(
+            mask_arr, (mask_arr.shape[0], mask_arr.shape[1] * mask_arr.shape[2])
         )
-    num_pixels = mask_array.shape[-1]
+    num_pixels = mask_arr.shape[-1]
 
     # If full planes are flagged then set corresponding weights to zero
-    flag_xy_sum = np.sum(mask_array, axis=1)
+    flag_xy_sum = np.sum(mask_arr, axis=1)
     mskPlanes = np.where(flag_xy_sum == num_pixels, 0, 1)
-    weight_array *= mskPlanes
+    weight_arr *= mskPlanes
 
     # Check for isolated clumps of flags (# flags in a plane not 0 or num_pixels)
     flag_totals_list = np.unique(flag_xy_sum).tolist()
@@ -883,11 +882,11 @@ def get_rmsf_nufft(
     # Calculate the RMSF at each pixel
     # The K value used to scale each RMSF must take into account
     # isolated flagged voxels data in the datacube
-    weight_cube = np.invert(mask_array) * weight_array[:, np.newaxis]
+    weight_cube = np.invert(mask_arr) * weight_arr[:, np.newaxis]
     with np.errstate(divide="ignore", invalid="ignore"):
-        scale_factor_array = 1.0 / np.sum(weight_cube, axis=0)
-        scale_factor_array = np.nan_to_num(
-            scale_factor_array, nan=0.0, posinf=0.0, neginf=0.0
+        scale_factor_arr = 1.0 / np.sum(weight_cube, axis=0)
+        scale_factor_arr = np.nan_to_num(
+            scale_factor_arr, nan=0.0, posinf=0.0, neginf=0.0
         )
 
     # Calculate the RMSF for each plane
@@ -899,7 +898,7 @@ def get_rmsf_nufft(
             s=(phi_double_arr_radm2[::-1] * 2).astype(exponent.dtype),
             eps=eps,
         )
-        * scale_factor_array[..., None]
+        * scale_factor_arr[..., None]
     ).T
 
     # Clean up one cube worth of memory
@@ -907,7 +906,7 @@ def get_rmsf_nufft(
 
     # Default to the analytical RMSF
     fwhm_rmsf_arr = np.ones(num_pixels) * fwhm_rmsf_radm2
-    fit_status_array = np.zeros(num_pixels, dtype=bool)
+    fit_status_arr = np.zeros(num_pixels, dtype=bool)
 
     # Fit the RMSF main lobe
     if do_fit_rmsf:
@@ -916,7 +915,7 @@ def get_rmsf_nufft(
         for i in trange(num_pixels, desc="Fitting RMSF by pixel"):
             try:
                 fitted_rmsf = fit_rmsf(
-                    rmsf_to_fit_array=(
+                    rmsf_to_fit_arr=(
                         rmsf_cube[:, i].real
                         if do_fit_rmsf_real
                         else np.abs(rmsf_cube[:, i])
@@ -933,12 +932,12 @@ def get_rmsf_nufft(
                 fit_status = False
 
             fwhm_rmsf_arr[i] = fitted_rmsf
-            fit_status_array[i] = fit_status
+            fit_status_arr[i] = fit_status
 
     # Remove redundant dimensions
     rmsf_cube = np.squeeze(rmsf_cube)
     fwhm_rmsf_arr = np.squeeze(fwhm_rmsf_arr)
-    fit_status_array = np.squeeze(fit_status_array)
+    fit_status_arr = np.squeeze(fit_status_arr)
 
     # Restore if 3D shape
     if n_dimension == 3:
@@ -948,27 +947,27 @@ def get_rmsf_nufft(
         fwhm_rmsf_arr = np.reshape(
             fwhm_rmsf_arr, (old_data_shape[1], old_data_shape[2])
         )
-        fit_status_array = np.reshape(
-            fit_status_array, (old_data_shape[1], old_data_shape[2])
+        fit_status_arr = np.reshape(
+            fit_status_arr, (old_data_shape[1], old_data_shape[2])
         )
 
     return RMSFResults(
         rmsf_cube=rmsf_cube,
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_arr=fwhm_rmsf_arr,
-        fit_status_array=fit_status_array,
+        fit_status_arr=fit_status_arr,
     )
 
 
 def get_fdf_parameters(
-    fdf_array: np.ndarray,
+    fdf_arr: np.ndarray,
     phi_arr_radm2: np.ndarray,
     fwhm_rmsf_radm2: float,
-    freq_array_hz: np.ndarray,
-    stokes_q_array: StokesQArray,
-    stokes_u_array: StokesUArray,
-    stokes_q_error_array: StokesQArray,
-    stokes_u_error_array: StokesUArray,
+    freq_arr_hz: np.ndarray,
+    stokes_q_arr: StokesQArray,
+    stokes_u_arr: StokesUArray,
+    stokes_q_error_arr: StokesQArray,
+    stokes_u_error_arr: StokesUArray,
     lambda_sq_arr_m2: np.ndarray,
     lam_sq_0_m2: float,
     stokes_i_reference_flux: float,
@@ -983,8 +982,8 @@ def get_fdf_parameters(
     Returns a dictionary containing measured parameters.
     """
 
-    abs_fdf_array = np.abs(fdf_array)
-    peak_pi_index = np.nanargmax(abs_fdf_array)
+    abs_fdf_arr = np.abs(fdf_arr)
+    peak_pi_index = np.nanargmax(abs_fdf_arr)
 
     # Measure the RMS noise in the spectrum after masking the peak
     d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
@@ -997,18 +996,18 @@ def get_fdf_parameters(
         mask[start : end + 2] = False
 
     fdf_error_mad: float = mad_std(
-        np.concatenate([fdf_array[mask].real, fdf_array[mask].imag])
+        np.concatenate([fdf_arr[mask].real, fdf_arr[mask].imag])
     )
 
-    n_good_phi = np.isfinite(fdf_array).sum()
+    n_good_phi = np.isfinite(fdf_arr).sum()
     lambda_sq_arr_m2_variance = (
         np.sum(lambda_sq_arr_m2**2.0) - np.sum(lambda_sq_arr_m2) ** 2.0 / n_good_phi
     ) / (n_good_phi - 1)
 
-    good_chan_idx = np.isfinite(freq_array_hz)
+    good_chan_idx = np.isfinite(freq_arr_hz)
     n_good_chan = good_chan_idx.sum()
 
-    if not (peak_pi_index > 0 and peak_pi_index < len(abs_fdf_array) - 1):
+    if not (peak_pi_index > 0 and peak_pi_index < len(abs_fdf_arr) - 1):
         return FDFParameters(
             fdf_error_mad=fdf_error_mad,
             peak_pi_fit=np.nan,
@@ -1031,14 +1030,14 @@ def get_fdf_parameters(
             fdf_error_noise=theoretical_noise.fdf_error_noise,
             fdf_q_noise=theoretical_noise.fdf_q_noise,
             fdf_u_noise=theoretical_noise.fdf_u_noise,
-            min_freq_hz=freq_array_hz[good_chan_idx].min(),
-            max_freq_hz=freq_array_hz[good_chan_idx].max(),
+            min_freq_hz=freq_arr_hz[good_chan_idx].min(),
+            max_freq_hz=freq_arr_hz[good_chan_idx].max(),
             n_channels=n_good_chan,
-            median_d_freq_hz=np.nanmedian(np.diff(freq_array_hz[good_chan_idx])),
+            median_d_freq_hz=np.nanmedian(np.diff(freq_arr_hz[good_chan_idx])),
             frac_pol=np.nan,
         )
     peak_pi_fit, peak_rm_fit, _ = fit_fdf(
-        fdf_to_fit_array=abs_fdf_array,
+        fdf_to_fit_arr=abs_fdf_arr,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_fdf_radm2=fwhm_rmsf_radm2,
     )
@@ -1067,8 +1066,8 @@ def get_fdf_parameters(
     peak_pi_fit_index = np.interp(
         peak_rm_fit, phi_arr_radm2, np.arange(phi_arr_radm2.shape[-1], dtype="f4")
     )
-    peak_u_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_array.imag)
-    peak_q_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_array.real)
+    peak_u_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_arr.imag)
+    peak_q_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_arr.real)
     peak_pa_fit_deg = 0.5 * np.degrees(np.arctan2(peak_u_fit, peak_q_fit)) % 180
     peak_pa_fit_deg_err = np.degrees(
         theoretical_noise.fdf_error_noise / (2.0 * peak_pi_fit)
@@ -1089,11 +1088,11 @@ def get_fdf_parameters(
     peak_pa0_fit_deg_err = float(np.degrees(peak_pa0_fit_rad_err))
 
     stokes_sigma_add = measure_qu_complexity(
-        freq_arr_hz=freq_array_hz,
-        stokes_q_array=stokes_q_array,
-        stokes_u_array=stokes_u_array,
-        stokes_q_err_array=stokes_q_error_array,
-        stokes_u_err_array=stokes_u_error_array,
+        freq_arr_hz=freq_arr_hz,
+        stokes_q_arr=stokes_q_arr,
+        stokes_u_arr=stokes_u_arr,
+        stokes_q_err_arr=stokes_q_error_arr,
+        stokes_u_err_arr=stokes_u_error_arr,
         frac_pol=peak_pi_fit_debias / stokes_i_reference_flux,
         psi0_deg=peak_pa0_fit_deg,
         rm_radm2=peak_rm_fit,
@@ -1121,10 +1120,10 @@ def get_fdf_parameters(
         fdf_error_noise=theoretical_noise.fdf_error_noise,
         fdf_q_noise=theoretical_noise.fdf_q_noise,
         fdf_u_noise=theoretical_noise.fdf_u_noise,
-        min_freq_hz=freq_array_hz[good_chan_idx].min(),
-        max_freq_hz=freq_array_hz[good_chan_idx].max(),
+        min_freq_hz=freq_arr_hz[good_chan_idx].min(),
+        max_freq_hz=freq_arr_hz[good_chan_idx].max(),
         n_channels=n_good_chan,
-        median_d_freq_hz=np.nanmedian(np.diff(freq_array_hz[good_chan_idx])),
+        median_d_freq_hz=np.nanmedian(np.diff(freq_arr_hz[good_chan_idx])),
         frac_pol=peak_pi_fit_debias / stokes_i_reference_flux,
     )
 
@@ -1144,8 +1143,8 @@ def cdf_percentile(values: np.ndarray, cdf: np.ndarray, q=50.0) -> float:
 
 
 def calculate_sigma_add(
-    y_array: np.ndarray,
-    dy_array: np.ndarray,
+    y_arr: np.ndarray,
+    dy_arr: np.ndarray,
     median: Optional[float] = None,
     noise: Optional[float] = None,
     n_samples: int = 1000,
@@ -1157,28 +1156,28 @@ def calculate_sigma_add(
     # Measure the median and MADFM of the input data if not provided.
     # Used to overplot a normal distribution when debugging.
     if median is None:
-        median = np.nanmedian(y_array)
+        median = np.nanmedian(y_arr)
     if noise is None:
-        noise = mad_std(y_array)
+        noise = mad_std(y_arr)
 
     # Sample the PDF of the additional noise term from a limit near zero to
     # a limit of the range of the data, including error bars
-    y_range = np.nanmax(y_array + dy_array) - np.nanmin(y_array - dy_array)
+    y_range = np.nanmax(y_arr + dy_arr) - np.nanmin(y_arr - dy_arr)
     sigma_add_arr = np.linspace(y_range / n_samples, y_range, n_samples)
 
     # Model deviation from Gaussian as an additional noise term.
     # Loop through the range of i additional noise samples and calculate
     # chi-squared and sum(ln(sigma_total)), used later to calculate likelihood.
-    n_data = len(y_array)
+    n_data = len(y_arr)
 
     # Calculate sigma_sq_tot for all sigma_add values
-    sigma_sq_tot = dy_array**2.0 + sigma_add_arr[:, None] ** 2.0
+    sigma_sq_tot = dy_arr**2.0 + sigma_add_arr[:, None] ** 2.0
 
     # Calculate ln_sigma_sum_arr for all sigma_add values
     ln_sigma_sum_arr = np.nansum(np.log(np.sqrt(sigma_sq_tot)), axis=1)
 
     # Calculate chi_sq_arr for all sigma_add values
-    chi_sq_arr = np.nansum((y_array - median) ** 2.0 / sigma_sq_tot, axis=1)
+    chi_sq_arr = np.nansum((y_arr - median) ** 2.0 / sigma_sq_tot, axis=1)
     ln_prob_arr = (
         -np.log(sigma_add_arr)
         - n_data * np.log(2.0 * np.pi) / 2.0
@@ -1203,7 +1202,7 @@ def calculate_sigma_add(
         sigma_add_plus=sigma_add_plus,
         sigma_add_cdf=cdf,
         sigma_add_pdf=prob_arr,
-        sigma_add_array=sigma_add_arr,
+        sigma_add_arr=sigma_add_arr,
     )
 
 
@@ -1235,10 +1234,10 @@ def faraday_simple_spectrum(
 
 def measure_qu_complexity(
     freq_arr_hz: np.ndarray,
-    stokes_q_array: StokesQArray,
-    stokes_u_array: StokesUArray,
-    stokes_q_err_array: StokesQArray,
-    stokes_u_err_array: StokesUArray,
+    stokes_q_arr: StokesQArray,
+    stokes_u_arr: StokesUArray,
+    stokes_q_err_arr: StokesQArray,
+    stokes_u_err_arr: StokesUArray,
     frac_pol: float,
     psi0_deg: float,
     rm_radm2: float,
@@ -1252,35 +1251,33 @@ def measure_qu_complexity(
     )
 
     # Subtract the RM-thin model to create a residual q & u
-    stokes_q_residual = stokes_q_array - complex_polarisation.real
-    stokes_u_residual = stokes_u_array - complex_polarisation.imag
+    stokes_q_residual = stokes_q_arr - complex_polarisation.real
+    stokes_u_residual = stokes_u_arr - complex_polarisation.imag
 
     sigma_add_q = calculate_sigma_add(
-        y_array=stokes_q_residual / stokes_q_err_array,
-        dy_array=np.ones_like(stokes_q_residual),
+        y_arr=stokes_q_residual / stokes_q_err_arr,
+        dy_arr=np.ones_like(stokes_q_residual),
         median=0.0,
         noise=1.0,
     )
     sigma_add_u = calculate_sigma_add(
-        y_array=stokes_u_residual / stokes_u_err_array,
-        dy_array=np.ones_like(stokes_u_residual),
+        y_arr=stokes_u_residual / stokes_u_err_arr,
+        dy_arr=np.ones_like(stokes_u_residual),
         median=0.0,
         noise=1.0,
     )
 
-    sigma_add_p_array = np.hypot(
-        sigma_add_q.sigma_add_array, sigma_add_u.sigma_add_array
-    )
+    sigma_add_p_arr = np.hypot(sigma_add_q.sigma_add_arr, sigma_add_u.sigma_add_arr)
     sigma_add_p_pdf = np.hypot(sigma_add_q.sigma_add_pdf, sigma_add_u.sigma_add_pdf)
     sigma_add_p_cdf = np.cumsum(sigma_add_p_pdf) / np.nansum(sigma_add_p_pdf)
     sigma_add_p_val = cdf_percentile(
-        values=sigma_add_p_array, cdf=sigma_add_p_cdf, q=50.0
+        values=sigma_add_p_arr, cdf=sigma_add_p_cdf, q=50.0
     )
     sigma_add_p_minus = cdf_percentile(
-        values=sigma_add_p_array, cdf=sigma_add_p_cdf, q=15.72
+        values=sigma_add_p_arr, cdf=sigma_add_p_cdf, q=15.72
     )
     sigma_add_p_plus = cdf_percentile(
-        values=sigma_add_p_array, cdf=sigma_add_p_cdf, q=84.27
+        values=sigma_add_p_arr, cdf=sigma_add_p_cdf, q=84.27
     )
     sigma_add_p = SigmaAdd(
         sigma_add=sigma_add_p_val,
@@ -1288,7 +1285,7 @@ def measure_qu_complexity(
         sigma_add_plus=sigma_add_p_plus,
         sigma_add_cdf=sigma_add_p_cdf,
         sigma_add_pdf=sigma_add_p_pdf,
-        sigma_add_array=sigma_add_p_array,
+        sigma_add_arr=sigma_add_p_arr,
     )
 
     return StokesSigmaAdd(

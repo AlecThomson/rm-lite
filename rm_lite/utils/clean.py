@@ -27,13 +27,13 @@ TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
 class RMCleanResults(NamedTuple):
     """Results of the RM-CLEAN calculation"""
 
-    clean_fdf_array: np.ndarray
+    clean_fdf_arr: np.ndarray
     """The cleaned Faraday dispersion function cube"""
-    model_fdf_array: np.ndarray
+    model_fdf_arr: np.ndarray
     """The clean components cube"""
-    clean_iter_array: np.ndarray
+    clean_iter_arr: np.ndarray
     """The number of iterations for each pixel"""
-    resid_fdf_array: np.ndarray
+    resid_fdf_arr: np.ndarray
     """The residual Faraday dispersion function cube"""
 
 
@@ -83,91 +83,89 @@ def restore_fdf(
 
 
 def rmclean(
-    dirty_fdf_array: np.ndarray,
+    dirty_fdf_arr: np.ndarray,
     phi_arr_radm2: np.ndarray,
-    rmsf_array: np.ndarray,
+    rmsf_arr: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
     fwhm_rmsf_arr: np.ndarray,
     mask: float,
     threshold: float,
     max_iter: int = 1000,
     gain: float = 0.1,
-    mask_array: Optional[np.ndarray] = None,
+    mask_arr: Optional[np.ndarray] = None,
 ) -> RMCleanResults:
     _bad_result = RMCleanResults(
-        clean_fdf_array=dirty_fdf_array,
-        model_fdf_array=np.zeros_like(dirty_fdf_array),
-        clean_iter_array=np.zeros_like(phi_arr_radm2),
-        resid_fdf_array=dirty_fdf_array,
+        clean_fdf_arr=dirty_fdf_arr,
+        model_fdf_arr=np.zeros_like(dirty_fdf_arr),
+        clean_iter_arr=np.zeros_like(phi_arr_radm2),
+        resid_fdf_arr=dirty_fdf_arr,
     )
     # Sanity checks on array sizes
     n_phi = phi_arr_radm2.shape[0]
-    if n_phi != dirty_fdf_array.shape[0]:
-        logger.error("'phi_arr_radm2' and 'dirty_fdf_array' are not the same length.")
+    if n_phi != dirty_fdf_arr.shape[0]:
+        logger.error("'phi_arr_radm2' and 'dirty_fdf_arr' are not the same length.")
         return _bad_result
     n_phi2 = phi_double_arr_radm2.shape[0]
-    if not n_phi2 == rmsf_array.shape[0]:
-        logger.error("missmatch in 'phi_double_arr_radm2' and 'rmsf_array' length.")
+    if not n_phi2 == rmsf_arr.shape[0]:
+        logger.error("missmatch in 'phi_double_arr_radm2' and 'rmsf_arr' length.")
         return _bad_result
     if not (n_phi2 >= 2 * n_phi):
         logger.error("the Faraday depth of the RMSF must be twice the FDF.")
         return _bad_result
-    n_dimension = len(dirty_fdf_array.shape)
+    n_dimension = len(dirty_fdf_arr.shape)
     if not n_dimension <= 3:
         logger.error("FDF array dimensions must be <= 3.")
         return _bad_result
-    if not n_dimension == len(rmsf_array.shape):
+    if not n_dimension == len(rmsf_arr.shape):
         logger.error("the input RMSF and FDF must have the same number of axes.")
         return _bad_result
-    if not rmsf_array.shape[1:] == dirty_fdf_array.shape[1:]:
+    if not rmsf_arr.shape[1:] == dirty_fdf_arr.shape[1:]:
         logger.error("the xy dimesions of the RMSF and FDF must match.")
         return _bad_result
-    if mask_array is not None:
-        if not mask_array.shape == dirty_fdf_array.shape[1:]:
+    if mask_arr is not None:
+        if not mask_arr.shape == dirty_fdf_arr.shape[1:]:
             logger.error("pixel mask must match xy dimension of FDF cube.")
             return _bad_result
     else:
-        mask_array = np.ones(dirty_fdf_array.shape[1:], dtype=bool)
+        mask_arr = np.ones(dirty_fdf_arr.shape[1:], dtype=bool)
 
     # Reshape the FDF & RMSF array to 3 dimensions and mask array to 2
     if n_dimension == 1:
-        dirty_fdf_array = np.reshape(dirty_fdf_array, (dirty_fdf_array.shape[0], 1, 1))
-        rmsf_array = np.reshape(rmsf_array, (rmsf_array.shape[0], 1, 1))
-        mask_array = np.reshape(mask_array, (1, 1))
+        dirty_fdf_arr = np.reshape(dirty_fdf_arr, (dirty_fdf_arr.shape[0], 1, 1))
+        rmsf_arr = np.reshape(rmsf_arr, (rmsf_arr.shape[0], 1, 1))
+        mask_arr = np.reshape(mask_arr, (1, 1))
         fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (1, 1))
     elif n_dimension == 2:
-        dirty_fdf_array = np.reshape(
-            dirty_fdf_array, list(dirty_fdf_array.shape[:2]) + [1]
-        )
-        rmsf_array = np.reshape(rmsf_array, list(rmsf_array.shape[:2]) + [1])
-        mask_array = np.reshape(mask_array, (dirty_fdf_array.shape[1], 1))
-        fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (dirty_fdf_array.shape[1], 1))
+        dirty_fdf_arr = np.reshape(dirty_fdf_arr, list(dirty_fdf_arr.shape[:2]) + [1])
+        rmsf_arr = np.reshape(rmsf_arr, list(rmsf_arr.shape[:2]) + [1])
+        mask_arr = np.reshape(mask_arr, (dirty_fdf_arr.shape[1], 1))
+        fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (dirty_fdf_arr.shape[1], 1))
 
-    iter_count_array = np.zeros_like(mask_array, dtype=int)
+    iter_count_arr = np.zeros_like(mask_arr, dtype=int)
 
     # Determine which pixels have components above the cutoff
-    abs_fdf_cube = np.abs(np.nan_to_num(dirty_fdf_array))
+    abs_fdf_cube = np.abs(np.nan_to_num(dirty_fdf_arr))
     cutoff_mask = np.where(np.max(abs_fdf_cube, axis=0) >= mask, 1, 0)
     pixels_to_clean = np.rot90(np.where(cutoff_mask > 0))
 
-    num_pixels = dirty_fdf_array.shape[-1] * dirty_fdf_array.shape[-2]
+    num_pixels = dirty_fdf_arr.shape[-1] * dirty_fdf_arr.shape[-2]
     num_pixels_clean = len(pixels_to_clean)
     logger.info("Cleaning {:}/{:} spectra.".format(num_pixels_clean, num_pixels))
 
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
     # Residual is initially copies of dirty FDF, so that pixels that are not
     #  processed get correct values (but will be overridden when processed)
-    clean_fdf_spectrum = np.zeros_like(dirty_fdf_array)
-    model_fdf_spectrum = np.zeros(dirty_fdf_array.shape, dtype=complex)
-    resid_fdf_array = dirty_fdf_array.copy()
+    clean_fdf_spectrum = np.zeros_like(dirty_fdf_arr)
+    model_fdf_spectrum = np.zeros(dirty_fdf_arr.shape, dtype=complex)
+    resid_fdf_arr = dirty_fdf_arr.copy()
 
     # Loop through the pixels containing a polarised signal
     for yi, xi in tqdm(pixels_to_clean):
         clean_loop_results = minor_cycle(
             phi_arr_radm2=phi_arr_radm2,
             phi_double_arr_radm2=phi_double_arr_radm2,
-            dirty_fdf_spectrum=dirty_fdf_array[:, yi, xi],
-            rmsf_spectrum=rmsf_array[:, yi, xi],
+            dirty_fdf_spectrum=dirty_fdf_arr[:, yi, xi],
+            rmsf_spectrum=rmsf_arr[:, yi, xi],
             rmsf_fwhm=fwhm_rmsf_arr[yi, xi],
             mask=mask,
             threshold=threshold,
@@ -175,22 +173,22 @@ def rmclean(
             gain=gain,
         )
         clean_fdf_spectrum[:, yi, xi] = clean_loop_results.clean_fdf_spectrum
-        resid_fdf_array[:, yi, xi] = clean_loop_results.resid_fdf_spectrum
+        resid_fdf_arr[:, yi, xi] = clean_loop_results.resid_fdf_spectrum
         model_fdf_spectrum[:, yi, xi] = clean_loop_results.model_fdf_spectrum
-        iter_count_array[yi, xi] = clean_loop_results.iter_count
+        iter_count_arr[yi, xi] = clean_loop_results.iter_count
 
     # Restore the residual to the CLEANed FDF (moved outside of loop:
     # will now work for pixels/spectra without clean components)
-    clean_fdf_spectrum += resid_fdf_array
+    clean_fdf_spectrum += resid_fdf_arr
 
     # Remove redundant dimensions
     clean_fdf_spectrum = np.squeeze(clean_fdf_spectrum)
     model_fdf_spectrum = np.squeeze(model_fdf_spectrum)
-    iter_count_array = np.squeeze(iter_count_array)
-    resid_fdf_array = np.squeeze(resid_fdf_array)
+    iter_count_arr = np.squeeze(iter_count_arr)
+    resid_fdf_arr = np.squeeze(resid_fdf_arr)
 
     return RMCleanResults(
-        clean_fdf_spectrum, model_fdf_spectrum, iter_count_array, resid_fdf_array
+        clean_fdf_spectrum, model_fdf_spectrum, iter_count_arr, resid_fdf_arr
     )
 
 
@@ -206,7 +204,7 @@ def minor_loop(
     threshold: float,
     start_iter: int = 0,
     update_mask: bool = True,
-    peak_find_array: Optional[np.ndarray] = None,
+    peak_find_arr: Optional[np.ndarray] = None,
 ) -> MinorLoopResults:
     # Trust nothing
     resid_fdf_spectrum_mask = resid_fdf_spectrum_mask.copy()
@@ -216,15 +214,15 @@ def minor_loop(
     model_rmsf_spectrum = np.zeros_like(resid_fdf_spectrum)
     rmsf_spectrum = rmsf_spectrum.copy()
     phi_arr_radm2 = phi_arr_radm2.copy()
-    mask_array = ~resid_fdf_spectrum_mask.mask.copy()
-    mask_array_original = mask_array.copy()
+    mask_arr = ~resid_fdf_spectrum_mask.mask.copy()
+    mask_arr_original = mask_arr.copy()
     iter_count = start_iter
 
-    if peak_find_array is not None:
-        peak_find_array = peak_find_array.copy()
-        peak_find_array_mask = np.ma.array(peak_find_array, mask=~mask_array)
+    if peak_find_arr is not None:
+        peak_find_arr = peak_find_arr.copy()
+        peak_find_arr_mask = np.ma.array(peak_find_arr, mask=~mask_arr)
     else:
-        peak_find_array_mask = None
+        peak_find_arr_mask = None
 
     # Find the index of the peak of the RMSF
     max_rmsf_index = np.nanargmax(np.abs(rmsf_spectrum))
@@ -233,7 +231,7 @@ def minor_loop(
     # Assumes only integer shifts and symmetric RMSF
     n_phi_pad = int((len(phi_double_arr_radm2) - len(phi_arr_radm2)) / 2)
 
-    logger.info(f"Starting minor loop...cleaning {mask_array.sum()} pixels")
+    logger.info(f"Starting minor loop...cleaning {mask_arr.sum()} pixels")
     for iter_count in range(start_iter, max_iter + 1):
         if resid_fdf_spectrum_mask.mask.all():
             logger.warning(
@@ -251,8 +249,8 @@ def minor_loop(
             )
             break
         # Get the absolute peak channel, values and Faraday depth
-        if peak_find_array_mask is not None:
-            peak_fdf_index = np.ma.argmax(np.abs(peak_find_array_mask))
+        if peak_find_arr_mask is not None:
+            peak_fdf_index = np.ma.argmax(np.abs(peak_find_arr_mask))
         else:
             peak_fdf_index = np.ma.argmax(np.abs(resid_fdf_spectrum_mask))
         peak_fdf = resid_fdf_spectrum_mask[peak_fdf_index]
@@ -273,8 +271,8 @@ def minor_loop(
 
         # Subtract the product of the clean_component shifted RMSF from the residual FDF
         resid_fdf_spectrum -= clean_component * shifted_rmsf_spectrum
-        if peak_find_array is not None:
-            peak_find_array -= np.abs(clean_component * shifted_rmsf_spectrum)
+        if peak_find_arr is not None:
+            peak_find_arr -= np.abs(clean_component * shifted_rmsf_spectrum)
 
         # Restore the clean_component * a Gaussian to the cleaned FDF
         clean_fdf_spectrum += gaussian(
@@ -285,12 +283,12 @@ def minor_loop(
         )
         # Remake masked residual FDF
         if update_mask:
-            mask_array = np.abs(resid_fdf_spectrum) > mask
+            mask_arr = np.abs(resid_fdf_spectrum) > mask
             # Mask anything that was previously masked
-            mask_array = mask_array & mask_array_original
-        resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
-        if peak_find_array_mask is not None:
-            peak_find_array_mask = np.ma.array(peak_find_array, mask=~mask_array)
+            mask_arr = mask_arr & mask_arr_original
+        resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
+        if peak_find_arr_mask is not None:
+            peak_find_arr_mask = np.ma.array(peak_find_arr, mask=~mask_arr)
 
     return MinorLoopResults(
         clean_fdf_spectrum=clean_fdf_spectrum,
@@ -316,8 +314,8 @@ def minor_cycle(
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
 
-    mask_array = np.abs(dirty_fdf_spectrum) > mask
-    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
+    mask_arr = np.abs(dirty_fdf_spectrum) > mask
+    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     inital_loop_results = minor_loop(
         resid_fdf_spectrum_mask=resid_fdf_spectrum_mask,
@@ -335,9 +333,9 @@ def minor_cycle(
 
     # Deep clean
     # Mask where clean components have been added
-    mask_array = np.abs(inital_loop_results.model_fdf_spectrum) > 0
+    mask_arr = np.abs(inital_loop_results.model_fdf_spectrum) > 0
     resid_fdf_spectrum = inital_loop_results.resid_fdf_spectrum
-    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
+    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     deep_loop_results = minor_loop(
         resid_fdf_spectrum_mask=resid_fdf_spectrum_mask,
@@ -412,18 +410,18 @@ def scale_bias_function_cornwell(scales: np.ndarray) -> np.ndarray:
     return 1 - 0.6 * scales / scales.max()
 
 
-def hanning(x_array: np.ndarray, length: float) -> np.ndarray:
+def hanning(x_arr: np.ndarray, length: float) -> np.ndarray:
     """Hanning window function.
 
     Args:
-        x_array (np.ndarray): Array of x values
+        x_arr (np.ndarray): Array of x values
         length (float): Length of the window
 
     Returns:
         np.ndarray: Hanning window function array
     """
-    han = (1 / length) * np.cos(np.pi * x_array / length) ** 2
-    han = np.where(np.abs(x_array) < length / 2, han, 0)
+    han = (1 / length) * np.cos(np.pi * x_arr / length) ** 2
+    han = np.where(np.abs(x_arr) < length / 2, han, 0)
     return han
 
 
@@ -492,7 +490,7 @@ KERNEL_FUNCS: Dict[str, Callable] = {
 def convolve_fdf_scale(
     scale: float,
     fwhm: float,
-    fdf_array: np.ndarray,
+    fdf_arr: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
     sum_normalised: bool = True,
@@ -502,7 +500,7 @@ def convolve_fdf_scale(
     Args:
         scale (float): Scale parameter (relative to PSF FWHM)
         fwhm (float): FWHM of the RMSF
-        fdf_array (np.ndarray): FDF array (complex)
+        fdf_arr (np.ndarray): FDF array (complex)
         phi_double_arr_radm2 (np.ndarray): Double-length Faraday depth array (rad/m^2)
         kernel (Literal["tapered_quad", "gaussian"]): Kernel function
 
@@ -513,26 +511,26 @@ def convolve_fdf_scale(
         np.ndarray: Convolved FDF array
     """
     if scale == 0:
-        return fdf_array
+        return fdf_arr
     kernel_func = KERNEL_FUNCS.get(kernel, gaussian_scale_kernel_function)
     kernel_func_partial = partial(kernel_func, sum_normalised=sum_normalised)
-    kernel_array = kernel_func_partial(phi_double_arr_radm2, scale, fwhm)
+    kernel_arr = kernel_func_partial(phi_double_arr_radm2, scale, fwhm)
 
-    if np.iscomplexobj(fdf_array):
-        kernel_array = kernel_array * (1 + 1j) / np.sqrt(2)
+    if np.iscomplexobj(fdf_arr):
+        kernel_arr = kernel_arr * (1 + 1j) / np.sqrt(2)
 
-    if len(fdf_array) == len(phi_double_arr_radm2):
+    if len(fdf_arr) == len(phi_double_arr_radm2):
         # mode = "same"
         mode = "reflect"
     else:
         # mode = "valid"
         mode = "reflect"
-    # conv_spec = np.convolve(fdf_array, kernel_array, mode=mode)
-    conv_spec = convolve(fdf_array, kernel_array, mode=mode)
+    # conv_spec = np.convolve(fdf_arr, kernel_arr, mode=mode)
+    conv_spec = convolve(fdf_arr, kernel_arr, mode=mode)
     if mode == "valid":
         conv_spec = conv_spec[1:-1]
 
-    assert len(conv_spec) == len(fdf_array), "Convolved FDF has wrong length."
+    assert len(conv_spec) == len(fdf_arr), "Convolved FDF has wrong length."
 
     return conv_spec
 
@@ -540,7 +538,7 @@ def convolve_fdf_scale(
 def find_significant_scale(
     scales: np.ndarray,
     scale_bias: float,
-    fdf_array: np.ndarray,
+    fdf_arr: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
     fwhm: float,
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
@@ -551,7 +549,7 @@ def find_significant_scale(
     for i, scale in enumerate(scales):
         fdf_conv = convolve_fdf_scale(
             scale=scale,
-            fdf_array=fdf_array,
+            fdf_arr=fdf_arr,
             fwhm=fwhm,
             phi_double_arr_radm2=phi_double_arr_radm2,
             kernel=kernel,
@@ -589,10 +587,10 @@ def multiscale_minor_loop(
     clean_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
     rmsf_spectrum = rmsf_spectrum.copy()
     phi_arr_radm2 = phi_arr_radm2.copy()
-    mask_array = ~resid_fdf_spectrum_mask.mask.copy()
+    mask_arr = ~resid_fdf_spectrum_mask.mask.copy()
     iter_count = start_iter
 
-    logger.info(f"Starting multiscale cycles...cleaning {mask_array.sum()} pixels")
+    logger.info(f"Starting multiscale cycles...cleaning {mask_arr.sum()} pixels")
     for iter_count in range(start_iter, max_iter + 1):
         # Break conditions
         if resid_fdf_spectrum_mask.mask.all():
@@ -614,7 +612,7 @@ def multiscale_minor_loop(
         activated_scale, scale_parameter = find_significant_scale(
             scales=scales,
             scale_bias=scale_bias,
-            fdf_array=np.abs(resid_fdf_spectrum),
+            fdf_arr=np.abs(resid_fdf_spectrum),
             fwhm=rmsf_fwhm,
             phi_double_arr_radm2=phi_double_arr_radm2,
         )
@@ -622,11 +620,11 @@ def multiscale_minor_loop(
         logger.info(f"Cleaning activated scale: {activated_scale}")
         if activated_scale == 0:
             resid_fdf_spectrum_conv = resid_fdf_spectrum.copy()
-            # peak_find_array = np.abs(resid_fdf_spectrum)
+            # peak_find_arr = np.abs(resid_fdf_spectrum)
         else:
             resid_fdf_spectrum_conv_abs = convolve_fdf_scale(
                 scale=activated_scale,
-                fdf_array=np.abs(resid_fdf_spectrum),
+                fdf_arr=np.abs(resid_fdf_spectrum),
                 fwhm=rmsf_fwhm,
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 kernel=kernel,
@@ -635,9 +633,9 @@ def multiscale_minor_loop(
             resid_fdf_spectrum_conv = resid_fdf_spectrum_conv_abs * np.exp(
                 1j * np.angle(resid_fdf_spectrum)
             )
-            # peak_find_array = convolve_fdf_scale(
+            # peak_find_arr = convolve_fdf_scale(
             #     scale=activated_scale,
-            #     fdf_array=np.abs(resid_fdf_spectrum),
+            #     fdf_arr=np.abs(resid_fdf_spectrum),
             #     fwhm=rmsf_fwhm,
             #     phi_double_arr_radm2=phi_double_arr_radm2,
             #     kernel=kernel,
@@ -649,7 +647,7 @@ def multiscale_minor_loop(
         else:
             rmsf_spectrum_conv_abs = convolve_fdf_scale(
                 scale=activated_scale,
-                fdf_array=np.abs(rmsf_spectrum),
+                fdf_arr=np.abs(rmsf_spectrum),
                 fwhm=rmsf_fwhm,
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 kernel=kernel,
@@ -666,7 +664,7 @@ def multiscale_minor_loop(
         # Redo
         # rmsf_spectrum_conv = convolve_fdf_scale(
         #     scale=activated_scale,
-        #     fdf_array=rmsf_spectrum,
+        #     fdf_arr=rmsf_spectrum,
         #     fwhm=rmsf_fwhm,
         #     phi_double_arr_radm2=phi_double_arr_radm2,
         #     kernel=kernel,
@@ -674,9 +672,9 @@ def multiscale_minor_loop(
         # rmsf_spectrum_conv /= np.nanmax(np.abs(rmsf_spectrum_conv))
 
         if update_mask:
-            mask_array = np.abs(resid_fdf_spectrum_conv) > mask
+            mask_arr = np.abs(resid_fdf_spectrum_conv) > mask
         resid_fdf_spectrum_mask_conv = np.ma.array(
-            resid_fdf_spectrum_conv, mask=~mask_array
+            resid_fdf_spectrum_conv, mask=~mask_arr
         )
 
         conv_fwhm = fit_rmsf(
@@ -697,7 +695,7 @@ def multiscale_minor_loop(
             threshold=threshold,
             start_iter=iter_count,
             update_mask=update_mask,
-            # peak_find_array=peak_find_array,
+            # peak_find_arr=peak_find_arr,
         )
 
         # Convolve the clean components with the RMSF
@@ -709,7 +707,7 @@ def multiscale_minor_loop(
             clean_model = convolve_fdf_scale(
                 scale=activated_scale,
                 fwhm=rmsf_fwhm,
-                fdf_array=clean_deltas,
+                fdf_arr=clean_deltas,
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 kernel=kernel,
                 sum_normalised=True,
@@ -732,9 +730,9 @@ def multiscale_minor_loop(
         resid_fdf_spectrum -= shifted_rmsf
 
         if update_mask:
-            mask_array = np.abs(resid_fdf_spectrum) > mask
+            mask_arr = np.abs(resid_fdf_spectrum) > mask
 
-        resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
+        resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     return MinorLoopResults(
         clean_fdf_spectrum=clean_fdf_spectrum,
@@ -763,8 +761,8 @@ def multiscale_cycle(
 ) -> CleanLoopResults:
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
-    mask_array = np.abs(resid_fdf_spectrum) > mask
-    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
+    mask_arr = np.abs(resid_fdf_spectrum) > mask
+    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     initial_loop_results = multiscale_minor_loop(
         scales=scales,
@@ -786,11 +784,11 @@ def multiscale_cycle(
 
     # Deep clean
     # Mask where clean components have been added
-    mask_array = np.abs(initial_loop_results.model_fdf_spectrum) > 0
+    mask_arr = np.abs(initial_loop_results.model_fdf_spectrum) > 0
     resid_fdf_spectrum = initial_loop_results.resid_fdf_spectrum
-    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_array)
+    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
-    logger.info(f"Starting deep clean...cleaning {mask_array.sum()} pixels")
+    logger.info(f"Starting deep clean...cleaning {mask_arr.sum()} pixels")
     deep_loop_results = multiscale_minor_loop(
         scales=scales,
         scale_bias=scale_bias,
@@ -826,10 +824,10 @@ def multiscale_cycle(
 
 
 def mutliscale_rmclean(
-    freq_array_hz: np.ndarray,
-    dirty_fdf_array: np.ndarray,
+    freq_arr_hz: np.ndarray,
+    dirty_fdf_arr: np.ndarray,
     phi_arr_radm2: np.ndarray,
-    rmsf_array: np.ndarray,
+    rmsf_arr: np.ndarray,
     phi_double_arr_radm2: np.ndarray,
     fwhm_rmsf_arr: np.ndarray,
     mask: float,
@@ -839,62 +837,60 @@ def mutliscale_rmclean(
     gain: float = 0.1,
     scale_bias: float = 0.9,
     scales: Optional[np.ndarray] = None,
-    mask_array: Optional[np.ndarray] = None,
+    mask_arr: Optional[np.ndarray] = None,
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
 ) -> RMCleanResults:
     _bad_result = RMCleanResults(
-        clean_fdf_array=dirty_fdf_array,
-        model_fdf_array=np.zeros_like(dirty_fdf_array),
-        clean_iter_array=np.zeros_like(phi_arr_radm2),
-        resid_fdf_array=dirty_fdf_array,
+        clean_fdf_arr=dirty_fdf_arr,
+        model_fdf_arr=np.zeros_like(dirty_fdf_arr),
+        clean_iter_arr=np.zeros_like(phi_arr_radm2),
+        resid_fdf_arr=dirty_fdf_arr,
     )
     # Sanity checks on array sizes
     n_phi = phi_arr_radm2.shape[0]
-    if n_phi != dirty_fdf_array.shape[0]:
-        logger.error("'phi_arr_radm2' and 'dirty_fdf_array' are not the same length.")
+    if n_phi != dirty_fdf_arr.shape[0]:
+        logger.error("'phi_arr_radm2' and 'dirty_fdf_arr' are not the same length.")
         return _bad_result
     n_phi2 = phi_double_arr_radm2.shape[0]
-    if not n_phi2 == rmsf_array.shape[0]:
-        logger.error("missmatch in 'phi_double_arr_radm2' and 'rmsf_array' length.")
+    if not n_phi2 == rmsf_arr.shape[0]:
+        logger.error("missmatch in 'phi_double_arr_radm2' and 'rmsf_arr' length.")
         return _bad_result
     if not (n_phi2 >= 2 * n_phi):
         logger.error("the Faraday depth of the RMSF must be twice the FDF.")
         return _bad_result
-    n_dimension = len(dirty_fdf_array.shape)
+    n_dimension = len(dirty_fdf_arr.shape)
     if not n_dimension <= 3:
         logger.error("FDF array dimensions must be <= 3.")
         return _bad_result
-    if not n_dimension == len(rmsf_array.shape):
+    if not n_dimension == len(rmsf_arr.shape):
         logger.error("the input RMSF and FDF must have the same number of axes.")
         return _bad_result
-    if not rmsf_array.shape[1:] == dirty_fdf_array.shape[1:]:
+    if not rmsf_arr.shape[1:] == dirty_fdf_arr.shape[1:]:
         logger.error("the xy dimesions of the RMSF and FDF must match.")
         return _bad_result
-    if mask_array is not None:
-        if not mask_array.shape == dirty_fdf_array.shape[1:]:
+    if mask_arr is not None:
+        if not mask_arr.shape == dirty_fdf_arr.shape[1:]:
             logger.error("pixel mask must match xy dimension of FDF cube.")
             return _bad_result
     else:
-        mask_array = np.ones(dirty_fdf_array.shape[1:], dtype=bool)
+        mask_arr = np.ones(dirty_fdf_arr.shape[1:], dtype=bool)
 
     # Reshape the FDF & RMSF array to 3 dimensions and mask array to 2
     if n_dimension == 1:
-        dirty_fdf_array = np.reshape(dirty_fdf_array, (dirty_fdf_array.shape[0], 1, 1))
-        rmsf_array = np.reshape(rmsf_array, (rmsf_array.shape[0], 1, 1))
-        mask_array = np.reshape(mask_array, (1, 1))
+        dirty_fdf_arr = np.reshape(dirty_fdf_arr, (dirty_fdf_arr.shape[0], 1, 1))
+        rmsf_arr = np.reshape(rmsf_arr, (rmsf_arr.shape[0], 1, 1))
+        mask_arr = np.reshape(mask_arr, (1, 1))
         fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (1, 1))
     elif n_dimension == 2:
-        dirty_fdf_array = np.reshape(
-            dirty_fdf_array, list(dirty_fdf_array.shape[:2]) + [1]
-        )
-        rmsf_array = np.reshape(rmsf_array, list(rmsf_array.shape[:2]) + [1])
-        mask_array = np.reshape(mask_array, (dirty_fdf_array.shape[1], 1))
-        fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (dirty_fdf_array.shape[1], 1))
+        dirty_fdf_arr = np.reshape(dirty_fdf_arr, list(dirty_fdf_arr.shape[:2]) + [1])
+        rmsf_arr = np.reshape(rmsf_arr, list(rmsf_arr.shape[:2]) + [1])
+        mask_arr = np.reshape(mask_arr, (dirty_fdf_arr.shape[1], 1))
+        fwhm_rmsf_arr = np.reshape(fwhm_rmsf_arr, (dirty_fdf_arr.shape[1], 1))
 
     # Compute the scale parameters
     rmsf_params = compute_rmsf_params(
-        freq_array_hz=freq_array_hz,
-        weight_array=np.ones_like(freq_array_hz),
+        freq_arr_hz=freq_arr_hz,
+        weight_arr=np.ones_like(freq_arr_hz),
         super_resolution=False,
     )
     max_scale = rmsf_params.phi_max_scale / rmsf_params.rmsf_fwhm_meas
@@ -910,23 +906,23 @@ def mutliscale_rmclean(
         logger.warning(
             f"Maximum scale parameter {scales.max()} is greater than the RMSF max scale {max_scale}."
         )
-    iter_count_array = np.zeros_like(mask_array, dtype=int)
+    iter_count_arr = np.zeros_like(mask_arr, dtype=int)
 
     # Determine which pixels have components above the cutoff
-    abs_fdf_cube = np.abs(np.nan_to_num(dirty_fdf_array))
+    abs_fdf_cube = np.abs(np.nan_to_num(dirty_fdf_arr))
     cutoff_mask = np.where(np.max(abs_fdf_cube, axis=0) >= mask, 1, 0)
     pixels_to_clean = np.rot90(np.where(cutoff_mask > 0))
 
-    num_pixels = dirty_fdf_array.shape[-1] * dirty_fdf_array.shape[-2]
+    num_pixels = dirty_fdf_arr.shape[-1] * dirty_fdf_arr.shape[-2]
     num_pixels_clean = len(pixels_to_clean)
     logger.info("Cleaning {:}/{:} spectra.".format(num_pixels_clean, num_pixels))
 
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
     # Residual is initially copies of dirty FDF, so that pixels that are not
     #  processed get correct values (but will be overridden when processed)
-    clean_fdf_spectrum = np.zeros_like(dirty_fdf_array)
-    model_fdf_spectrum = np.zeros(dirty_fdf_array.shape, dtype=complex)
-    resid_fdf_array = dirty_fdf_array.copy()
+    clean_fdf_spectrum = np.zeros_like(dirty_fdf_arr)
+    model_fdf_spectrum = np.zeros(dirty_fdf_arr.shape, dtype=complex)
+    resid_fdf_arr = dirty_fdf_arr.copy()
 
     # Loop through the pixels containing a polarised signal
     for yi, xi in tqdm(pixels_to_clean):
@@ -935,8 +931,8 @@ def mutliscale_rmclean(
             scale_bias=scale_bias,
             phi_arr_radm2=phi_arr_radm2,
             phi_double_arr_radm2=phi_double_arr_radm2,
-            dirty_fdf_spectrum=dirty_fdf_array[:, yi, xi],
-            rmsf_spectrum=rmsf_array[:, yi, xi],
+            dirty_fdf_spectrum=dirty_fdf_arr[:, yi, xi],
+            rmsf_spectrum=rmsf_arr[:, yi, xi],
             rmsf_fwhm=fwhm_rmsf_arr[yi, xi],
             mask=mask,
             threshold=threshold,
@@ -946,20 +942,20 @@ def mutliscale_rmclean(
             kernel=kernel,
         )
         clean_fdf_spectrum[:, yi, xi] = clean_loop_results.clean_fdf_spectrum
-        resid_fdf_array[:, yi, xi] = clean_loop_results.resid_fdf_spectrum
+        resid_fdf_arr[:, yi, xi] = clean_loop_results.resid_fdf_spectrum
         model_fdf_spectrum[:, yi, xi] = clean_loop_results.model_fdf_spectrum
-        iter_count_array[yi, xi] = clean_loop_results.iter_count
+        iter_count_arr[yi, xi] = clean_loop_results.iter_count
 
     # Restore the residual to the CLEANed FDF (moved outside of loop:
     # will now work for pixels/spectra without clean components)
-    clean_fdf_spectrum += resid_fdf_array
+    clean_fdf_spectrum += resid_fdf_arr
 
     # Remove redundant dimensions
     clean_fdf_spectrum = np.squeeze(clean_fdf_spectrum)
     model_fdf_spectrum = np.squeeze(model_fdf_spectrum)
-    iter_count_array = np.squeeze(iter_count_array)
-    resid_fdf_array = np.squeeze(resid_fdf_array)
+    iter_count_arr = np.squeeze(iter_count_arr)
+    resid_fdf_arr = np.squeeze(resid_fdf_arr)
 
     return RMCleanResults(
-        clean_fdf_spectrum, model_fdf_spectrum, iter_count_array, resid_fdf_array
+        clean_fdf_spectrum, model_fdf_spectrum, iter_count_arr, resid_fdf_arr
     )
