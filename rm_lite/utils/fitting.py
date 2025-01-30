@@ -260,9 +260,10 @@ def static_fit(
     )
     stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
     ssr = np.sum((stokes_i_arr - stokes_i_model_arr) ** 2)
-    aic = akaike_info_criterion_lsq(
-        ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz)
-    )
+    with np.errstate(divide="ignore"):
+        aic = akaike_info_criterion_lsq(
+            ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz)
+        )
 
     return FitResult(
         popt=popt,

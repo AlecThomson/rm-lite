@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Literal, NamedTuple
 
 import finufft
@@ -1025,9 +1026,12 @@ def get_fdf_parameters(
         end = int(i + fwhm_rmsf_arr_pix / 2)
         mask[start : end + 2] = False
 
-    fdf_error_mad: float = mad_std(
-        np.concatenate([fdf_arr[mask].real, fdf_arr[mask].imag])
-    )
+    # ignore mean of empty slice warning
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        fdf_error_mad: float = mad_std(
+            np.concatenate([fdf_arr[mask].real, fdf_arr[mask].imag])
+        )
 
     n_good_phi = np.isfinite(fdf_arr).sum()
     lambda_sq_arr_m2_variance = (

@@ -38,7 +38,7 @@ class MockModel(NamedTuple):
     fwhm: float
 
 
-@pytest.fixture()
+@pytest.fixture
 def racs_model() -> MockModel:
     fwhm = 49.57
     rm = RNG.uniform(-1000, 1000)
@@ -49,7 +49,7 @@ def racs_model() -> MockModel:
     return MockModel(flux, frac_pol, rm, pa, fwhm)
 
 
-@pytest.fixture()
+@pytest.fixture
 def racs_data(racs_model):
     freqs = np.arange(744, 1032, 1) * 1e6
     lsq = freq_to_lambda2(freqs)
@@ -153,9 +153,9 @@ def test_arange():
         res = arange(
             start, stop, step, include_start=include_start, include_stop=include_stop
         )
-        assert np.allclose(
-            res, res_exp
-        ), f"Unexpected result in {desc}: {res=}, {res_exp=}"
+        assert np.allclose(res, res_exp), (
+            f"Unexpected result in {desc}: {res=}, {res_exp=}"
+        )
 
 
 def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
