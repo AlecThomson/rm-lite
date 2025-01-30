@@ -1,7 +1,35 @@
-![Tests](https://github.com/CIRADA-Tools/RM-tools/actions/workflows/python-package.yml/badge.svg)
-[![pre-commit.ci status](https://results.pre-commit.ci/badge/github/CIRADA-Tools/RM-Tools/master.svg)](https://results.pre-commit.ci/latest/github/CIRADA-Tools/RM-Tools/master)
-
 # RM-lite
+
+[![Actions Status][actions-badge]][actions-link]
+[![Codecov Status][codecov-badge]][codecov-link]
+[![Documentation Status][rtd-badge]][rtd-link]
+
+[![PyPI version][pypi-version]][pypi-link]
+
+<!-- [![Conda-Forge][conda-badge]][conda-link] -->
+
+[![PyPI platforms][pypi-platforms]][pypi-link]
+
+<!-- [![GitHub Discussion][github-discussions-badge]][github-discussions-link] -->
+
+<!-- SPHINX-START -->
+
+<!-- prettier-ignore-start -->
+[codecov-link]:             https://codecov.io/gh/AlecThomson/rm-lite
+[codecov-badge]:            https://codecov.io/gh/AlecThomson/rm-lite/graph/badge.svg?token=7EARBRN20D
+[actions-badge]:            https://github.com/AlecThomson/rm-lite/workflows/CI/badge.svg
+[actions-link]:             https://github.com/AlecThomson/rm-lite/actions
+[conda-badge]:              https://img.shields.io/conda/vn/conda-forge/rm-lite
+[conda-link]:               https://github.com/conda-forge/rm-lite-feedstock
+[github-discussions-badge]: https://img.shields.io/static/v1?label=Discussions&message=Ask&color=blue&logo=github
+[github-discussions-link]:  https://github.com/AlecThomson/rm-lite/discussions
+[pypi-link]:                https://pypi.org/project/rm-lite/
+[pypi-platforms]:           https://img.shields.io/pypi/pyversions/rm-lite
+[pypi-version]:             https://img.shields.io/pypi/v/rm-lite
+[rtd-badge]:                https://readthedocs.org/projects/rm-lite/badge/?version=latest
+[rtd-link]:                 https://rm-lite.readthedocs.io/en/latest/?badge=latest
+
+<!-- prettier-ignore-end -->
 
 A mini fork of RM-Tools - RM-synthesis, RM-clean and QU-fitting on polarised
 radio spectra.
