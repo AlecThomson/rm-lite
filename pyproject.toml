@@ -149,7 +149,7 @@ testpaths = [
 
 
 [tool.coverage]
-run.source = ["cutout_fits"]
+run.source = ["rm_lite"]
 report.exclude_also = [
     '\.\.\.',
     'if typing.TYPE_CHECKING:',
