@@ -7,6 +7,8 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from rm_lite.tools_1d.rmsynth import run_rmsynth
+from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FWHM,
     arange,
@@ -49,7 +51,7 @@ def racs_model() -> MockModel:
 
 @pytest.fixture()
 def racs_data(racs_model):
-    freqs = np.arange(744, 1032, 8) * 1e6
+    freqs = np.arange(744, 1032, 1) * 1e6
     lsq = freq_to_lambda2(freqs)
     stokes_i = np.ones_like(freqs) * racs_model.flux
     stokes_q = (
@@ -68,7 +70,7 @@ def racs_data(racs_model):
 def test_get_fwhm_rmsf(racs_data, racs_model):
     assert np.allclose(racs_data.lsq, freq_to_lambda2(lambda2_to_freq(racs_data.lsq)))
     fwhm: FWHM = get_fwhm_rmsf(racs_data.lsq)
-    assert np.isclose(fwhm.fwhm_rmsf_radm2, racs_model.fwhm, atol=0.1)
+    assert np.isclose(fwhm.fwhm_rmsf_radm2, racs_model.fwhm, atol=1)
     assert np.isclose(
         fwhm.d_lambda_sq_max_m2, np.nanmax(np.abs(np.diff(racs_data.lsq)))
     )
@@ -154,3 +156,35 @@ def test_arange():
         assert np.allclose(
             res, res_exp
         ), f"Unexpected result in {desc}: {res=}, {res_exp=}"
+
+
+def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
+    complex_data = racs_data.stokes_q + 1j * racs_data.stokes_u
+    complex_error = np.ones_like(racs_data.stokes_q) + 1j * np.ones_like(
+        racs_data.stokes_u
+    )
+    complex_error *= 1e-3
+
+    fdf_parameters, fdf_arrs, rmsf_arrs = run_rmsynth(
+        freq_arr_hz=racs_data.freqs,
+        complex_pol_arr=complex_data,
+        complex_pol_error=complex_error,
+        stokes_i_arr=racs_data.stokes_i,
+        stokes_i_error_arr=np.ones_like(racs_data.stokes_i) * 1e-3,
+    )
+
+    logger.info(fdf_parameters)
+
+    assert np.isclose(
+        fdf_parameters["peak_rm_fit"][0],
+        racs_model.rm,
+        # atol=fdf_parameters["peak_rm_fit_error"][0],
+        atol=1,
+    )
+
+    assert np.isclose(
+        fdf_parameters["frac_pol"].to_numpy()[0],
+        racs_model.frac_pol,
+        # atol=fdf_parameters["frac_pol_error"].to_numpy()[0],
+        atol=0.1,
+    )

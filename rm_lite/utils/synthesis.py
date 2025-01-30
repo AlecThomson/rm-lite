@@ -460,7 +460,6 @@ class RMSFParams(NamedTuple):
 def compute_rmsf_params(
     freq_arr_hz: NDArray[np.float64],
     weight_arr: NDArray[np.float64],
-    super_resolution: bool = False,
 ) -> RMSFParams:
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
@@ -469,8 +468,6 @@ def compute_rmsf_params(
     lam_sq_0_m2 = scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2)
     if not np.isfinite(lam_sq_0_m2):
         lam_sq_0_m2 = np.nanmean(lambda_sq_arr_m2)
-    if super_resolution:
-        lam_sq_0_m2 = 0.0
 
     lambda_sq_m2_max = np.nanmax(lambda_sq_arr_m2)
     lambda_sq_m2_min = np.nanmin(lambda_sq_arr_m2)
@@ -870,7 +867,7 @@ def get_rmsf_nufft(
         RMSFResults: rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_arr
     """
     phi_double_arr_radm2 = make_double_phi_arr(phi_arr_radm2)
-
+    weight_arr = weight_arr.copy()
     weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Set the mask array (default to 1D, no masked channels)
@@ -909,17 +906,6 @@ def get_rmsf_nufft(
     mskPlanes = np.where(flag_xy_sum == num_pixels, 0, 1)
     weight_arr *= mskPlanes
 
-    # Check for isolated clumps of flags (# flags in a plane not 0 or num_pixels)
-    flag_totals_list = np.unique(flag_xy_sum).tolist()
-    try:
-        flag_totals_list.remove(0)
-    except Exception as e:
-        logger.warning(e)
-    try:
-        flag_totals_list.remove(num_pixels)
-    except Exception as e:
-        logger.warning(e)
-
     fwhm_rmsf_radm2, _, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
     # Calculate the RMSF at each pixel
     # The K value used to scale each RMSF must take into account
@@ -954,7 +940,9 @@ def get_rmsf_nufft(
     if do_fit_rmsf:
         logger.info("Fitting main lobe in each RMSF spectrum.")
         logger.info("> This may take some time!")
-        for i in trange(num_pixels, desc="Fitting RMSF by pixel"):
+        for i in trange(
+            num_pixels, desc="Fitting RMSF by pixel", disable=num_pixels == 1
+        ):
             try:
                 fitted_rmsf = fit_rmsf(
                     rmsf_to_fit_arr=(
@@ -967,6 +955,8 @@ def get_rmsf_nufft(
                 )
                 fit_status = True
             except Exception as e:
+                if num_pixels == 1:
+                    raise e
                 logger.error(f"Failed to fit RMSF at pixel {i}.")
                 logger.error(e)
                 logger.warning("Setting RMSF FWHM to default value.")
@@ -1139,6 +1129,8 @@ def get_fdf_parameters(
             "n_channels": n_good_chan,
             "median_d_freq_hz": np.nanmedian(np.diff(freq_arr_hz[good_chan_idx])),
             "frac_pol": peak_pi_fit_debias / stokes_i_reference_flux,
+            "frac_pol_error": theoretical_noise.fdf_error_noise
+            / stokes_i_reference_flux,
             "sigma_add": stokes_sigma_add.sigma_add_p.sigma_add,
             "sigma_add_minus": stokes_sigma_add.sigma_add_p.sigma_add_minus,
             "sigma_add_plus": stokes_sigma_add.sigma_add_p.sigma_add_plus,

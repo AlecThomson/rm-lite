@@ -48,7 +48,7 @@ class RMSynth1DResults(NamedTuple):
 
     fdf_parameters: pl.DataFrame
     """ FDF parameters """
-    rmsynth_arrs: pl.DataFrame
+    fdf_arrs: pl.DataFrame
     """ RMSynth arrays """
     rmsf_arrs: pl.DataFrame
     """ RMSF arrays """
@@ -134,7 +134,7 @@ def _run_rmsynth(
         phi_arr_radm2=rmsynth_params.phi_arr_radm2,
         weight_arr=rmsynth_params.weight_arr,
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
-        mask_arr=no_nan_idx,
+        mask_arr=~no_nan_idx,
         do_fit_rmsf=fdf_options.do_fit_rmsf,
         do_fit_rmsf_real=fdf_options.do_fit_rmsf_real,
     )
@@ -158,7 +158,7 @@ def _run_rmsynth(
         lambda2_to_freq(rmsynth_params.lam_sq_0_m2)
     )
     fdf_dirty_arr *= stokes_i_reference_flux
-    theoretical_noise = theoretical_noise.with_options(
+    theoretical_noise = theoretical_noise.with_options(  # type: ignore[no-untyped-call]
         fdf_error_noise=theoretical_noise.fdf_error_noise * stokes_i_reference_flux,
         fdf_q_noise=theoretical_noise.fdf_q_noise * stokes_i_reference_flux,
         fdf_u_noise=theoretical_noise.fdf_u_noise * stokes_i_reference_flux,
@@ -189,7 +189,7 @@ def _run_rmsynth(
     rmsf_arrs = pl.DataFrame(
         {
             "phi2_arr_radm2": rmsf_result.phi_double_arr_radm2,
-            "rmsf_arr": rmsf_result.rmsf_arr,
+            "rmsf_arr": rmsf_result.rmsf_cube,
         }
     )
 
