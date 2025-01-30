@@ -154,3 +154,4 @@ tests/models_ns
 .DS_Store
 *.ipynb
 scratch.ipynb
+rm_lite/_version.py
