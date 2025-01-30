@@ -51,6 +51,17 @@ dev = [
     "pytest-cov",
     "nox",
 ]
+docs = [
+    "sphinx>=7.0",
+    "myst_parser>=0.13",
+    "sphinx_copybutton",
+    "sphinx_autodoc_typehints",
+    "furo>=2023.08.17",
+    "sphinx-autoapi",
+    "nbsphinx",
+    "jupyter",
+    "matplotlib",
+]
 
 [tool.hatch]
 version.source = "vcs"
@@ -138,7 +149,7 @@ testpaths = [
 
 
 [tool.coverage]
-run.source = ["cutout_fits"]
+run.source = ["rm_lite"]
 report.exclude_also = [
     '\.\.\.',
     'if typing.TYPE_CHECKING:',
