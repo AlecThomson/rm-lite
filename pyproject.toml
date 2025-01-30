@@ -101,8 +101,21 @@ isort.required-imports = ["from __future__ import annotations"]
 files = ["rm_tools", "tests"]
 python_version = "3.9"
 warn_unused_configs = true
-strict = false
+strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 warn_unreachable = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = "spinifex.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = ["astropy.*", "requests", "casacore.*", "unlzw3.*", "ppigrf.*", "PyIRI.*"]
+ignore_missing_imports = true
+
+
+[tool.typos.default.extend-identifiers]
+arange = "arange"

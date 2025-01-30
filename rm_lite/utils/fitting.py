@@ -1,27 +1,32 @@
 from __future__ import annotations
 
-from typing import Callable, Literal, NamedTuple
+from typing import Literal, NamedTuple, Protocol
 
 import numpy as np
 from astropy.modeling.models import Gaussian1D
 from astropy.stats import akaike_info_criterion_lsq
-from scipy.optimize import curve_fit
+from numpy.typing import ArrayLike, NDArray
+from scipy import optimize
 
 from rm_lite.utils.logging import logger
 
 logger.setLevel("INFO")
 
-GAUSSIAN_SIGMA_TO_FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
+GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
+
+
+class StokesIModel(Protocol):
+    def __call__(self, x: NDArray[np.float64]) -> NDArray[np.float64]: ...
 
 
 class FitResult(NamedTuple):
     """Results of a Stokes I fit"""
 
-    popt: np.ndarray
+    popt: ArrayLike
     """Best fit parameters"""
-    pcov: np.ndarray
+    pcov: ArrayLike
     """Covariance matrix of the fit"""
-    stokes_i_model_func: Callable
+    stokes_i_model_func: StokesIModel
     """Function of the best fit model"""
     aic: float
     """Akaike Information Criterion of the fit"""
@@ -39,11 +44,11 @@ class FDFFitResult(NamedTuple):
 
 
 def fwhm_to_sigma(fwhm: float) -> float:
-    return fwhm / GAUSSIAN_SIGMA_TO_FWHM
+    return float(fwhm / GAUSSIAN_SIGMA_TO_FWHM)
 
 
 def sigma_to_fwhm(sigma: float) -> float:
-    return sigma * GAUSSIAN_SIGMA_TO_FWHM
+    return float(sigma * GAUSSIAN_SIGMA_TO_FWHM)
 
 
 def gaussian_integrand(
@@ -59,16 +64,16 @@ def gaussian_integrand(
     if stddev is None:
         msg = "stddev cannot be None"
         raise ValueError(msg)
-    return amplitude * stddev * np.sqrt(2 * np.pi)
+    return float(amplitude * stddev * np.sqrt(2 * np.pi))
 
 
 def gaussian(
-    x: np.ndarray,
+    x: NDArray[np.float64],
     amplitude: float | complex,
     mean: float,
     stddev: float | None = None,
     fwhm: float | None = None,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     if stddev is None and fwhm is None:
         msg = "Must provide either stddev or fwhm."
         raise ValueError(msg)
@@ -82,11 +87,11 @@ def gaussian(
 
 
 def unit_gaussian(
-    x: np.ndarray,
+    x: NDArray[np.float64],
     mean: float,
     stddev: float | None = None,
     fwhm: float | None = None,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     if stddev is None and fwhm is None:
         msg = "Must provide either stddev or fwhm."
         raise ValueError(msg)
@@ -96,8 +101,8 @@ def unit_gaussian(
 
 
 def unit_centred_gaussian(
-    x: np.ndarray, stddev: float | None = None, fwhm: float | None = None
-) -> np.ndarray:
+    x: NDArray[np.float64], stddev: float | None = None, fwhm: float | None = None
+) -> NDArray[np.float64]:
     if stddev is None and fwhm is None:
         msg = "Must provide either stddev or fwhm."
         raise ValueError(msg)
@@ -107,8 +112,8 @@ def unit_centred_gaussian(
 
 
 def fit_rmsf(
-    rmsf_to_fit_arr: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
+    rmsf_to_fit_arr: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
 ) -> float:
     rmsf_to_fit_arr = rmsf_to_fit_arr.copy()
@@ -122,7 +127,7 @@ def fit_rmsf(
         start = int(i - sigma_rmsf_arr_pix / 2)
         end = int(i + sigma_rmsf_arr_pix / 2)
         mask[start : end + 2] = True
-    popt, pcov = curve_fit(
+    popt, pcov = optimize.curve_fit(
         unit_centred_gaussian,
         phi_double_arr_radm2[mask],
         rmsf_to_fit_arr[mask],
@@ -133,8 +138,8 @@ def fit_rmsf(
 
 
 def fit_fdf(
-    fdf_to_fit_arr: np.ndarray,
-    phi_arr_radm2: np.ndarray,
+    fdf_to_fit_arr: NDArray[np.float64],
+    phi_arr_radm2: NDArray[np.float64],
     fwhm_fdf_radm2: float,
 ) -> FDFFitResult:
     d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
@@ -149,7 +154,7 @@ def fit_fdf(
     amplitude_guess = np.nanmax(fdf_to_fit_arr[mask])
     mean_guess = phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])]
     stddev_guess = fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2)))
-    popt, pcov = curve_fit(
+    popt, pcov = optimize.curve_fit(
         gaussian,
         phi_arr_radm2[mask],
         fdf_to_fit_arr[mask],
@@ -164,8 +169,8 @@ def fit_fdf(
     )
 
 
-def polynomial(order: int) -> Callable:
-    def poly_func(x: np.ndarray, *params) -> np.ndarray:
+def polynomial(order: int) -> StokesIModel:
+    def poly_func(x: NDArray[np.float64], *params) -> NDArray[np.float64]:
         if len(params) != order + 1:
             msg = f"Polynomial function of order {order} requires {order + 1} parameters, {len(params)} given."
             raise ValueError(msg)
@@ -177,8 +182,8 @@ def polynomial(order: int) -> Callable:
     return poly_func
 
 
-def power_law(order: int) -> Callable:
-    def power_func(x: np.ndarray, *params) -> np.ndarray:
+def power_law(order: int) -> StokesIModel:
+    def power_func(x: NDArray[np.float64], *params) -> NDArray[np.float64]:
         if len(params) != order + 1:
             msg = f"Power law function of order {order} requires {order + 1} parameters, {len(params)} given."
             raise ValueError(msg)
@@ -190,7 +195,9 @@ def power_law(order: int) -> Callable:
     return power_func
 
 
-def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> tuple[float, int, int]:
+def best_aic_func(
+    aics: NDArray[np.float64], n_param: NDArray[np.int32]
+) -> tuple[float, int, int]:
     """Find the best AIC for a set of AICs using Occam's razor."""
     # Find the best AIC
     best_aic_idx = int(np.nanargmin(aics))
@@ -217,10 +224,10 @@ def best_aic_func(aics: np.ndarray, n_param: np.ndarray) -> tuple[float, int, in
 
 
 def static_fit(
-    freq_arr_hz: np.ndarray,
+    freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
-    stokes_i_arr: np.ndarray,
-    stokes_i_error_arr: np.ndarray,
+    stokes_i_arr: NDArray[np.float64],
+    stokes_i_error_arr: NDArray[np.float64],
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
@@ -242,7 +249,7 @@ def static_fit(
     bounds[0][0] = 0.0
     if (stokes_i_error_arr == 0).all():
         stokes_i_error_arr = None
-    popt, pcov = curve_fit(
+    popt, pcov = optimize.curve_fit(
         fit_func,
         freq_arr_hz / ref_freq_hz,
         stokes_i_arr,
@@ -266,16 +273,16 @@ def static_fit(
 
 
 def dynamic_fit(
-    freq_arr_hz: np.ndarray,
+    freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
-    stokes_i_arr: np.ndarray,
-    stokes_i_error_arr: np.ndarray,
+    stokes_i_arr: NDArray[np.float64],
+    stokes_i_error_arr: NDArray[np.float64],
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
     orders = np.arange(fit_order + 1)
     n_parameters = orders + 1
-    fit_results = []
+    fit_results: list[FitResult] = []
 
     for _i, order in enumerate(orders):
         fit_result = static_fit(
@@ -300,10 +307,10 @@ def dynamic_fit(
 
 
 def fit_stokes_i_model(
-    freq_arr_hz: np.ndarray,
+    freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
-    stokes_i_arr: np.ndarray,
-    stokes_i_error_arr: np.ndarray,
+    stokes_i_arr: NDArray[np.float64],
+    stokes_i_error_arr: NDArray[np.float64],
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:

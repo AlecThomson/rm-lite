@@ -8,7 +8,7 @@ from time import time
 from typing import NamedTuple
 
 import numpy as np
-from rm_lite.utils.fitting import fit_rmsf
+from numpy.typing import NDArray
 from rm_lite.utils.synthesis import get_rmsf_nufft, make_phi_arr, rmsynth_nufft
 from tqdm import trange
 
@@ -19,21 +19,21 @@ logger.setLevel(logging.INFO)
 class FakeData(NamedTuple):
     """Fake data for testing RM-synthesis"""
 
-    freq: np.ndarray
+    freq: NDArray[np.float64]
     """Frequency array (Hz)"""
-    lsq: np.ndarray
+    lsq: NDArray[np.float64]
     """Wavelength^2 array (m^2)"""
     rm: float
     """Rotation Measure (rad/m^2)"""
-    stokes_q: np.ndarray
+    stokes_q: NDArray[np.float64]
     """Stokes Q array"""
-    stokes_u: np.ndarray
+    stokes_u: NDArray[np.float64]
     """Stokes U array"""
-    weights: np.ndarray
+    weights: NDArray[np.float64]
     """Weights array"""
     lsq_0: float
     """Weighted mean of lsq"""
-    phis: np.ndarray
+    phis: NDArray[np.float64]
     """Faraday depth array (rad/m^2)"""
 
 
@@ -179,8 +179,6 @@ def get_rmsf_planes_old(
     mskArr=None,
     lam0Sq_m2=None,
     double=True,
-    fitRMSF=False,
-    fitRMSFreal=False,
     nBits=32,
     verbose=False,
     log=print,
@@ -330,23 +328,6 @@ def get_rmsf_planes_old(
         fwhmRMSFArr = np.ones((nY, nX), dtype=dtFloat) * fwhmRMSF
         statArr = np.ones((nY, nX), dtype="int") * (-1)
 
-        # Fit the RMSF main lobe
-        if fitRMSF:
-            if verbose:
-                log("Fitting main lobe in each RMSF spectrum.")
-                log("> This may take some time!")
-            k = 0
-            for i in trange(nX, desc="Fitting RMSF by pixel", disable=not verbose):
-                for j in range(nY):
-                    k += 1
-                    if fitRMSFreal:
-                        mp = fit_rmsf(phi2Arr, RMSFcube[:, j, i].real)
-                    else:
-                        mp = fit_rmsf(phi2Arr, np.abs(RMSFcube[:, j, i]))
-                    if not (mp is None or mp.status < 1):
-                        fwhmRMSFArr[j, i] = mp.params[2]
-                        statArr[j, i] = mp.status
-
     # Remove redundant dimensions
     RMSFcube = np.squeeze(RMSFcube)
     fwhmRMSFArr = np.squeeze(fwhmRMSFArr)
@@ -387,8 +368,7 @@ def test_rmsynth() -> None:
     for eps in [1e-4, 1e-5, 1e-6, 1e-8]:
         tick = time()
         FDFcube = rmsynth_nufft(
-            stokes_q_arr=fake_data.stokes_q,
-            stokes_u_arr=fake_data.stokes_u,
+            complex_pol_arr=fake_data.stokes_q + 1j * fake_data.stokes_u,
             lambda_sq_arr_m2=fake_data.lsq,
             phi_arr_radm2=fake_data.phis,
             weight_arr=fake_data.weights,
@@ -400,7 +380,7 @@ def test_rmsynth() -> None:
         logger.info(msg)
 
         tick = time()
-        FDFcube_old, lam0Sq_m2_old = do_rmsynth_planes_old(
+        FDFcube_old, lam0Sq_m2_old = do_rmsynth_planes_old(  # type: ignore[no-untyped-call]
             dataQ=fake_data.stokes_q,
             dataU=fake_data.stokes_u,
             lambdaSqArr_m2=fake_data.lsq,
@@ -436,7 +416,7 @@ def test_rmsf():
         logger.info(msg)
 
         tick = time()
-        RMSFcube_old, phi2Arr_old, fwhmRMSFArr_old, statArr_old = get_rmsf_planes_old(
+        RMSFcube_old, phi2Arr_old, fwhmRMSFArr_old, statArr_old = get_rmsf_planes_old(  # type: ignore[no-untyped-call]
             lambdaSqArr_m2=fake_data.lsq,
             phiArr_radm2=fake_data.phis,
             weightArr=fake_data.weights,
@@ -447,10 +427,13 @@ def test_rmsf():
         logger.info(msg)
 
         # fiNUFFT can't go below 1e-8 in precision!
-        for new, old in zip(
-            [RMSFcube, phi2Arr, fwhmRMSFArr],
-            [RMSFcube_old, phi2Arr_old, fwhmRMSFArr_old],
+        for name, new, old in zip(
+            ["phi2Arr", "RMSFcube", "fwhmRMSFArr"],
+            [phi2Arr, RMSFcube, fwhmRMSFArr],
+            [phi2Arr_old, RMSFcube_old, fwhmRMSFArr_old],
         ):
+            msg = f"Testing {name}"
+            logger.info(msg)
             if eps == 1e-8:
                 assert np.allclose(new, old, rtol=eps * 10, atol=eps * 10)
             else:

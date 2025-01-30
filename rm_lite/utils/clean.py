@@ -7,6 +7,7 @@ from functools import partial
 from typing import Callable, Literal, NamedTuple
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.ndimage import convolve
 from tqdm.auto import tqdm
 
@@ -26,24 +27,24 @@ TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
 class RMCleanResults(NamedTuple):
     """Results of the RM-CLEAN calculation"""
 
-    clean_fdf_arr: np.ndarray
+    clean_fdf_arr: NDArray[np.float64]
     """The cleaned Faraday dispersion function cube"""
-    model_fdf_arr: np.ndarray
+    model_fdf_arr: NDArray[np.float64]
     """The clean components cube"""
-    clean_iter_arr: np.ndarray
+    clean_iter_arr: NDArray[np.float64]
     """The number of iterations for each pixel"""
-    resid_fdf_arr: np.ndarray
+    resid_fdf_arr: NDArray[np.float64]
     """The residual Faraday dispersion function cube"""
 
 
 class CleanLoopResults(NamedTuple):
     """Results of the RM-CLEAN loop"""
 
-    clean_fdf_spectrum: np.ndarray
+    clean_fdf_spectrum: NDArray[np.float64]
     """The cleaned Faraday dispersion function cube"""
-    resid_fdf_spectrum: np.ndarray
+    resid_fdf_spectrum: NDArray[np.float64]
     """The residual Faraday dispersion function cube"""
-    model_fdf_spectrum: np.ndarray
+    model_fdf_spectrum: NDArray[np.float64]
     """The clean components cube"""
     iter_count: int
     """The number of iterations"""
@@ -52,25 +53,25 @@ class CleanLoopResults(NamedTuple):
 class MinorLoopResults(NamedTuple):
     """Results of the RM-CLEAN minor loop"""
 
-    clean_fdf_spectrum: np.ndarray
+    clean_fdf_spectrum: NDArray[np.float64]
     """The cleaned Faraday dispersion function cube"""
-    resid_fdf_spectrum: np.ndarray
+    resid_fdf_spectrum: NDArray[np.float64]
     """The residual Faraday dispersion function cube"""
     resid_fdf_spectrum_mask: np.ma.MaskedArray
     """The masked residual Faraday dispersion function cube"""
-    model_fdf_spectrum: np.ndarray
+    model_fdf_spectrum: NDArray[np.float64]
     """The clean components cube"""
-    model_rmsf_spectrum: np.ndarray
+    model_rmsf_spectrum: NDArray[np.float64]
     """ Model * RMSF """
     iter_count: int
     """The number of iterations"""
 
 
 def restore_fdf(
-    model_fdf_spectrum: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
+    model_fdf_spectrum: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf: float,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     clean_beam = unit_centred_gaussian(
         x=phi_double_arr_radm2,
         fwhm=fwhm_rmsf,
@@ -82,16 +83,16 @@ def restore_fdf(
 
 
 def rmclean(
-    dirty_fdf_arr: np.ndarray,
-    phi_arr_radm2: np.ndarray,
-    rmsf_arr: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
-    fwhm_rmsf_arr: np.ndarray,
+    dirty_fdf_arr: NDArray[np.float64],
+    phi_arr_radm2: NDArray[np.float64],
+    rmsf_arr: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_arr: NDArray[np.float64],
     mask: float,
     threshold: float,
     max_iter: int = 1000,
     gain: float = 0.1,
-    mask_arr: np.ndarray | None = None,
+    mask_arr: NDArray[np.float64] | None = None,
 ) -> RMCleanResults:
     _bad_result = RMCleanResults(
         clean_fdf_arr=dirty_fdf_arr,
@@ -193,9 +194,9 @@ def rmclean(
 
 def minor_loop(
     resid_fdf_spectrum_mask: np.ma.MaskedArray,
-    phi_arr_radm2: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
-    rmsf_spectrum: np.ndarray,
+    phi_arr_radm2: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    rmsf_spectrum: NDArray[np.float64],
     rmsf_fwhm: float,
     max_iter: int,
     gain: float,
@@ -203,7 +204,7 @@ def minor_loop(
     threshold: float,
     start_iter: int = 0,
     update_mask: bool = True,
-    peak_find_arr: np.ndarray | None = None,
+    peak_find_arr: NDArray[np.float64] | None = None,
 ) -> MinorLoopResults:
     # Trust nothing
     resid_fdf_spectrum_mask = resid_fdf_spectrum_mask.copy()
@@ -300,10 +301,10 @@ def minor_loop(
 
 
 def minor_cycle(
-    phi_arr_radm2: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
-    dirty_fdf_spectrum: np.ndarray,
-    rmsf_spectrum: np.ndarray,
+    phi_arr_radm2: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    dirty_fdf_spectrum: NDArray[np.float64],
+    rmsf_spectrum: NDArray[np.float64],
     rmsf_fwhm: float,
     mask: float,
     threshold: float,
@@ -388,56 +389,56 @@ def _scale_bias_function(
 
 
 def scale_bias_function(
-    scales: np.ndarray,
+    scales: NDArray[np.float64],
     scale_bias: float,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Offringa et al. (2017) scale-bias function.
 
     Args:
-        scales (np.ndarray): Scale parameters (relative to PSF FWHM)
+        scales (NDArray[np.float64]): Scale parameters (relative to PSF FWHM)
         scale_bias (float): The scale-bias parameter
 
     Returns:
-        np.ndarray: Weighting factors per scale
+        NDArray[np.float64]: Weighting factors per scale
     """
     if len(scales) == 1:
         return np.ones_like(scales)
     return _scale_bias_function(scales, scale_0=scales[1], scale_bias=scale_bias)
 
 
-def scale_bias_function_cornwell(scales: np.ndarray) -> np.ndarray:
+def scale_bias_function_cornwell(scales: NDArray[np.float64]) -> NDArray[np.float64]:
     return 1 - 0.6 * scales / scales.max()
 
 
-def hanning(x_arr: np.ndarray, length: float) -> np.ndarray:
+def hanning(x_arr: NDArray[np.float64], length: float) -> NDArray[np.float64]:
     """Hanning window function.
 
     Args:
-        x_arr (np.ndarray): Array of x values
+        x_arr (NDArray[np.float64]): Array of x values
         length (float): Length of the window
 
     Returns:
-        np.ndarray: Hanning window function array
+        NDArray[np.float64]: Hanning window function array
     """
     han = (1 / length) * np.cos(np.pi * x_arr / length) ** 2
     return np.where(np.abs(x_arr) < length / 2, han, 0)
 
 
 def tapered_quad_kernel_function(
-    phi_double_arr_radm2: np.ndarray,
+    phi_double_arr_radm2: NDArray[np.float64],
     scale: float,
     rmsf_fwhm: float,
     sum_normalised: bool = True,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Tapered quadratic kernel function.
 
     Args:
-        phi_double_arr_radm2 (np.ndarray): Phi array in rad/m^2
+        phi_double_arr_radm2 (NDArray[np.float64]): Phi array in rad/m^2
         scale (float): Scale (in FWHM units)
         rmsf_fwhm (float): RMSF FWHM in rad/m^2
 
     Returns:
-        np.ndarray: Kernel function array (sum normalised)
+        NDArray[np.float64]: Kernel function array (sum normalised)
     """
     scale_radm2 = scale * rmsf_fwhm
     kernel = hanning(phi_double_arr_radm2, scale_radm2) * (
@@ -451,20 +452,20 @@ def tapered_quad_kernel_function(
 
 
 def gaussian_scale_kernel_function(
-    phi_double_arr_radm2: np.ndarray,
+    phi_double_arr_radm2: NDArray[np.float64],
     scale: float,
     rmsf_fwhm: float,
     sum_normalised: bool = True,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Gaussian scale kernel function.
 
     Args:
-        phi_double_arr_radm2 (np.ndarray): Phi array in rad/m^2
+        phi_double_arr_radm2 (NDArray[np.float64]): Phi array in rad/m^2
         scale (float): Scale (in FWHM units)
         rmsf_fwhm (float): RMSF FWHM in rad/m^2
 
     Returns:
-        np.ndarray: Kernel function array (sum normalised)
+        NDArray[np.float64]: Kernel function array (sum normalised)
     """
     rmsf_sigma = fwhm_to_sigma(rmsf_fwhm)
     sigma = (3 / 16) * scale * rmsf_sigma
@@ -488,25 +489,25 @@ KERNEL_FUNCS: dict[str, Callable] = {
 def convolve_fdf_scale(
     scale: float,
     fwhm: float,
-    fdf_arr: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
+    fdf_arr: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
     sum_normalised: bool = True,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Convolve the FDF with a Gaussian kernel.
 
     Args:
         scale (float): Scale parameter (relative to PSF FWHM)
         fwhm (float): FWHM of the RMSF
-        fdf_arr (np.ndarray): FDF array (complex)
-        phi_double_arr_radm2 (np.ndarray): Double-length Faraday depth array (rad/m^2)
+        fdf_arr (NDArray[np.float64]): FDF array (complex)
+        phi_double_arr_radm2 (NDArray[np.float64]): Double-length Faraday depth array (rad/m^2)
         kernel (Literal["tapered_quad", "gaussian"]): Kernel function
 
     Raises:
         ValueError: If an invalid normalization method is provided
 
     Returns:
-        np.ndarray: Convolved FDF array
+        NDArray[np.float64]: Convolved FDF array
     """
     if scale == 0:
         return fdf_arr
@@ -528,10 +529,10 @@ def convolve_fdf_scale(
 
 
 def find_significant_scale(
-    scales: np.ndarray,
+    scales: NDArray[np.float64],
     scale_bias: float,
-    fdf_arr: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
+    fdf_arr: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
     fwhm: float,
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
 ) -> tuple[float, float]:
@@ -556,12 +557,12 @@ def find_significant_scale(
 
 
 def multiscale_minor_loop(
-    scales: np.ndarray,
+    scales: NDArray[np.float64],
     scale_bias: float,
     resid_fdf_spectrum_mask: np.ma.MaskedArray,
-    phi_arr_radm2: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
-    rmsf_spectrum: np.ndarray,
+    phi_arr_radm2: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    rmsf_spectrum: NDArray[np.float64],
     rmsf_fwhm: float,
     max_iter: int,
     max_iter_sub_minor: int,
@@ -737,12 +738,12 @@ def multiscale_minor_loop(
 
 
 def multiscale_cycle(
-    scales: np.ndarray,
+    scales: NDArray[np.float64],
     scale_bias: float,
-    phi_arr_radm2: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
-    dirty_fdf_spectrum: np.ndarray,
-    rmsf_spectrum: np.ndarray,
+    phi_arr_radm2: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    dirty_fdf_spectrum: NDArray[np.float64],
+    rmsf_spectrum: NDArray[np.float64],
     rmsf_fwhm: float,
     mask: float,
     threshold: float,
@@ -816,20 +817,20 @@ def multiscale_cycle(
 
 
 def mutliscale_rmclean(
-    freq_arr_hz: np.ndarray,
-    dirty_fdf_arr: np.ndarray,
-    phi_arr_radm2: np.ndarray,
-    rmsf_arr: np.ndarray,
-    phi_double_arr_radm2: np.ndarray,
-    fwhm_rmsf_arr: np.ndarray,
+    freq_arr_hz: NDArray[np.float64],
+    dirty_fdf_arr: NDArray[np.float64],
+    phi_arr_radm2: NDArray[np.float64],
+    rmsf_arr: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_arr: NDArray[np.float64],
     mask: float,
     threshold: float,
     max_iter: int = 1000,
     max_iter_sub_minor: int = 10_000,
     gain: float = 0.1,
     scale_bias: float = 0.9,
-    scales: np.ndarray | None = None,
-    mask_arr: np.ndarray | None = None,
+    scales: NDArray[np.float64] | None = None,
+    mask_arr: NDArray[np.float64] | None = None,
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
 ) -> RMCleanResults:
     _bad_result = RMCleanResults(

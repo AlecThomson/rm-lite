@@ -25,7 +25,7 @@ class TqdmToLogger(io.StringIO):
         self.buf = buf.strip("\r\n\t ")
 
     def flush(self):
-        self.logger.log(self.level, self.buf)
+        self.logger.log(self.level, self.buf)  # type: ignore[union-attr]
 
 
 class CustomFormatter(logging.Formatter):
