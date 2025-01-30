@@ -47,11 +47,13 @@ a while._
 ## Installation
 
 PyPI release:
+
 ```
 pip install rm-lite
 ```
 
 Current GitHub `main` commit:
+
 ```
 pip install git+https://github.com/AlecThomson/rm-lite.git
 ```
