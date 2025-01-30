@@ -48,6 +48,7 @@ dev = [
     "ruff",
     "pytest",
     "pytest-cov",
+    "nox",
 ]
 
 [tool.hatch]
@@ -120,3 +121,24 @@ ignore_missing_imports = true
 
 [tool.typos.default.extend-identifiers]
 arange = "arange"
+
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config"]
+xfail_strict = true
+filterwarnings = [
+    "error",
+]
+log_cli_level = "INFO"
+testpaths = [
+    "tests",
+]
+
+
+[tool.coverage]
+run.source = ["cutout_fits"]
+report.exclude_also = [
+    '\.\.\.',
+    'if typing.TYPE_CHECKING:',
+]
