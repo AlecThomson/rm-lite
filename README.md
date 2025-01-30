@@ -41,6 +41,8 @@ that functionality.
 The goal of this project is to provide low code surface area with high
 reliability, performance, and developer ergonomics.
 
+_**Warning:** This is very much a work-in-progress. Do not expect stability for a while._
+
 ## Installation
 
 ```
