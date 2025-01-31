@@ -165,7 +165,7 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
     )
     complex_error *= 1e-3
 
-    fdf_parameters, fdf_arrs, rmsf_arrs = run_rmsynth(
+    rmsyth_results = run_rmsynth(
         freq_arr_hz=racs_data.freqs,
         complex_pol_arr=complex_data,
         complex_pol_error=complex_error,
@@ -173,6 +173,7 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
         stokes_i_error_arr=np.ones_like(racs_data.stokes_i) * 1e-3,
     )
 
+    fdf_parameters = rmsyth_results.fdf_parameters
     logger.info(fdf_parameters)
 
     assert np.isclose(

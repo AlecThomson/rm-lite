@@ -85,3 +85,8 @@ repos:
       - id: check-dependabot
       - id: check-github-workflows
       - id: check-readthedocs
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout

@@ -41,6 +41,7 @@ dependencies = [
     "nestle",
     "corner",
     "polars",
+    "sigfig",
 ]
 
 [project.optional-dependencies]
@@ -50,6 +51,7 @@ dev = [
     "pytest",
     "pytest-cov",
     "nox",
+    "nbconvert"
 ]
 docs = [
     "sphinx>=7.0",

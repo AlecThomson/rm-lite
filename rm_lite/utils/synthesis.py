@@ -258,6 +258,7 @@ def create_fractional_spectra(
 
     # If a model is provided, use that to calculate the fractional spectra
     if stokes_data.stokes_i_model_arr is not None:
+        logger.info("Using provided Stokes I model to calculate fractional spectra.")
         if stokes_data.stokes_i_model_error is None:
             msg = "If `stokes_i_model_arr` is provided, `stokes_i_model_error` must also be provided."
             raise ValueError(msg)
@@ -289,6 +290,7 @@ def create_fractional_spectra(
             no_nan_idx=no_nan_idx,
         )
 
+    logger.info("Fitting Stokes I model to calculate fractional spectra.")
     if stokes_data.stokes_i_arr is None or stokes_data.stokes_i_error_arr is None:
         msg = "If `stokes_i_model_arr` is not provided, `stokes_i_arr` and `stokes_i_error_arr` must also be provided."
         raise ValueError(msg)
@@ -667,6 +669,8 @@ def rmsynth_nufft(
     Returns:
         NDArray[np.float64]: Dirty Faraday dispersion function cube
     """
+    msg = f"Running RM-synthesis using the NUFFTs over {len(phi_arr_radm2)} Faraday depth channels."
+    logger.info(msg)
     flagged_weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
 
     # Sanity check on array sizes
@@ -940,7 +944,6 @@ def get_rmsf_nufft(
     # Fit the RMSF main lobe
     if do_fit_rmsf:
         logger.info("Fitting main lobe in each RMSF spectrum.")
-        logger.info("> This may take some time!")
         for i in trange(
             num_pixels, desc="Fitting RMSF by pixel", disable=num_pixels == 1
         ):
@@ -1050,7 +1053,9 @@ def get_fdf_parameters(
         phi_arr_radm2=phi_arr_radm2,
         fwhm_fdf_radm2=fwhm_rmsf_radm2,
     )
-    peak_pi_fit_snr = peak_pi_fit / theoretical_noise.fdf_error_noise
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        peak_pi_fit_snr = peak_pi_fit / theoretical_noise.fdf_error_noise
     # In rare cases, a parabola can be fitted to the edge of the spectrum,
     # producing a unreasonably large RM and polarized intensity.
     # In these cases, everything should get NaN'd out.
@@ -1298,18 +1303,21 @@ def measure_qu_complexity(
     # Subtract the RM-thin model to create a residual q & u
     residual_qu = complex_pol_arr - simple_model
 
-    sigma_add_q = calculate_sigma_add(
-        y_arr=residual_qu.real / complex_pol_error.real,
-        dy_arr=np.ones_like(residual_qu.real),
-        median=0.0,
-        noise=1.0,
-    )
-    sigma_add_u = calculate_sigma_add(
-        y_arr=residual_qu.imag / complex_pol_error.imag,
-        dy_arr=np.ones_like(residual_qu.imag),
-        median=0.0,
-        noise=1.0,
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+
+        sigma_add_q = calculate_sigma_add(
+            y_arr=residual_qu.real / complex_pol_error.real,
+            dy_arr=np.ones_like(residual_qu.real),
+            median=0.0,
+            noise=1.0,
+        )
+        sigma_add_u = calculate_sigma_add(
+            y_arr=residual_qu.imag / complex_pol_error.imag,
+            dy_arr=np.ones_like(residual_qu.imag),
+            median=0.0,
+            noise=1.0,
+        )
 
     sigma_add_p_arr = np.hypot(
         sigma_add_q.sigma_add_arrays.sigma_add_arr,

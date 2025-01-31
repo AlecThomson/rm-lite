@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal, NamedTuple, Protocol
 
 import numpy as np
+import sigfig as sf
 from astropy.modeling.models import Gaussian1D
 from astropy.stats import akaike_info_criterion_lsq
 from numpy.typing import ArrayLike, NDArray
@@ -10,13 +11,11 @@ from scipy import optimize
 
 from rm_lite.utils.logging import logger
 
-logger.setLevel("INFO")
-
 GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 
 class StokesIModel(Protocol):
-    def __call__(self, x: NDArray[np.float64]) -> NDArray[np.float64]: ...
+    def __call__(self, x: NDArray[np.float64], *params) -> NDArray[np.float64]: ...
 
 
 class FitResult(NamedTuple):
@@ -146,6 +145,7 @@ def fit_fdf(
     mask = np.zeros_like(phi_arr_radm2, dtype=bool)
     mask[np.argmax(fdf_to_fit_arr)] = 1
     fwhm_fdf_arr_pix = fwhm_fdf_radm2 / d_phi
+    fwhm_fdf_arr_pix /= 2  # fit within half the FWHM
     for i in np.where(mask)[0]:
         start = int(i - fwhm_fdf_arr_pix / 2)
         end = int(i + fwhm_fdf_arr_pix / 2)
@@ -231,6 +231,8 @@ def static_fit(
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
+    msg = f"Fitting Stokes I model of type {fit_type} with order {fit_order}."
+    logger.info(msg)
     if fit_type == "linear":
         fit_func = polynomial(fit_order)
     elif fit_type == "log":
@@ -265,6 +267,10 @@ def static_fit(
             ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz)
         )
 
+    errors = np.sqrt(np.diag(pcov))
+    fit_vals = [sf.round(p, e) for p, e in zip(popt, errors)]
+    logger.info(f"Fit results: {fit_vals}")
+
     return FitResult(
         popt=popt,
         pcov=pcov,
@@ -281,6 +287,8 @@ def dynamic_fit(
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
 ) -> FitResult:
+    msg = f"Iteratively fitting Stokes I model of type {fit_type} with max order {fit_order}."
+    logger.info(msg)
     orders = np.arange(fit_order + 1)
     n_parameters = orders + 1
     fit_results: list[FitResult] = []
@@ -296,10 +304,10 @@ def dynamic_fit(
         )
         fit_results.append(fit_result)
 
-    logger.debug(f"Fit results for orders {orders}:")
+    logger.info(f"Fit results for orders {orders}:")
     aics = np.array([fit_result.aic for fit_result in fit_results])
     bestest_aic, bestest_n, bestest_aic_idx = best_aic_func(aics, n_parameters)
-    logger.debug(f"Best fit found with {bestest_n} parameters.")
+    logger.info(f"Best fit found with {bestest_n} parameters.")
     logger.debug(f"Best fit found with AIC {bestest_aic}.")
     logger.debug(f"Best fit found at index {bestest_aic_idx}.")
     logger.debug(f"Best fit found with order {orders[bestest_aic_idx]}.")

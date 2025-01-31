@@ -59,12 +59,12 @@ def get_logger(
     """
     logging.captureWarnings(True)
     logger = logging.getLogger(name)
-    logger.setLevel(logging.WARNING)
+    logger.setLevel(logging.INFO)
 
     if attach_handler:
         # Create console handler and set level to debug
         ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
+        ch.setLevel(logging.INFO)
 
         # Add formatter to ch
         ch.setFormatter(CustomFormatter())
