@@ -7,6 +7,6 @@ examples should work as written.
 ```{toctree}
 :maxdepth: 1
 :caption: Example notebooks:
-examples/rmsyth_1d
+examples/rmsynth_1d.ipynb
 
 ```
