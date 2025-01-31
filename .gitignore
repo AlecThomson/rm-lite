@@ -152,6 +152,13 @@ tests/simdata
 tests/models_ns
 *egg-info
 .DS_Store
-*.ipynb
 scratch.ipynb
 rm_lite/_version.py
+complexity.ipynb
+fitting.ipynb
+scal_activate.ipynb
+scatcch.ipynb
+rm_lite/clean.ipynb
+rm_lite/ms_test.ipynb
+rm_lite/multiscale.ipynb
+rm_lite/Untitled-1.ipynb
