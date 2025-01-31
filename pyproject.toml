@@ -51,7 +51,7 @@ dev = [
     "pytest",
     "pytest-cov",
     "nox",
-    "nbconvert"
+    "nbconvert",
 ]
 docs = [
     "sphinx>=7.0",
