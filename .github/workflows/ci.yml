@@ -15,6 +15,12 @@ env:
   # Many color libraries just need this to be set to any value, but at least
   # one distinguishes color depth, where "3" -> "256-bit color".
   FORCE_COLOR: 3
+  # Jupyter is migrating its paths to use standard platformdirs
+  # given by the platformdirs library.  To remove this warning and
+  # see the appropriate new directories, set the environment variable
+  # `JUPYTER_PLATFORM_DIRS=1` and then run `jupyter --paths`.
+  # The use of platformdirs will be the default in `jupyter_core` v6
+  JUPYTER_PLATFORM_DIRS: 1
 
 jobs:
   pre-commit:

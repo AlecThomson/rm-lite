@@ -40,11 +40,11 @@ class RMCleanResults(NamedTuple):
 class CleanLoopResults(NamedTuple):
     """Results of the RM-CLEAN loop"""
 
-    clean_fdf_spectrum: NDArray[np.float64]
+    clean_fdf_spectrum: NDArray[np.complex128]
     """The cleaned Faraday dispersion function cube"""
-    resid_fdf_spectrum: NDArray[np.float64]
+    resid_fdf_spectrum: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
-    model_fdf_spectrum: NDArray[np.float64]
+    model_fdf_spectrum: NDArray[np.complex128]
     """The clean components cube"""
     iter_count: int
     """The number of iterations"""
@@ -53,25 +53,25 @@ class CleanLoopResults(NamedTuple):
 class MinorLoopResults(NamedTuple):
     """Results of the RM-CLEAN minor loop"""
 
-    clean_fdf_spectrum: NDArray[np.float64]
+    clean_fdf_spectrum: NDArray[np.complex128]
     """The cleaned Faraday dispersion function cube"""
-    resid_fdf_spectrum: NDArray[np.float64]
+    resid_fdf_spectrum: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
     resid_fdf_spectrum_mask: np.ma.MaskedArray
     """The masked residual Faraday dispersion function cube"""
-    model_fdf_spectrum: NDArray[np.float64]
+    model_fdf_spectrum: NDArray[np.complex128]
     """The clean components cube"""
-    model_rmsf_spectrum: NDArray[np.float64]
+    model_rmsf_spectrum: NDArray[np.complex128]
     """ Model * RMSF """
     iter_count: int
     """The number of iterations"""
 
 
 def restore_fdf(
-    model_fdf_spectrum: NDArray[np.float64],
+    model_fdf_spectrum: NDArray[np.complex128],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf: float,
-) -> NDArray[np.float64]:
+) -> NDArray[np.complex128]:
     clean_beam = unit_centred_gaussian(
         x=phi_double_arr_radm2,
         fwhm=fwhm_rmsf,
@@ -83,16 +83,16 @@ def restore_fdf(
 
 
 def rmclean(
-    dirty_fdf_arr: NDArray[np.float64],
+    dirty_fdf_arr: NDArray[np.complex128],
     phi_arr_radm2: NDArray[np.float64],
-    rmsf_arr: NDArray[np.float64],
+    rmsf_arr: NDArray[np.complex128],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_arr: NDArray[np.float64],
     mask: float,
     threshold: float,
     max_iter: int = 1000,
     gain: float = 0.1,
-    mask_arr: NDArray[np.float64] | None = None,
+    mask_arr: NDArray[np.bool_] | None = None,
 ) -> RMCleanResults:
     _bad_result = RMCleanResults(
         clean_fdf_arr=dirty_fdf_arr,
@@ -833,6 +833,7 @@ def mutliscale_rmclean(
     mask_arr: NDArray[np.float64] | None = None,
     kernel: Literal["tapered_quad", "gaussian"] = "gaussian",
 ) -> RMCleanResults:
+    raise NotImplementedError
     _bad_result = RMCleanResults(
         clean_fdf_arr=dirty_fdf_arr,
         model_fdf_arr=np.zeros_like(dirty_fdf_arr),

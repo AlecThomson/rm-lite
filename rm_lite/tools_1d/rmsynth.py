@@ -23,25 +23,6 @@ from rm_lite.utils.synthesis import (
     rmsynth_nufft,
 )
 
-logger.setLevel("WARNING")
-
-
-# class RMSynth1DArrays(NamedTuple):
-#     """Resulting arrays from RM-synthesis"""
-
-#     phi_arr_radm2: NDArray[np.float64]
-#     """ Array of Faraday depths """
-#     phi2_arr_radm2: NDArray[np.float64]
-#     """ Double length of Faraday depths """
-#     rmsf_arr: NDArray[np.float64]
-#     """ Rotation Measure Spread Function """
-#     freq_arr_hz: NDArray[np.float64]
-#     """ Frequency array """
-#     weight_arr: NDArray[np.float64]
-#     """ Weight array """
-#     fdf_dirty_arr: NDArray[np.float64]
-#     """ Dirty Faraday dispersion function """
-
 
 class RMSynth1DResults(NamedTuple):
     """Resulting arrays from RM-synthesis"""
@@ -52,12 +33,14 @@ class RMSynth1DResults(NamedTuple):
     """ RMSynth arrays """
     rmsf_arrs: pl.DataFrame
     """ RMSF arrays """
+    stokes_i_arrs: pl.DataFrame
+    """ Stokes I arrays """
 
 
 def run_rmsynth(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
-    complex_pol_error: NDArray[np.float64],
+    complex_pol_error: NDArray[np.complex128],
     stokes_i_arr: NDArray[np.float64] | None = None,
     stokes_i_error_arr: NDArray[np.float64] | None = None,
     stokes_i_model_arr: NDArray[np.float64] | None = None,
@@ -71,6 +54,31 @@ def run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
 ) -> RMSynth1DResults:
+    """Run RM-synthesis on 1D data
+
+    Args:
+        freq_arr_hz (NDArray[np.float64]): Frequencies in Hz
+        complex_pol_arr (NDArray[np.complex128]): Complex polarisation values (Q + iU)
+        complex_pol_error (NDArray[np.float64]): Complex polarisation errors (dQ + idU)
+        stokes_i_arr (NDArray[np.float64] | None, optional): Total itensity values. Defaults to None.
+        stokes_i_error_arr (NDArray[np.float64] | None, optional): Total intensity errors. Defaults to None.
+        stokes_i_model_arr (NDArray[np.float64] | None, optional): Total intensity model array. Defaults to None.
+        stokes_i_model_error (NDArray[np.float64] | None, optional): Total intensity model error. Defaults to None.
+        phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
+        d_phi_radm2 (float | None, optional): Spacing in Faraday depth. Defaults to None.
+        n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
+        weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
+        do_fit_rmsf (bool, optional): Fit the RMSF main lobe. Defaults to False.
+        do_fit_rmsf_real (bool, optional): The the real part of the RMSF. Defaults to False.
+        fit_function ("log" | "linear", optional): _description_. Defaults to "log".
+        fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
+
+    Returns:
+        RMSynth1DResults:
+            fdf_parameters (pl.DataFrame): FDF parameters
+            fdf_arrs (pl.DataFrame): RMSynth arrays
+            rmsf_arrs (pl.DataFrame): RMSF arrays
+    """
     stokes_data = StokesData(
         freq_arr_hz=freq_arr_hz,
         complex_pol_arr=complex_pol_arr,
@@ -99,7 +107,20 @@ def _run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
 ) -> RMSynth1DResults:
-    """Run RM-synthesis on 1D data"""
+    """Run RM-synthesis on 1D data with packed data
+
+    Args:
+        stokes_data (StokesData): Frequency-dependent polarisation data
+        fdf_options (FDFOptions): RM-synthesis options
+        fit_function ("log", "linear", optional): Type of function to fit. Defaults to "log".
+        fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
+
+    Returns:
+        RMSynth1DResults:
+            fdf_parameters (pl.DataFrame): FDF parameters
+            fdf_arrs (pl.DataFrame): RMSynth arrays
+            rmsf_arrs (pl.DataFrame): RMSF arrays
+    """
 
     rmsynth_params = compute_rmsynth_params(
         freq_arr_hz=stokes_data.freq_arr_hz,
@@ -182,15 +203,23 @@ def _run_rmsynth(
     rmsyth_arrs = pl.DataFrame(
         {
             "phi_arr_radm2": rmsynth_params.phi_arr_radm2,
-            "fdf_dirty_arr": fdf_dirty_arr,
+            "fdf_dirty_complex_arr": fdf_dirty_arr,
         }
     )
 
     rmsf_arrs = pl.DataFrame(
         {
             "phi2_arr_radm2": rmsf_result.phi_double_arr_radm2,
-            "rmsf_arr": rmsf_result.rmsf_cube,
+            "rmsf_complex_arr": rmsf_result.rmsf_cube,
+        }
+    )
+    stokes_i_arrs = pl.DataFrame(
+        {
+            "freq_arr_hz": stokes_data.freq_arr_hz,
+            "stokes_i_model_arr": fractional_spectra.stokes_i_model_arr,
+            "stokes_i_model_error": fractional_spectra.stokes_i_model_error,
+            "flag_arr": no_nan_idx,
         }
     )
 
-    return RMSynth1DResults(fdf_parameters, rmsyth_arrs, rmsf_arrs)
+    return RMSynth1DResults(fdf_parameters, rmsyth_arrs, rmsf_arrs, stokes_i_arrs)

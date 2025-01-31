@@ -16,6 +16,7 @@ extensions = [
     "sphinx_autodoc_typehints",
     "sphinx_copybutton",
     "autoapi.extension",
+    "nbsphinx",
 ]
 
 autoapi_type = "python"

@@ -3,17 +3,14 @@
 from __future__ import annotations
 
 import contextlib
-import logging
 from time import time
 from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
+from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import get_rmsf_nufft, make_phi_arr, rmsynth_nufft
 from tqdm import trange
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 
 class FakeData(NamedTuple):
