@@ -699,6 +699,8 @@ def rmsynth_nufft(
                 complex_pol_arr.shape[1] * complex_pol_arr.shape[2],
             ),
         )
+    else:
+        complex_pol_arr_2d = complex_pol_arr
 
     # Create a complex polarised cube, B&dB Eqns. (8) and (14)
     # Array has dimensions [nFreq, nY * nX]
