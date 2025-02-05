@@ -608,7 +608,7 @@ def make_double_phi_arr(
     d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
     phi_max_radm2 = np.max(np.abs(phi_arr_radm2))
     return make_phi_arr(
-        phi_max_radm2=phi_max_radm2 * 2,
+        phi_max_radm2=phi_max_radm2 * 2 + d_phi,
         d_phi_radm2=d_phi,
     )
 
