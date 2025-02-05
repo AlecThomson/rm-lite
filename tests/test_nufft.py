@@ -9,7 +9,11 @@ from typing import NamedTuple
 import numpy as np
 from numpy.typing import NDArray
 from rm_lite.utils.logging import logger
-from rm_lite.utils.synthesis import get_rmsf_nufft, make_phi_arr, rmsynth_nufft
+from rm_lite.utils.synthesis import (
+    get_rmsf_nufft,
+    make_double_phi_arr,
+    rmsynth_nufft,
+)
 from tqdm import trange
 
 
@@ -209,12 +213,7 @@ def get_rmsf_planes_old(
     dtComplex = "complex" + str(2 * nBits)
 
     # For cleaning the RMSF should extend by 1/2 on each side in phi-space
-    if double:
-        phi2Arr = make_phi_arr(
-            phiArr_radm2.max() * 2, phiArr_radm2[1] - phiArr_radm2[0]
-        )
-    else:
-        phi2Arr = phiArr_radm2
+    phi2Arr = make_double_phi_arr(phiArr_radm2) if double else phiArr_radm2
 
     # Set the weight array
     if weightArr is None:

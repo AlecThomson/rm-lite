@@ -189,3 +189,42 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
         # atol=fdf_parameters["frac_pol_error"].to_numpy()[0],
         atol=0.1,
     )
+
+
+def test_2d_synth(racs_data: MockData, racs_model: MockModel):
+    stokes_q = racs_data.stokes_q
+    stokes_u = racs_data.stokes_u
+    complex_pol_arr = stokes_q + 1j * stokes_u
+    complesx_pol_2d = np.tile(complex_pol_arr, (10, 1))
+
+    phis = make_phi_arr(
+        phi_max_radm2=1000,
+        d_phi_radm2=1,
+    )
+    weights = np.ones_like(stokes_q)
+    lambda_0_m2 = float(np.mean(racs_data.lsq))
+
+    with pytest.raises(
+        ValueError,
+        match=r"Data depth does not match lambda\^2 vector \((\d+) vs (\d+)\)\.",
+    ):
+        dirty_fdf = rmsynth_nufft(
+            complex_pol_arr=complesx_pol_2d,
+            lambda_sq_arr_m2=racs_data.lsq,
+            phi_arr_radm2=phis,
+            weight_arr=weights,
+            lam_sq_0_m2=lambda_0_m2,
+        )
+
+    dirty_fdf = rmsynth_nufft(
+        complex_pol_arr=complesx_pol_2d.T,
+        lambda_sq_arr_m2=racs_data.lsq,
+        phi_arr_radm2=phis,
+        weight_arr=weights,
+        lam_sq_0_m2=lambda_0_m2,
+    )
+
+    peak_rms = phis[:, np.newaxis][np.argmax(np.abs(dirty_fdf), axis=0)].squeeze()
+    peak_pis = np.max(np.abs(dirty_fdf), axis=0)
+    assert np.allclose(peak_rms, racs_model.rm, atol=1)
+    assert np.allclose(peak_pis, racs_model.frac_pol * racs_model.flux, atol=0.1)
