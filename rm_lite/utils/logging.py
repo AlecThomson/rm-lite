@@ -16,7 +16,7 @@ class TqdmToLogger(io.StringIO):
     level = None
     buf = ""
 
-    def __init__(self, logger, level=None):
+    def __init__(self, logger: logging.Logger, level: int = logging.INFO):
         super().__init__()
         self.logger = logger
         self.level = level or logging.INFO
