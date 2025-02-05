@@ -7,6 +7,7 @@ from matplotlib.pylab import Generator
 from rm_lite.utils.synthesis import (
     freq_to_lambda2,
     lambda2_to_freq,
+    make_double_phi_arr,
     make_phi_arr,
 )
 
@@ -34,3 +35,15 @@ def test_phi_arr():
             assert np.isclose(np.min(phi_one), -max_val)
             # Check that middle pixel is 0
             assert phi_one[len(phi_one) // 2] == 0
+
+
+def test_doubel_phi_arr():
+    for max_val in [100, 1000, 10000]:
+        for step_val in [1, 10, 100]:
+            phi_arr = make_phi_arr(max_val, step_val)
+            phi_double_arr = make_double_phi_arr(phi_arr)
+            assert len(phi_double_arr) == len(phi_arr) * 2 + 1
+            assert np.isclose(np.max(phi_double_arr), (max_val * 2) + step_val)
+            assert np.isclose(np.min(phi_double_arr), -(max_val * 2) - step_val)
+            # Check that middle pixel is 0
+            assert phi_double_arr[len(phi_double_arr) // 2] == 0
