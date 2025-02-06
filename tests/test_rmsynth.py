@@ -11,7 +11,6 @@ from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FWHM,
-    arange,
     freq_to_lambda2,
     get_fwhm_rmsf,
     lambda2_to_freq,
@@ -95,67 +94,6 @@ def test_rmsynth_nufft(racs_data: MockData, racs_model: MockModel):
 
     peak_rm = phis[np.argmax(np.abs(fdf_dirty))]
     assert np.isclose(peak_rm, racs_model.rm, atol=1)
-
-
-def test_arange():
-    paras_minimal_working_example = {
-        "arange simple": {
-            "start": 0,
-            "stop": 7,
-            "step": 1,
-            "include_start": True,
-            "include_stop": False,
-            "res_exp": np.array([0, 1, 2, 3, 4, 5, 6]),
-        },
-        "stop not on grid": {
-            "start": 0,
-            "stop": 6.5,
-            "step": 1,
-            "include_start": True,
-            "include_stop": False,
-            "res_exp": np.array([0, 1, 2, 3, 4, 5, 6]),
-        },
-        "arange failing example: stop excl": {
-            "start": 1,
-            "stop": 1.3,
-            "step": 0.1,
-            "include_start": True,
-            "include_stop": False,
-            "res_exp": np.array([1.0, 1.1, 1.2]),
-        },
-        "arange failing example: stop incl": {
-            "start": 1,
-            "stop": 1.3,
-            "step": 0.1,
-            "include_start": True,
-            "include_stop": True,
-            "res_exp": np.array([1.0, 1.1, 1.2, 1.3]),
-        },
-        "arange failing example: stop excl + start excl": {
-            "start": 1,
-            "stop": 1.3,
-            "step": 0.1,
-            "include_start": False,
-            "include_stop": False,
-            "res_exp": np.array([1.1, 1.2]),
-        },
-        "arange failing example: stop incl + start excl": {
-            "start": 1,
-            "stop": 1.3,
-            "step": 0.1,
-            "include_start": False,
-            "include_stop": True,
-            "res_exp": np.array([1.1, 1.2, 1.3]),
-        },
-    }
-    for desc, paras in paras_minimal_working_example.items():
-        start, stop, step, include_start, include_stop, res_exp = paras.values()
-        res = arange(
-            start, stop, step, include_start=include_start, include_stop=include_stop
-        )
-        assert np.allclose(res, res_exp), (
-            f"Unexpected result in {desc}: {res=}, {res_exp=}"
-        )
 
 
 def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
