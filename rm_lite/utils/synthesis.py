@@ -15,6 +15,7 @@ from scipy import stats
 from tqdm.auto import trange
 from uncertainties import unumpy
 
+from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import FitResult, fit_fdf, fit_rmsf, fit_stokes_i_model
 from rm_lite.utils.logging import logger
 
@@ -55,7 +56,7 @@ class StokesData(NamedTuple):
 
     complex_pol_arr: NDArray[np.complex128]
     """ Stokes Q and U array """
-    complex_pol_error: NDArray[np.float64]
+    complex_pol_error: NDArray[np.complex128]
     """ Stokes Q and U error array """
     freq_arr_hz: NDArray[np.float64]
     """ Frequency array in Hz """
@@ -284,8 +285,8 @@ def create_fractional_spectra(
         return FractionalSpectra(
             stokes_i_model_arr=stokes_data.stokes_i_model_arr,
             stokes_i_model_error=stokes_data.stokes_i_model_error,
-            complex_pol_frac_arr=stokes_qu_frac_arr,
-            complex_pol_frac_error=stokes_qu_frac_error_arr,
+            complex_pol_frac_arr=stokes_qu_frac_arr.astype(np.complex128),
+            complex_pol_frac_error=stokes_qu_frac_error_arr.astype(np.complex128),
             fit_result=None,
             no_nan_idx=no_nan_idx,
         )
@@ -759,18 +760,16 @@ def rmsynth_nufft(
 
 
 def inverse_rmsynth_nufft(
-    fdf_q_arr: NDArray[np.float64],
-    fdf_u_arr: NDArray[np.float64],
+    complex_fdf_arr: NDArray[np.complex128],
     lambda_sq_arr_m2: NDArray[np.float64],
     phi_arr_radm2: NDArray[np.float64],
     lam_sq_0_m2: float,
     eps: float = 1e-6,
-) -> NDArray[np.float64]:
+) -> NDArray[np.complex128]:
     """Inverse RM-synthesis - FDF to Stokes Q and U in wavelength^2 space.
 
     Args:
-        fdf_q_arr (NDArray[np.float64]): FDF Stokes Q data array
-        fdf_u_arr (NDArray[np.float64]): FDF Stokes U data array
+        complex_fdf_arr (NDArray[np.complex128]): Complex polarisation array in Faraday depth space
         lambda_sq_arr_m2 (NDArray[np.float64]): Wavelength^2 values in m^2
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
         lam_sq_0_m2 (float): Reference wavelength^2 value
@@ -784,47 +783,38 @@ def inverse_rmsynth_nufft(
     Returns:
         NDArray[np.float64]: Complex polarisation array in wavelength^2 space
     """
-    if fdf_q_arr.shape != fdf_u_arr.shape:
-        msg = "Stokes Q and U data arrays must be the same shape."
-        raise ValueError(msg)
 
-    n_dims = len(fdf_q_arr.shape)
-    if not n_dims <= 3:
-        msg = f"Data dimensions must be <= 3. Got {n_dims}"
-        raise ValueError(msg)
+    # n_dims = len(fdf_q_arr.shape)
+    # if not n_dims <= 3:
+    #     msg = f"Data dimensions must be <= 3. Got {n_dims}"
+    #     raise ValueError(msg)
 
-    if fdf_q_arr.shape[0] != phi_arr_radm2.shape[0]:
-        msg = f"Data depth does not match Faraday depth vector ({fdf_q_arr.shape[0]} vs {phi_arr_radm2.shape[0]})."
-        raise ValueError(msg)
+    # if fdf_q_arr.shape[0] != phi_arr_radm2.shape[0]:
+    #     msg = f"Data depth does not match Faraday depth vector ({fdf_q_arr.shape[0]} vs {phi_arr_radm2.shape[0]})."
+    #     raise ValueError(msg)
 
-    # Reshape the data arrays to 2 dimensions
-    if n_dims == 1:
-        fdf_q_arr = np.reshape(fdf_q_arr, (fdf_q_arr.shape[0], 1))
-        fdf_u_arr = np.reshape(fdf_u_arr, (fdf_u_arr.shape[0], 1))
-    elif n_dims == 3:
-        old_data_shape = fdf_q_arr.shape
-        fdf_q_arr = np.reshape(
-            fdf_q_arr,
-            (
-                fdf_q_arr.shape[0],
-                fdf_q_arr.shape[1] * fdf_q_arr.shape[2],
-            ),
-        )
-        fdf_u_arr = np.reshape(
-            fdf_u_arr,
-            (
-                fdf_u_arr.shape[0],
-                fdf_u_arr.shape[1] * fdf_u_arr.shape[2],
-            ),
-        )
+    checks: list[tuple[bool, str]] = [
+        (
+            complex_fdf_arr.ndim <= 3,
+            "Data dimensions must be <= 3.",
+        ),
+        (
+            complex_fdf_arr.shape[0] == phi_arr_radm2.shape[0],
+            f"Data depth does not match Faraday depth vector ({complex_fdf_arr.shape[0]} vs {phi_arr_radm2.shape[0]}).",
+        ),
+    ]
+    for check, msg in checks:
+        if not check:
+            raise ValueError(msg)
 
-    fdf_pol_cube = fdf_q_arr + 1j * fdf_u_arr
-    float_size = fdf_pol_cube.itemsize * 8 / 2  # type: ignore[attr-defined,unused-ignore]
+    fdf_pol_cube_2d = nd_to_two_d(complex_fdf_arr)
+
+    float_size = fdf_pol_cube_2d.itemsize * 8 / 2  # type: ignore[attr-defined,unused-ignore]
     exponent = (lambda_sq_arr_m2 - lam_sq_0_m2).astype(f"float{float_size:.0f}")
     pol_cube_inv = (
         finufft.nufft1d3(
             x=(phi_arr_radm2 * 2).astype(exponent.dtype),
-            c=fdf_pol_cube.T.astype(complex),  # type: ignore[attr-defined,unused-ignore]
+            c=fdf_pol_cube_2d.T.astype(complex),  # type: ignore[attr-defined,unused-ignore]
             s=exponent,
             eps=eps,
             isign=1,
@@ -832,14 +822,11 @@ def inverse_rmsynth_nufft(
     ).T
 
     # Restore if 3D shape
-    if n_dims == 3:
-        pol_cube_inv = np.reshape(
-            pol_cube_inv,
-            (pol_cube_inv.shape[0], old_data_shape[1], old_data_shape[2]),
-        )
+    if complex_fdf_arr.ndim == 3:
+        pol_cube_inv = two_d_to_nd(pol_cube_inv, original_shape=complex_fdf_arr.shape)
 
     # Remove redundant dimensions in the FDF array
-    return np.squeeze(pol_cube_inv)
+    return np.squeeze(pol_cube_inv).astype(np.complex128)
 
 
 def get_rmsf_nufft(
@@ -1362,48 +1349,3 @@ def measure_fdf_complexity(
 ) -> float:
     # Second moment of clean component spectrum
     return calc_mom2_fdf(complex_fdf_arr=complex_fdf_arr, phi_arr_radm2=phi_arr_radm2)
-
-
-# from https://stackoverflow.com/questions/50299172/range-or-numpy-arange-with-end-limit-include
-def arange(
-    start: float | int,
-    stop: float | int,
-    step: float | int,
-    rtol: float = 1e-05,
-    atol: float = 1e-08,
-    include_start: bool = True,
-    include_stop: bool = False,
-    **kwargs,
-) -> NDArray[np.float64]:
-    """
-    Combines numpy.arange and numpy.isclose to mimic open, half-open and closed intervals.
-
-    Avoids also floating point rounding errors as with
-    >>> np.arange(1, 1.3, 0.1)
-    array([1., 1.1, 1.2, 1.3])
-
-
-    Args:
-        start (float | int): Start of the interval.
-        stop (float | int): End of the interval.
-        step (float | int): Spacing between values.
-        rtol (float, optional): if last element of array is within this relative tolerance to stop and include[0]==False, it is skipped. Defaults to 1e-05.
-        atol (float, optional): if last element of array is within this relative tolerance to stop and include[1]==False, it is skipped. Defaults to 1e-08.
-        include_start (bool, optional): if first element is included in the returned array. Defaults to True.
-        include_stop (bool, optional): if last elements are included in the returned array if stop equals last element. Defaults to False.
-        kwargs: passed to np.arange
-
-    Returns:
-        _type_: as np.arange but eventually with first and last element stripped/added
-    """
-    arr = np.arange(start, stop, step, **kwargs)
-    if not include_start:
-        arr = np.delete(arr, 0)
-
-    if include_stop:
-        if np.isclose(arr[-1] + step, stop, rtol=rtol, atol=atol):
-            # arr = np.c_[arr, arr[-1] + step]
-            arr = np.append(arr, arr[-1] + step)
-    elif np.isclose(arr[-1], stop, rtol=rtol, atol=atol):
-        arr = np.delete(arr, -1)
-    return arr

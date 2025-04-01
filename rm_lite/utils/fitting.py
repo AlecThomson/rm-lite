@@ -79,10 +79,11 @@ def gaussian(
     if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
     if isinstance(amplitude, complex):
-        return Gaussian1D(amplitude=amplitude.real, mean=mean, stddev=stddev)(
-            x
-        ) + 1j * Gaussian1D(amplitude=amplitude.imag, mean=mean, stddev=stddev)(x)
-    return Gaussian1D(amplitude=amplitude, mean=mean, stddev=stddev)(x)
+        return np.array(
+            Gaussian1D(amplitude=amplitude.real, mean=mean, stddev=stddev)(x)
+            + 1j * Gaussian1D(amplitude=amplitude.imag, mean=mean, stddev=stddev)(x)
+        )
+    return np.array(Gaussian1D(amplitude=amplitude, mean=mean, stddev=stddev)(x))
 
 
 def unit_gaussian(

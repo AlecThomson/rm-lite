@@ -16,7 +16,7 @@ class TqdmToLogger(io.StringIO):
     level = None
     buf = ""
 
-    def __init__(self, logger, level=None):
+    def __init__(self, logger: logging.Logger, level: int = logging.INFO):
         super().__init__()
         self.logger = logger
         self.level = level or logging.INFO
@@ -25,7 +25,8 @@ class TqdmToLogger(io.StringIO):
         self.buf = buf.strip("\r\n\t ")
 
     def flush(self):
-        self.logger.log(self.level, self.buf)  # type: ignore[union-attr]
+        if self.logger is not None and self.level is not None:
+            self.logger.log(self.level, self.buf)
 
 
 class CustomFormatter(logging.Formatter):
