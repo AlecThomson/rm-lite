@@ -83,7 +83,7 @@ def restore_fdf(
     restored_fdf = np.convolve(
         model_fdf_spectrum.real, clean_beam, mode="valid"
     ) + 1j * np.convolve(model_fdf_spectrum.imag, clean_beam, mode="valid")
-    return restored_fdf[1:-1]
+    return np.array(restored_fdf[1:-1])
 
 
 class RMSynthArrays(NamedTuple):
@@ -99,6 +99,8 @@ class RMSynthArrays(NamedTuple):
     """RMSF array"""
     fwhm_rmsf_arr: NDArray[np.float64]
     """FWHM of the RMSF array"""
+    fdf_mask_arr: NDArray[np.bool_] | None = None
+    """Mask of pixels to clean"""
 
 
 class RMCleanOptions(NamedTuple):
@@ -169,12 +171,6 @@ def _rmclean_nd(
     clean_options: RMCleanOptions,
 ) -> RMCleanResults:
     # Sanity checks on array sizes
-
-    if clean_options.mask_arr is None:
-        mask_arr = np.ones(rm_synth_arrays.dirty_fdf_arr.shape[1:], dtype=bool)
-    else:
-        mask_arr = clean_options.mask_arr
-
     checks: list[tuple[bool, str]] = [
         (
             rm_synth_arrays.phi_arr_radm2.shape[0]
@@ -204,114 +200,70 @@ def _rmclean_nd(
             == rm_synth_arrays.dirty_fdf_arr.shape[1:],
             f"The xy dimensions of the RMSF {rm_synth_arrays.rmsf_arr.shape[1:]} and FDF {rm_synth_arrays.dirty_fdf_arr.shape[1:]} must match.",
         ),
-        (
-            mask_arr.shape == rm_synth_arrays.dirty_fdf_arr.shape[1:],
-            f"Mask array dimensions {mask_arr.shape} must match the xy dimensions of the FDF cube {rm_synth_arrays.dirty_fdf_arr.shape[1:]}.",
-        ),
     ]
+    if clean_options.mask_arr is not None:
+        checks.append(
+            (
+                clean_options.mask_arr.shape == rm_synth_arrays.dirty_fdf_arr.shape[1:],
+                f"Mask array dimensions {clean_options.mask_arr.shape} must match the xy dimensions of the FDF cube {rm_synth_arrays.dirty_fdf_arr.shape[1:]}.",
+            )
+        )
 
     for condition, error_msg in checks:
         if not condition:
             raise ValueError(error_msg)
 
-    rmclean_2d_results = _rmclean_2d(
-        rm_synth_2d_arrays=RMSynthArrays(
-            dirty_fdf_arr=nd_to_two_d(rm_synth_arrays.dirty_fdf_arr),
-            phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
-            phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
-            rmsf_arr=nd_to_two_d(rm_synth_arrays.rmsf_arr),
-            fwhm_rmsf_arr=rm_synth_arrays.fwhm_rmsf_arr,
-        ),
-        clean_options=RMCleanOptions(
-            mask=clean_options.mask,
-            threshold=clean_options.threshold,
-            max_iter=clean_options.max_iter,
-            gain=clean_options.gain,
-            mask_arr=mask_arr,
-        ),
-    )
-
-    # don't need to reshape clean_iter_arr
-    return rmclean_2d_results.with_options(
-        clean_fdf_arr=two_d_to_nd(
-            rmclean_2d_results.clean_fdf_arr,
-            original_shape=rm_synth_arrays.dirty_fdf_arr.shape,
-        ),
-        model_fdf_arr=two_d_to_nd(
-            rmclean_2d_results.model_fdf_arr,
-            original_shape=rm_synth_arrays.dirty_fdf_arr.shape,
-        ),
-        resid_fdf_arr=two_d_to_nd(
-            rmclean_2d_results.resid_fdf_arr,
-            original_shape=rm_synth_arrays.dirty_fdf_arr.shape,
-        ),
-    )
-
-
-def _rmclean_2d(
-    rm_synth_2d_arrays: RMSynthArrays,
-    clean_options: RMCleanOptions,
-) -> RMCleanResults:
-    for array in (
-        rm_synth_2d_arrays.dirty_fdf_arr,
-        rm_synth_2d_arrays.rmsf_arr,
-        rm_synth_2d_arrays.fwhm_rmsf_arr,
-    ):
-        if array.ndim != 2:
-            msg = "Arrays must be 2D."
-            raise ValueError(msg)
-
-    if clean_options.mask_arr is None:
-        mask_arr = np.ones(rm_synth_2d_arrays.dirty_fdf_arr.shape[1:], dtype=bool)
-    else:
-        mask_arr = clean_options.mask_arr.copy()
-
-    dirty_fdf_arr = rm_synth_2d_arrays.dirty_fdf_arr
-
-    iter_count_arr = np.zeros_like(mask_arr, dtype=int)
-
-    # Determine which pixels have components above the cutoff
-    abs_fdf_cube = np.abs(np.nan_to_num(dirty_fdf_arr))
-    cutoff_mask = np.where(np.max(abs_fdf_cube, axis=0) >= clean_options.mask, 1, 0)
-    pixels_to_clean = np.rot90(np.where(cutoff_mask > 0))
-
-    num_pixels = dirty_fdf_arr.shape[-1] * dirty_fdf_arr.shape[-2]
-    num_pixels_clean = len(pixels_to_clean)
-    logger.info(f"Cleaning {num_pixels_clean}/{num_pixels} spectra.")
+    # Reshape the arrays to 2D i.e. [phi, x, y] -> [phi, x*y]
+    dirty_fdf_arr_2d = nd_to_two_d(rm_synth_arrays.dirty_fdf_arr)
+    rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.rmsf_arr)
+    iter_count_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
+    fwhm_rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.fwhm_rmsf_arr)
 
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
     # Residual is initially copies of dirty FDF, so that pixels that are not
     #  processed get correct values (but will be overridden when processed)
-    clean_fdf_spectrum = np.zeros_like(dirty_fdf_arr)
-    model_fdf_spectrum = np.zeros(dirty_fdf_arr.shape, dtype=complex)
-    resid_fdf_arr = dirty_fdf_arr.copy()
+    clean_fdf_spectrum_2d = np.zeros_like(dirty_fdf_arr_2d)
+    model_fdf_spectrum_2d = np.zeros(dirty_fdf_arr_2d.shape, dtype=complex)
+    resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
 
     # Loop through the pixels containing a polarised signal
-    for yi, xi in tqdm(pixels_to_clean):
+    for pix_idx in tqdm(range(dirty_fdf_arr_2d.shape[1])):
         clean_loop_results = minor_cycle(
             rm_synth_1d_arrays=RMSynthArrays(
-                dirty_fdf_arr=dirty_fdf_arr[:, yi, xi],
-                phi_arr_radm2=rm_synth_2d_arrays.phi_arr_radm2,
-                rmsf_arr=rm_synth_2d_arrays.rmsf_arr[:, yi, xi],
-                phi_double_arr_radm2=rm_synth_2d_arrays.phi_double_arr_radm2,
-                fwhm_rmsf_arr=rm_synth_2d_arrays.fwhm_rmsf_arr[yi, xi],
+                dirty_fdf_arr=resid_fdf_arr_2d[:, pix_idx],
+                phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
+                rmsf_arr=rmsf_arr_2d[:, pix_idx],
+                phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
+                fwhm_rmsf_arr=fwhm_rmsf_arr_2d,
+                fdf_mask_arr=nd_to_two_d(rm_synth_arrays.fdf_mask_arr)
+                if rm_synth_arrays.fdf_mask_arr is not None
+                else None,
             ),
             clean_options=clean_options,
         )
-        clean_fdf_spectrum[:, yi, xi] = clean_loop_results.clean_fdf_spectrum
-        resid_fdf_arr[:, yi, xi] = clean_loop_results.resid_fdf_spectrum
-        model_fdf_spectrum[:, yi, xi] = clean_loop_results.model_fdf_spectrum
-        iter_count_arr[yi, xi] = clean_loop_results.iter_count
+        clean_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.clean_fdf_spectrum
+        model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
+        model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.model_fdf_spectrum
+        iter_count_arr_2d[pix_idx] = clean_loop_results.iter_count
 
     # Restore the residual to the cleaned FDF (moved outside of loop:
     # will now work for pixels/spectra without clean components)
-    clean_fdf_spectrum += resid_fdf_arr
+    clean_fdf_spectrum_2d += resid_fdf_arr_2d
 
-    # Remove redundant dimensions
-    clean_fdf_spectrum = np.squeeze(clean_fdf_spectrum)
-    model_fdf_spectrum = np.squeeze(model_fdf_spectrum)
-    iter_count_arr = np.squeeze(iter_count_arr)
-    resid_fdf_arr = np.squeeze(resid_fdf_arr)
+    # Reshape the arrays back to their original shape
+    clean_fdf_spectrum = two_d_to_nd(
+        clean_fdf_spectrum_2d, rm_synth_arrays.dirty_fdf_arr.shape
+    )
+    model_fdf_spectrum = two_d_to_nd(
+        model_fdf_spectrum_2d, rm_synth_arrays.dirty_fdf_arr.shape
+    )
+    if rm_synth_arrays.dirty_fdf_arr.shape[1:] == ():
+        iter_count_arr = two_d_to_nd(iter_count_arr_2d, (1,))
+    else:
+        iter_count_arr = two_d_to_nd(
+            iter_count_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape[1:]
+        )
+    resid_fdf_arr = two_d_to_nd(resid_fdf_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape)
 
     return RMCleanResults(
         clean_fdf_spectrum, model_fdf_spectrum, iter_count_arr, resid_fdf_arr
@@ -439,7 +391,7 @@ def minor_loop(
 
         # Subtract the product of the clean_component shifted RMSF from the residual FDF
         resid_fdf_spectrum -= clean_component * shifted_rmsf_spectrum
-        if peak_find_arr is not None:
+        if minor_loop_arrays.peak_find_arr is not None:
             peak_find_arr -= np.abs(clean_component * shifted_rmsf_spectrum)
 
         # Restore the clean_component * a Gaussian to the cleaned FDF
@@ -485,6 +437,16 @@ def minor_cycle(
     resid_fdf_spectrum = rm_synth_1d_arrays.dirty_fdf_arr.copy()
 
     mask_arr = np.abs(rm_synth_1d_arrays.dirty_fdf_arr) > clean_options.mask
+
+    if rm_synth_1d_arrays.fdf_mask_arr is not None:
+        assert rm_synth_1d_arrays.fdf_mask_arr.ndim == 1, (
+            "Arrays in minor cycle must be 1D."
+        )
+        mask_arr = np.logical_and(
+            mask_arr,
+            rm_synth_1d_arrays.fdf_mask_arr.astype(bool),
+        )
+
     resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     minor_loop_arrays = MinorLoopArrays(

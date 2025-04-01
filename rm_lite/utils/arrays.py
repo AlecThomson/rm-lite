@@ -31,6 +31,8 @@ def nd_to_two_d(arr: NDArray[DType]) -> NDArray[DType]:
         NDArray[Any]: 2D array.
     """
     arr = np.asarray(arr)
+    if arr.ndim == 0:
+        return arr.reshape(1, 1)
     if arr.ndim == 1:
         return arr.reshape(-1, 1)
     if arr.ndim == 2:
