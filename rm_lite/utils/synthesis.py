@@ -286,7 +286,7 @@ def create_fractional_spectra(
     )
 
 
-T = TypeVar("T", NDArray[np.float64], float)
+T = TypeVar("T", float, NDArray[np.float64])
 
 
 def freq_to_lambda2(
@@ -300,7 +300,8 @@ def freq_to_lambda2(
     Returns:
         float: Wavelength^2 in m^2
     """
-    return (float(speed_of_light.value) / freq_hz) ** 2.0
+    speed_of_light_m_s = float(speed_of_light.value)
+    return (speed_of_light_m_s / freq_hz) ** 2.0  # type: ignore[no-any-return]
 
 
 def lambda2_to_freq(lambda_sq_m2: T) -> T:
@@ -312,7 +313,8 @@ def lambda2_to_freq(lambda_sq_m2: T) -> T:
     Returns:
         NDArray[np.float64]: Frequency in Hz
     """
-    return float(speed_of_light.value) / np.sqrt(lambda_sq_m2)
+    speed_of_light_m_s = float(speed_of_light.value)
+    return speed_of_light_m_s / np.sqrt(lambda_sq_m2)  # type: ignore[no-any-return]
 
 
 def compute_theoretical_noise(
