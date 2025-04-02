@@ -1,628 +1,169 @@
-# #!/usr/bin/env python
-# # =============================================================================#
-# #                                                                             #
-# # NAME:     do_RMclean_1D.py                                                  #
-# #                                                                             #
-# # PURPOSE:  Command line functions for RM-clean                               #
-# #           on a dirty Faraday dispersion function.                           #
-# # CREATED:  16-Nov-2018 by J. West                                            #
-# # MODIFIED: 16-Nov-2018 by J. West                                            #
-# # MODIFIED: 23-October-2019 by A. Thomson                                     #
-# #                                                                             #
-# # =============================================================================#
-# #                                                                             #
-# # The MIT License (MIT)                                                       #
-# #                                                                             #
-# # Copyright (c) 2015 Cormac R. Purcell                                        #
-# #                                                                             #
-# # Permission is hereby granted, free of charge, to any person obtaining a     #
-# # copy of this software and associated documentation files (the "Software"),  #
-# # to deal in the Software without restriction, including without limitation   #
-# # the rights to use, copy, modify, merge, publish, distribute, sublicense,    #
-# # and/or sell copies of the Software, and to permit persons to whom the       #
-# # Software is furnished to do so, subject to the following conditions:        #
-# #                                                                             #
-# # The above copyright notice and this permission notice shall be included in  #
-# # all copies or substantial portions of the Software.                         #
-# #                                                                             #
-# # THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR  #
-# # IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,    #
-# # FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE #
-# # AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER      #
-# # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING     #
-# # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER         #
-# # DEALINGS IN THE SOFTWARE.                                                   #
-# #                                                                             #
-# # =============================================================================#
+"""RM-CLEAN on 1D data"""
 
-# import json
-# import os
-# import sys
-# import time
+from __future__ import annotations
 
-# import numpy as np
-# from matplotlib import pyplot as plt
+from typing import NamedTuple
 
-# from rm_lite.utils.synthesis import (
-#     do_rmclean_hogbom,
-#     measure_fdf_complexity,
-#     measure_FDF_parms,
-# )
+import numpy as np
+import polars as pl
+from numpy.typing import NDArray
+from scipy import interpolate
 
-# C = 2.997924538e8  # Speed of light [m/s]
+from rm_lite.tools_1d.rmsynth import RMSynth1DResults
+from rm_lite.utils.clean import rmclean
+from rm_lite.utils.logging import logger
+from rm_lite.utils.synthesis import (
+    TheoreticalNoise,
+    get_fdf_parameters,
+    lambda2_to_freq,
+)
+
+rmclean_arrs_schema = pl.Schema(
+    {
+        "phi_arr_radm2": pl.Float64,
+        "fdf_dirty_complex_arr": pl.Object,
+        "fdf_clean_complex_arr": pl.Object,
+        "fdf_model_complex_arr": pl.Object,
+        "fdf_residual_complex_arr": pl.Object,
+    }
+)
+rmclean_arrs_schema_df = rmclean_arrs_schema.to_frame(eager=True)
+
+rmclean_scalar_schema = pl.Schema(
+    {
+        "mask": pl.Float64,
+        "threshold": pl.Float64,
+        "n_iter": pl.Int64,
+    }
+)
+rmclean_scalar_schema_df = rmclean_scalar_schema.to_frame(eager=True)
 
 
-# # -----------------------------------------------------------------------------#
-# def run_rmclean(
-#     mDict,
-#     aDict,
-#     cutoff,
-#     maxIter=1000,
-#     gain=0.1,
-#     nBits=32,
-#     showPlots=False,
-#     prefixOut="",
-#     verbose=False,
-#     log=print,
-#     saveFigures=False,
-#     window=None,
-# ):
-#     """Run RM-CLEAN on a complex FDF spectrum given a RMSF.
+class RMClean1DResults(NamedTuple):
+    """Resulting arrays from RM-synthesis"""
 
-#     Args:
-#         mDict (dict): Summary of RM synthesis results.
-#         aDict (dict): Data output by RM synthesis.
-#         cutoff (float): CLEAN cutoff in flux units (positive)
-#                         or as multiple of theoretical noise (negative)
-#                         (i.e. -8 = clean to 8 sigma threshold)
-
-#     Kwargs:
-#         maxIter (int): Maximum number of CLEAN iterations per pixel.
-#         gain (float): CLEAN loop gain.
-#         nBits (int): Precision of floating point numbers.
-#         showPlots (bool): Show plots?
-#         verbose (bool): Verbosity.
-#         log (function): Which logging function to use.
-#         window (float): Threshold for deeper windowed cleaning
-
-#     Returns:
-#         mDict_cl (dict): Summary of RMCLEAN results.
-#         aDict_cl (dict): Data output by RMCLEAN.
-
-#     """
-#     phiArr_radm2 = aDict["phiArr_radm2"]
-#     freqArr_Hz = aDict["freqArr_Hz"]
-#     weightArr = aDict["weightArr"]
-#     dirtyFDF = aDict["dirtyFDF"]
-#     phi2Arr_radm2 = aDict["phi2Arr_radm2"]
-#     RMSFArr = aDict["RMSFArr"]
-
-#     lambdaSqArr_m2 = np.power(C / freqArr_Hz, 2.0)
-
-#     # If the cutoff is negative, assume it is a sigma level
-#     if verbose:
-#         log("Expected RMS noise = %.4g flux units" % (mDict["dFDFth"]))
-#     if cutoff < 0:
-#         if verbose:
-#             log("Using a sigma cutoff of %.1f." % (-1 * cutoff))
-#         cutoff = -1 * mDict["dFDFth"] * cutoff
-#         if verbose:
-#             log("Absolute value = %.3g" % cutoff)
-#     else:
-#         if verbose:
-#             log(
-#                 "Using an absolute cutoff of %.3g (%.1f x expected RMS)."
-#                 % (cutoff, cutoff / mDict["dFDFth"])
-#             )
-
-#     if window is None:
-#         window = np.nan
-#     else:
-#         if window < 0:
-#             if verbose:
-#                 log("Using a window sigma cutoff of %.1f." % (-1 * window))
-#             window = -1 * mDict["dFDFth"] * window
-#             if verbose:
-#                 log("Absolute value = %.3g" % window)
-#         else:
-#             if verbose:
-#                 log(
-#                     "Using an absolute window cutoff of %.3g (%.1f x expected RMS)."
-#                     % (window, window / mDict["dFDFth"])
-#                 )
-
-#     startTime = time.time()
-#     # Perform RM-clean on the spectrum
-#     cleanFDF, ccArr, iterCountArr, residFDF = do_rmclean_hogbom(
-#         dirtyFDF=dirtyFDF,
-#         phiArr_radm2=phiArr_radm2,
-#         RMSFArr=RMSFArr,
-#         phi2Arr_radm2=phi2Arr_radm2,
-#         fwhmRMSFArr=np.array(mDict["fwhmRMSF"]),
-#         cutoff=cutoff,
-#         maxIter=maxIter,
-#         gain=gain,
-#         verbose=verbose,
-#         doPlots=showPlots,
-#         window=window,
-#     )
-
-#     # ALTERNATIVE RM_CLEAN CODE ----------------------------------------------#
-#     """
-#     cleanFDF, ccArr, fwhmRMSF, iterCount = \
-#               do_rmclean(dirtyFDF     = dirtyFDF,
-#                          phiArr       = phiArr_radm2,
-#                          lamSqArr     = lamSqArr_m2,
-#                          cutoff       = cutoff,
-#                          maxIter      = maxIter,
-#                          gain         = gain,
-#                          weight       = weightArr,
-#                          RMSFArr      = RMSFArr,
-#                          RMSFphiArr   = phi2Arr_radm2,
-#                          fwhmRMSF     = mDict["fwhmRMSF"],
-#                          doPlots      = True)
-#     """
-#     # -------------------------------------------------------------------------#
-
-#     endTime = time.time()
-#     cputime = endTime - startTime
-#     if verbose:
-#         log("> RM-CLEAN completed in %.4f seconds." % cputime)
-
-#     # Measure the parameters of the deconvolved FDF
-#     mDict_cl = measure_FDF_parms(
-#         FDF=cleanFDF,
-#         phiArr=phiArr_radm2,
-#         fwhmRMSF=mDict["fwhmRMSF"],
-#         dFDF=mDict["dFDFth"],
-#         lamSqArr_m2=lambdaSqArr_m2,
-#         lam0Sq=mDict["lam0Sq_m2"],
-#     )
-#     mDict_cl["cleanCutoff"] = cutoff
-#     mDict_cl["nIter"] = int(iterCountArr)
-
-#     # Measure the complexity of the clean component spectrum
-#     mDict_cl["mom2CCFDF"] = measure_fdf_complexity(phiArr=phiArr_radm2, FDF=ccArr)
-
-#     # Calculating observed errors (based on dFDFcorMAD)
-#     mDict_cl["dPhiObserved_rm2"] = (
-#         mDict_cl["dPhiPeakPIfit_rm2"] * mDict_cl["dFDFcorMAD"] / mDict["dFDFth"]
-#     )
-#     mDict_cl["dAmpObserved"] = mDict_cl["dFDFcorMAD"]
-#     mDict_cl["dPolAngleFitObserved_deg"] = (
-#         mDict_cl["dPolAngleFit_deg"] * mDict_cl["dFDFcorMAD"] / mDict["dFDFth"]
-#     )
-#     mDict_cl["dPolAngleFit0Observed_deg"] = (
-#         mDict_cl["dPolAngle0Fit_deg"] * mDict_cl["dFDFcorMAD"] / mDict["dFDFth"]
-#     )
-
-#     if verbose:
-#         # Print the results to the screen
-#         log()
-#         log("-" * 80)
-#         log("RESULTS:\n")
-#         log("FWHM RMSF = %.4g rad/m^2" % (mDict["fwhmRMSF"]))
-#         log(
-#             "Pol Angle = %.4g (+/-%.4g observed, +- %.4g theoretical) deg"
-#             % (
-#                 mDict_cl["polAngleFit_deg"],
-#                 mDict_cl["dPolAngleFitObserved_deg"],
-#                 mDict_cl["dPolAngleFit_deg"],
-#             )
-#         )
-#         log(
-#             "Pol Angle 0 = %.4g (+/-%.4g observed, +- %.4g theoretical) deg"
-#             % (
-#                 mDict_cl["polAngle0Fit_deg"],
-#                 mDict_cl["dPolAngleFit0Observed_deg"],
-#                 mDict_cl["dPolAngle0Fit_deg"],
-#             )
-#         )
-#         log(
-#             "Peak FD = %.4g (+/-%.4g observed, +- %.4g theoretical) rad/m^2"
-#             % (
-#                 mDict_cl["phiPeakPIfit_rm2"],
-#                 mDict_cl["dPhiObserved_rm2"],
-#                 mDict_cl["dPhiPeakPIfit_rm2"],
-#             )
-#         )
-#         log("freq0_GHz = %.4g " % (mDict["freq0_Hz"] / 1e9))
-#         log("I freq0 = %.4g %s" % (mDict["Ifreq0"], mDict["units"]))
-#         log(
-#             "Peak PI = %.4g (+/-%.4g observed, +- %.4g theoretical) %s"
-#             % (
-#                 mDict_cl["ampPeakPIfit"],
-#                 mDict_cl["dAmpObserved"],
-#                 mDict_cl["dAmpPeakPIfit"],
-#                 mDict["units"],
-#             )
-#         )
-#         log("QU Noise = %.4g %s" % (mDict["dQU"], mDict["units"]))
-#         log("FDF Noise (theory)   = %.4g %s" % (mDict["dFDFth"], mDict["units"]))
-#         log(
-#             "FDF Noise (Corrected MAD) = %.4g %s"
-#             % (mDict_cl["dFDFcorMAD"], mDict["units"])
-#         )
-
-#         log("FDF SNR = %.4g " % (mDict_cl["snrPIfit"]))
-#         log()
-#         log("-" * 80)
-
-#     # Pause to display the figure
-#     if showPlots or saveFigures:
-#         fdfFig = plot_clean_spec(
-#             phiArr_radm2,
-#             dirtyFDF,
-#             cleanFDF,
-#             ccArr,
-#             residFDF,
-#             cutoff,
-#             window,
-#             mDict["units"],
-#         )
-#     # Pause if plotting enabled
-#     if showPlots:
-#         plt.show()
-#     if saveFigures:
-#         if verbose:
-#             print("Saving CLEAN FDF plot:")
-#         outFilePlot = prefixOut + "_cleanFDF-plots.pdf"
-#         if verbose:
-#             print("> " + outFilePlot)
-#         fdfFig.savefig(outFilePlot, bbox_inches="tight")
-#         # print("Press <RETURN> to exit ...", end=' ')
-#         # input()
-
-#     # add array dictionary
-#     aDict_cl = dict()
-#     aDict_cl["phiArr_radm2"] = phiArr_radm2
-#     aDict_cl["freqArr_Hz"] = freqArr_Hz
-#     aDict_cl["cleanFDF"] = cleanFDF
-#     aDict_cl["ccArr"] = ccArr
-#     aDict_cl["iterCountArr"] = iterCountArr
-#     aDict_cl["residFDF"] = residFDF
-
-#     return mDict_cl, aDict_cl
+    fdf_parameters: pl.DataFrame
+    """ FDF parameters """
+    fdf_arrs: pl.DataFrame
+    """ RMClean arrays """
+    clean_parameters: pl.DataFrame
+    """ RMClean parameters """
 
 
-# def saveOutput(mDict_cl, aDict_cl, prefixOut="", verbose=False, log=print):
-#     """
-#     Saves RM-CLEAN results to text files. The clean (restored) FDF, model FDF
-#     (clean components) are saved, as is two files (.dat and .json)
-#     reporting the fitting results as key-value pairs.
-#     Inputs:
-#         mDict_cl: the results dictionary (mDict_cl) from RM-CLEAN.
-#         aDict_cl: the array dictionary (aDict) from RM-CLEAN.
-#         prefixOut (str): name prefix to be given to output files
-#             (including relative/absolute directory to save to)
-#         verbose (bool): print verbose messages?
-#         log (function): function to use when printing verbose messages.
-#     """
-#     # Get data
-#     phiArr_radm2 = aDict_cl["phiArr_radm2"]
-#     cleanFDF = aDict_cl["cleanFDF"]
-#     ccArr = aDict_cl["ccArr"]
+def run_rmclean_from_synth(
+    rm_synth_1d_results: RMSynth1DResults,
+    auto_mask: float = 7,
+    auto_threshold: float = 1,
+    max_iter: int = 10_000,
+    gain: float = 0.1,
+    mask_arr: NDArray[np.bool_] | None = None,
+) -> RMClean1DResults:
+    """Run RM-CLEAN on the results of RM-synth.
 
-#     # Save the deconvolved FDF and CC model to ASCII files
-#     if verbose:
-#         log("Saving the clean FDF and component model to ASCII files.")
-#     outFile = prefixOut + "_FDFclean.dat"
-#     if verbose:
-#         log("> %s" % outFile)
-#     np.savetxt(outFile, list(zip(phiArr_radm2, cleanFDF.real, cleanFDF.imag)))
-#     outFile = prefixOut + "_FDFmodel.dat"
-#     if verbose:
-#         log("> %s" % outFile)
-#     np.savetxt(outFile, list(zip(phiArr_radm2, ccArr.real, ccArr.imag)))
+    Args:
+        rm_synth_1d_results (RMSynth1DResults): Results from RM-synth.
+        auto_mask (float, optional): Masking threshold in SNR. Defaults to 7.
+        auto_threshold (float, optional): Cleaning threshold in SNR. Defaults to 1.
+        max_iter (int, optional): Maximum CLEAN iterations. Defaults to 10_000.
+        gain (float, optional): CLEAN gain. Defaults to 0.1.
+        mask_arr (NDArray[np.bool_] | None, optional): Optional mask array. Defaults to None.
 
-#     # Save the RM-clean measurements to a "key=value" text file
-#     if verbose:
-#         log("Saving the measurements on the FDF in 'key=val' and JSON formats.")
-#     outFile = prefixOut + "_RMclean.dat"
-#     if verbose:
-#         log("> %s" % outFile)
-#     FH = open(outFile, "w")
-#     for k, v in mDict_cl.items():
-#         FH.write("%s=%s\n" % (k, v))
-#     FH.close()
-#     outFile = prefixOut + "_RMclean.json"
-#     if verbose:
-#         log("> %s" % outFile)
-#     for k, v in mDict_cl.items():
-#         if isinstance(v, np.float_):
-#             mDict_cl[k] = float(v)
-#         elif isinstance(v, np.int_):
-#             mDict_cl[k] = int(v)
-#         elif isinstance(v, NDArray[np.float64]):
-#             mDict_cl[k] = v.tolist()
-#         elif isinstance(v, np.bool_):
-#             mDict_cl[k] = bool(v)
+    Returns:
+        RMClean1DResults: RM-CLEAN results: `fdf_parameters`, `fdf_arrs`, `clean_parameters`.
+    """
+    rmsyth_arrs_df = rm_synth_1d_results.fdf_arrs
+    rmsf_arrs_df = rm_synth_1d_results.rmsf_arrs
+    fdf_parameters = rm_synth_1d_results.fdf_parameters
+    stokes_i_arrs_df = rm_synth_1d_results.stokes_i_arrs
 
-#     json.dump(mDict_cl, open(outFile, "w"))
+    theoretical_noise = TheoreticalNoise(
+        fdf_error_noise=float(fdf_parameters["fdf_error_noise"].to_numpy()),
+        fdf_q_noise=float(fdf_parameters["fdf_q_noise"].to_numpy()),
+        fdf_u_noise=float(fdf_parameters["fdf_u_noise"].to_numpy()),
+    )
 
+    logger.info(f"Theoretical noise: {theoretical_noise}")
 
-# def readFiles(fdfFile, rmsfFile, weightFile, rmSynthFile, nBits):
-#     """
-#     Read in the RM-synthesis output files and assemble back into dictionaries.
-#     Inputs:
-#         fdfFile (str): file path to the FDF.
-#         rmsfFile (str): file path to the RMSF.
-#         weightfile (str): file path to the channel weights.
-#         rmSynthFile (str): file path to the RMsynth json file.
-#         nBits (int): number of bits to use when storing the data.
-#     """
+    mask = auto_mask * theoretical_noise.fdf_error_noise
+    threshold = auto_threshold * theoretical_noise.fdf_error_noise
 
-#     # Default data types
-#     dtFloat = "float" + str(nBits)
-#     dtComplex = "complex" + str(2 * nBits)
+    logger.info(
+        f"Auto mask: {mask:0.2f}, Auto threshold: {threshold:0.2f}, Max iterations: {max_iter}, Gain: {gain}"
+    )
 
-#     # Read the RMSF from the ASCII file
-#     phi2Arr_radm2, RMSFreal, RMSFimag = np.loadtxt(rmsfFile, unpack=True, dtype=dtFloat)
-#     # Read the frequency vector for the lambda^2 array
-#     freqArr_Hz, weightArr = np.loadtxt(weightFile, unpack=True, dtype=dtFloat)
-#     # Read the FDF from the ASCII file
-#     phiArr_radm2, FDFreal, FDFimag = np.loadtxt(fdfFile, unpack=True, dtype=dtFloat)
-#     # Read the RM-synthesis parameters from the JSON file
-#     mDict = json.load(open(rmSynthFile, "r"))
-#     dirtyFDF = FDFreal + 1j * FDFimag
-#     RMSFArr = RMSFreal + 1j * RMSFimag
+    stokes_i_model = interpolate.interp1d(
+        stokes_i_arrs_df["freq_arr_hz"],
+        stokes_i_arrs_df["stokes_i_model_arr"],
+    )
 
-#     # add array dictionary
-#     aDict = dict()
-#     aDict["phiArr_radm2"] = phiArr_radm2
-#     aDict["phi2Arr_radm2"] = phi2Arr_radm2
-#     aDict["RMSFArr"] = RMSFArr
-#     aDict["freqArr_Hz"] = freqArr_Hz
-#     aDict["weightArr"] = weightArr
-#     aDict["dirtyFDF"] = dirtyFDF
+    stokes_i_reference_flux = stokes_i_model(
+        lambda2_to_freq(float(fdf_parameters["lam_sq_0_m2"].to_numpy()))
+    )
 
-#     return mDict, aDict
+    fdf_dirty_arr = rmsyth_arrs_df["fdf_dirty_complex_arr"].to_numpy().astype(complex)
 
+    rm_clean_results = rmclean(
+        dirty_fdf_arr=fdf_dirty_arr,
+        phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
+        rmsf_arr=rmsf_arrs_df["rmsf_complex_arr"].to_numpy().astype(complex),
+        phi_double_arr_radm2=rmsf_arrs_df["phi2_arr_radm2"].to_numpy().astype(float),
+        fwhm_rmsf_arr=fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float),
+        mask=mask,
+        threshold=threshold,
+        max_iter=max_iter,
+        gain=gain,
+        mask_arr=mask_arr,
+    )
+    clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr = rm_clean_results
 
-# def plot_clean_spec(
-#     phiArr_radm2, dirtyFDF, cleanFDF, ccArr, residFDF, cutoff, window, units
-# ):
-#     """
-#     Plotting code for cleaned Faraday depth spectra.
-#     Inputs:
-#         phiArr_radm2 (array): array of Faraday depth values.
-#         dirty FDF (array): dirty Faraday depth spectrum.
-#         cleanFDF (array): cleaned (restored) Faraday depth spectrum
-#         ccArr (array): clean component array
-#         residFDF (array): residual Faraday depth spectrum
-#         cutoff (float): clean threshold
-#         window (float): window threshold
-#         units (str): name of flux unit
-#     """
-#     from matplotlib.ticker import MaxNLocator
+    fdf_parameters = get_fdf_parameters(
+        fdf_arr=rm_clean_results.clean_fdf_arr,
+        phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
+        fwhm_rmsf_radm2=float(
+            fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float)
+        ),
+        freq_arr_hz=stokes_i_arrs_df["freq_arr_hz"].to_numpy().astype(float),
+        complex_pol_arr=stokes_i_arrs_df["complex_frac_pol_arr"]
+        .to_numpy()
+        .astype(complex),
+        complex_pol_error=stokes_i_arrs_df["complex_frac_pol_error"]
+        .to_numpy()
+        .astype(float),
+        lambda_sq_arr_m2=stokes_i_arrs_df["lambda_sq_arr_m2"].to_numpy().astype(float),
+        lam_sq_0_m2=float(fdf_parameters["lam_sq_0_m2"].to_numpy()),
+        stokes_i_reference_flux=stokes_i_reference_flux,
+        theoretical_noise=theoretical_noise,
+        fit_function=str(fdf_parameters["fdf_u_noise"].to_numpy()),
+    )
 
-#     fig = plt.figure(facecolor="w", figsize=(12.0, 8))
-#     ax1 = fig.add_subplot(211)
-#     ax2 = fig.add_subplot(212, sharex=ax1)
+    rmclean_arrs = rmclean_arrs_schema_df.vstack(
+        pl.DataFrame(
+            {
+                "phi_arr_radm2": rmsyth_arrs_df["phi_arr_radm2"]
+                .to_numpy()
+                .astype(float),
+                "fdf_dirty_complex_arr": rmsyth_arrs_df["fdf_dirty_complex_arr"]
+                .to_numpy()
+                .astype(complex),
+                "fdf_clean_complex_arr": clean_fdf_arr,
+                "fdf_model_complex_arr": model_fdf_arr,
+                "fdf_residual_complex_arr": resid_fdf_arr,
+            }
+        )
+    )
 
-#     dirtyFDF = np.squeeze(dirtyFDF)
-#     cleanFDF = np.squeeze(cleanFDF)
-#     ccArr = np.squeeze(ccArr)
-#     residFDF = np.squeeze(residFDF)
+    clean_parameters = rmclean_scalar_schema_df.vstack(
+        pl.DataFrame(
+            {
+                "mask": mask,
+                "threshold": threshold,
+                "n_iter": clean_iter_arr,
+            }
+        )
+    )
 
-#     ax1.cla()
-#     ax2.cla()
-#     ax1.step(
-#         phiArr_radm2,
-#         np.abs(dirtyFDF),
-#         color="grey",
-#         marker="None",
-#         mfc="w",
-#         mec="g",
-#         ms=10,
-#         where="mid",
-#         label="Dirty FDF",
-#     )
-#     ax1.step(
-#         phiArr_radm2,
-#         np.abs(ccArr),
-#         color="g",
-#         marker="None",
-#         mfc="w",
-#         mec="g",
-#         ms=10,
-#         where="mid",
-#         label="Clean Components",
-#     )
-#     ax1.step(
-#         phiArr_radm2,
-#         np.abs(residFDF),
-#         color="magenta",
-#         marker="None",
-#         mfc="w",
-#         mec="g",
-#         ms=10,
-#         where="mid",
-#         label="Residual FDF",
-#     )
-#     ax1.step(
-#         phiArr_radm2,
-#         np.abs(cleanFDF),
-#         color="k",
-#         marker="None",
-#         mfc="w",
-#         mec="g",
-#         ms=10,
-#         where="mid",
-#         lw=1.5,
-#         label="Clean FDF",
-#     )
-#     ax1.axhline(cutoff, color="r", ls="--", label="Clean cutoff")
-#     if window > 0:
-#         ax1.axhline(window, color="r", ls=":", label="Window cutoff")
-#     ax1.yaxis.set_major_locator(MaxNLocator(4))
-#     ax1.set_ylabel("Flux Density (" + units + ")")
-#     leg = ax1.legend(
-#         numpoints=1,
-#         loc="upper right",
-#         shadow=False,
-#         borderaxespad=0.3,
-#         bbox_to_anchor=(1.00, 1.00),
-#     )
-#     for t in leg.get_texts():
-#         t.set_fontsize("small")
-#     leg.get_frame().set_linewidth(0.5)
-#     leg.get_frame().set_alpha(0.5)
-#     [label.set_visible(False) for label in ax1.get_xticklabels()]
-#     ax2.step(
-#         phiArr_radm2,
-#         np.abs(residFDF),
-#         color="magenta",
-#         marker="None",
-#         mfc="w",
-#         mec="g",
-#         ms=10,
-#         where="mid",
-#         label="Residual FDF",
-#     )
-#     ax2.step(
-#         phiArr_radm2,
-#         np.abs(ccArr),
-#         color="g",
-#         marker="None",
-#         mfc="w",
-#         mec="g",
-#         ms=10,
-#         where="mid",
-#         label="Clean Components",
-#     )
-#     ax2.axhline(cutoff, color="r", ls="--", label="Clean cutoff")
-#     if window > 0:
-#         ax2.axhline(window, color="r", ls=":", label="Window cutoff")
-#     ax2.set_ylim(0, max(cutoff * 3.0, window * 3.0))
-#     ax2.yaxis.set_major_locator(MaxNLocator(4))
-#     ax2.set_ylabel(rf"Flux Density ({units})")
-#     ax2.set_xlabel(r"$\phi$ rad m$^{-2}$")
-#     leg = ax2.legend(
-#         numpoints=1,
-#         loc="upper right",
-#         shadow=False,
-#         borderaxespad=0.3,
-#         bbox_to_anchor=(1.00, 1.00),
-#     )
-#     for t in leg.get_texts():
-#         t.set_fontsize("small")
-#     leg.get_frame().set_linewidth(0.5)
-#     leg.get_frame().set_alpha(0.5)
-#     ax2.autoscale_view(True, True, True)
-#     return fig
-
-
-# # -----------------------------------------------------------------------------#
-# def main():
-#     import argparse
-
-#     """
-#     Start the function to perform RM-clean if called from the command line.
-#     """
-
-#     # Help string to be shown using the -h option
-#     descStr = """
-#     Run RM-CLEAN on an ASCII Faraday dispersion function (FDF), applying
-#     the rotation measure spread function created by the script
-#     'do_RMsynth_1D.py'. Runs in two steps: an initial clean of the whole FDF,
-#     to the specified depth (set by -c flag), followed by a deeper clean (set by
-#     -w flag) limited to windows around the previous clean components.
-#     Saves ASCII files containing a deconvolved FDF & clean-component spectrum.
-#     """
-
-#     epilog_text = """
-#     By default, saves the following files:
-#     _FDFclean.dat: cleaned and restored FDF [Phi, Q, U]
-#     _FDFmodel.dat: clean component FDF [Phi, Q, U]
-#     _RMclean.dat: list of calculated parameters describing FDF
-#     _RMclean.json: dictionary of calculated parameters
-#     """
-
-#     # Parse the command line options
-#     parser = argparse.ArgumentParser(
-#         description=descStr,
-#         epilog=epilog_text,
-#         formatter_class=argparse.RawTextHelpFormatter,
-#     )
-#     parser.add_argument(
-#         "dataFile",
-#         metavar="dataFile.dat",
-#         nargs=1,
-#         help="ASCII file containing original frequency spectra.",
-#     )
-#     parser.add_argument(
-#         "-c",
-#         dest="cutoff",
-#         type=float,
-#         default=-3,
-#         help="Initial CLEAN cutoff (+ve = absolute, -ve = sigma) [-3].",
-#     )
-#     parser.add_argument(
-#         "-w",
-#         dest="window",
-#         type=float,
-#         default=None,
-#         help="Threshold for (deeper) windowed clean [Not used if not set].",
-#     )
-#     parser.add_argument(
-#         "-n",
-#         dest="maxIter",
-#         type=int,
-#         default=1000,
-#         help="maximum number of CLEAN iterations [1000].",
-#     )
-#     parser.add_argument(
-#         "-g", dest="gain", type=float, default=0.1, help="CLEAN loop gain [0.1]."
-#     )
-#     parser.add_argument(
-#         "-p", dest="showPlots", action="store_true", help="show the plots [False]."
-#     )
-#     parser.add_argument(
-#         "-v", dest="verbose", action="store_true", help="Print verbose messages"
-#     )
-#     parser.add_argument(
-#         "-S",
-#         dest="saveOutput",
-#         action="store_true",
-#         help="save the arrays and plots [False].",
-#     )
-#     args = parser.parse_args()
-
-#     # Form the input file names from prefix of the original data file
-#     (fileRoot,) = os.path.splitext(args.dataFile[0])
-#     fdfFile = fileRoot + "_FDFdirty.dat"
-#     rmsfFile = fileRoot + "_RMSF.dat"
-#     weightFile = fileRoot + "_weight.dat"
-#     rmSynthFile = fileRoot + "_RMsynth.json"
-#     # Sanity checks
-#     for f in [weightFile, fdfFile, rmsfFile, rmSynthFile]:
-#         if not os.path.exists(f):
-#             print("File does not exist: '{:}'.".format(f), end=" ")
-#             sys.exit()
-#     nBits = 32
-#     (dataDir,) = os.path.split(args.dataFile[0])
-#     mDict, aDict = readFiles(fdfFile, rmsfFile, weightFile, rmSynthFile, nBits)
-#     # Run RM-CLEAN on the spectrum
-#     mDict_cl, aDict_cl = run_rmclean(
-#         mDict=mDict,
-#         aDict=aDict,
-#         cutoff=args.cutoff,
-#         maxIter=args.maxIter,
-#         gain=args.gain,
-#         nBits=nBits,
-#         showPlots=args.showPlots,
-#         prefixOut=fileRoot,
-#         verbose=args.verbose,
-#         saveFigures=args.saveOutput,
-#         window=args.window,
-#     )
-
-#     # Save output
-#     if args.saveOutput:
-#         saveOutput(mDict_cl, aDict_cl, prefixOut=fileRoot, verbose=args.verbose)
-
-
-# # -----------------------------------------------------------------------------#
-# if __name__ == "__main__":
-#     main()
+    return RMClean1DResults(
+        fdf_parameters=fdf_parameters,
+        fdf_arrs=rmclean_arrs,
+        clean_parameters=clean_parameters,
+    )

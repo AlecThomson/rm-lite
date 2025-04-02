@@ -30,7 +30,7 @@ class TqdmToLogger(io.StringIO):
 
 
 class CustomFormatter(logging.Formatter):
-    format_str = "%(asctime)s.%(msecs)03d %(module)s - %(funcName)s: %(message)s"
+    format_str = "%(module)s.%(funcName)s: %(message)s"
 
     FORMATS = {  # noqa: RUF012
         logging.DEBUG: f"%(levelname)s {format_str}",
