@@ -37,6 +37,34 @@ class RMSynth1DResults(NamedTuple):
     """ Stokes I arrays """
 
 
+rmsyth_arrs_schema = pl.Schema(
+    {
+        "phi_arr_radm2": pl.Float64,
+        "fdf_dirty_complex_arr": pl.Object,
+    }
+)
+rmsyth_arrs_schema_df = rmsyth_arrs_schema.to_frame(eager=True)
+rmsf_arrs_schema = pl.Schema(
+    {
+        "phi2_arr_radm2": pl.Float64,
+        "rmsf_complex_arr": pl.Object,
+    }
+)
+rmsf_arrs_schema_df = rmsf_arrs_schema.to_frame(eager=True)
+stokes_i_arrs_schema = pl.Schema(
+    {
+        "freq_arr_hz": pl.Float64,
+        "lambda_sq_arr_m2": pl.Float64,
+        "stokes_i_model_arr": pl.Float64,
+        "stokes_i_model_error": pl.Float64,
+        "flag_arr": pl.Boolean,
+        "complex_frac_pol_arr": pl.Object,
+        "complex_frac_pol_error": pl.Object,
+    }
+)
+stokes_i_arrs_schema_df = stokes_i_arrs_schema.to_frame(eager=True)
+
+
 def run_rmsynth(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
@@ -200,26 +228,35 @@ def _run_rmsynth(
         theoretical_noise=theoretical_noise,
         fit_function=fit_function,
     )
-    rmsyth_arrs = pl.DataFrame(
-        {
-            "phi_arr_radm2": rmsynth_params.phi_arr_radm2,
-            "fdf_dirty_complex_arr": fdf_dirty_arr,
-        }
+    rmsyth_arrs = rmsyth_arrs_schema_df.vstack(
+        pl.DataFrame(
+            {
+                "phi_arr_radm2": rmsynth_params.phi_arr_radm2,
+                "fdf_dirty_complex_arr": fdf_dirty_arr,
+            }
+        )
     )
 
-    rmsf_arrs = pl.DataFrame(
-        {
-            "phi2_arr_radm2": rmsf_result.phi_double_arr_radm2,
-            "rmsf_complex_arr": rmsf_result.rmsf_cube,
-        }
+    rmsf_arrs = rmsf_arrs_schema_df.vstack(
+        pl.DataFrame(
+            {
+                "phi2_arr_radm2": rmsf_result.phi_double_arr_radm2,
+                "rmsf_complex_arr": rmsf_result.rmsf_cube,
+            }
+        )
     )
-    stokes_i_arrs = pl.DataFrame(
-        {
-            "freq_arr_hz": stokes_data.freq_arr_hz,
-            "stokes_i_model_arr": fractional_spectra.stokes_i_model_arr,
-            "stokes_i_model_error": fractional_spectra.stokes_i_model_error,
-            "flag_arr": no_nan_idx,
-        }
+    stokes_i_arrs = stokes_i_arrs_schema_df.vstack(
+        pl.DataFrame(
+            {
+                "freq_arr_hz": stokes_data.freq_arr_hz,
+                "lambda_sq_arr_m2": rmsynth_params.lambda_sq_arr_m2,
+                "stokes_i_model_arr": fractional_spectra.stokes_i_model_arr,
+                "stokes_i_model_error": fractional_spectra.stokes_i_model_error,
+                "flag_arr": no_nan_idx,
+                "complex_frac_pol_arr": fractional_spectra.complex_pol_frac_arr,
+                "complex_frac_pol_error": fractional_spectra.complex_pol_frac_error,
+            }
+        )
     )
 
     return RMSynth1DResults(fdf_parameters, rmsyth_arrs, rmsf_arrs, stokes_i_arrs)

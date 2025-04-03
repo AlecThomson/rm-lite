@@ -242,7 +242,7 @@ def _rmclean_nd(
             clean_options=clean_options,
         )
         clean_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.clean_fdf_spectrum
-        model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
+        resid_fdf_arr_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
         model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.model_fdf_spectrum
         iter_count_arr_2d[pix_idx] = clean_loop_results.iter_count
 
@@ -349,7 +349,7 @@ def minor_loop(
         (len(minor_loop_arrays.phi_double_arr_radm2) - len(phi_arr_radm2)) / 2
     )
 
-    logger.info(f"Starting minor loop...cleaning {mask_arr.sum()} pixels")
+    logger.info(f"Starting minor loop... {mask_arr.sum()} pixels in the mask")
     for iter_count in range(
         minor_loop_options.start_iter, minor_loop_options.max_iter + 1
     ):
@@ -454,7 +454,7 @@ def minor_cycle(
         phi_arr_radm2=rm_synth_1d_arrays.phi_arr_radm2,
         phi_double_arr_radm2=rm_synth_1d_arrays.phi_double_arr_radm2,
         rmsf_spectrum=rm_synth_1d_arrays.rmsf_arr,
-        rmsf_fwhm=float(rm_synth_1d_arrays.fwhm_rmsf_arr),
+        rmsf_fwhm=float(rm_synth_1d_arrays.fwhm_rmsf_arr.squeeze()),
     )
 
     minor_loop_options = MinorLoopOptions(
@@ -466,6 +466,7 @@ def minor_cycle(
         update_mask=True,
     )
 
+    logger.info("Starting initial minor loop...")
     initial_loop_results = minor_loop(
         minor_loop_arrays=minor_loop_arrays,
         minor_loop_options=minor_loop_options,
@@ -476,6 +477,8 @@ def minor_cycle(
     mask_arr = np.abs(initial_loop_results.model_fdf_spectrum) > 0
     resid_fdf_spectrum = initial_loop_results.resid_fdf_spectrum
     resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
+
+    logger.info("Initial loop complete. Starting deep clean...")
 
     deep_loop_results = minor_loop(
         minor_loop_arrays=minor_loop_arrays.with_options(

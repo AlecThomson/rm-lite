@@ -8,5 +8,7 @@ examples should work as written.
 :maxdepth: 1
 :caption: Example notebooks:
 examples/rmsynth_1d.ipynb
+examples/rmclean_1d.ipynb
+examples/rmsynth_2d.ipynb
 
 ```

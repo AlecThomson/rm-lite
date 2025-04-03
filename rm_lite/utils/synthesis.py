@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import time
 import warnings
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, TypeVar
 
 import finufft
 import numpy as np
@@ -77,84 +78,6 @@ class FractionalSpectra(NamedTuple):
     complex_pol_frac_error: NDArray[np.complex128]
     fit_result: FitResult | None
     no_nan_idx: NDArray[np.bool_]
-
-
-# class FDFParameters(NamedTuple):
-#     """Parameters of the Faraday dispersion function"""
-
-#     fdf_error_mad: float
-#     """Median absolute deviation error of the FDF"""
-#     peak_pi_fit: float
-#     """Peak polarised intensity of the FDF"""
-#     peak_pi_error: float
-#     """Error on the peak polarised intensity"""
-#     peak_pi_fit_debias: float
-#     """Debiased peak polarised intensity of the FDF"""
-#     peak_pi_fit_snr: float
-#     """Signal-to-noise ratio of the peak polarised intensity"""
-#     peak_pi_fit_index: float
-#     """Index of the fitted peak polarised intensity"""
-#     peak_rm_fit: float
-#     """Peak Faraday depth of the FDF"""
-#     peak_rm_fit_error: float
-#     """Error on the peak Faraday depth"""
-#     peak_q_fit: float
-#     """Peak Stokes Q of the FDF"""
-#     peak_u_fit: float
-#     """Peak Stokes U of the FDF"""
-#     peak_pa_fit_deg: float
-#     """Peak position angle of the FDF in degrees"""
-#     peak_pa_fit_deg_error: float
-#     """Error on the peak position angle of the FDF in degrees"""
-#     peak_pa0_fit_deg: float
-#     """Peak deroated position angle of the FDF in degrees"""
-#     peak_pa0_fit_deg_error: float
-#     """Error on the peak deroated position angle of the FDF in degrees"""
-#     fit_function: Literal["log", "linear"]
-#     """The function used to fit the FDF"""
-#     lam_sq_0_m2: float
-#     """Reference wavelength^2 value"""
-#     ref_freq_hz: float
-#     """Reference frequency in Hz"""
-#     fwhm_rmsf_radm2: float
-#     """The FWHM of the RMSF main lobe"""
-#     fdf_error_noise: float
-#     """Theoretical noise of the FDF"""
-#     fdf_q_noise: float
-#     """Theoretical noise of the real FDF"""
-#     fdf_u_noise: float
-#     """Theoretical noise of the imaginary FDF"""
-#     min_freq_hz: float
-#     """Minimum frequency in Hz"""
-#     max_freq_hz: float
-#     """Maximum frequency in Hz"""
-#     n_channels: int
-#     """Number of channels"""
-#     median_d_freq_hz: float
-#     """Channel width in Hz"""
-#     frac_pol: float
-#     """Fractional linear polarisation"""
-
-#     def __str__(self):
-#         return (
-#             f"RMSF FWHM: {self.fwhm_rmsf_radm2:.2f}\n"
-#             f"Peak pI: {self.peak_pi_fit:.2f} ± {self.peak_pi_error:.2f}\n"
-#             f"Peak RM: {self.peak_rm_fit:.2f} ± {self.peak_rm_fit_error:.2f}\n"
-#             f"Peak PA: {self.peak_pa_fit_deg:.2f} ± {self.peak_pa_fit_deg_error:.2f}\n"
-#             f"Peak PA0: {self.peak_pa0_fit_deg:.2f} ± {self.peak_pa0_fit_deg_error:.2f}\n"
-#             f"Peak Q: {self.peak_q_fit:.2f} ± {self.fdf_q_noise:.2f}, Peak U: {self.peak_u_fit:.2f} ± {self.fdf_u_noise:.2f}\n"
-#             f"freq0: {self.ref_freq_hz:.2f}, lam0: {self.lam_sq_0_m2:.2f}\n"
-#             f"Fit function: {self.fit_function}\n"
-#             f"Frac pol: {self.frac_pol:.2f}\n"
-#             f"pI error (MAD): {self.fdf_error_mad:.2f}\n"
-#             f"pI error (noise): {self.fdf_error_noise:.2f}\n"
-#             f"pI SNR: {self.peak_pi_fit_snr:.2f}\n"
-#             f"Min freq: {self.min_freq_hz:.2f}, Max freq: {self.max_freq_hz:.2f}\n"
-#             f"n_channels: {self.n_channels}, Median d_freq: {self.median_d_freq_hz:.2f}\n"
-#         )
-
-#     def __repr__(self):
-#         return self.__str__()
 
 
 class TheoreticalNoise(NamedTuple):
@@ -364,9 +287,12 @@ def create_fractional_spectra(
     )
 
 
+T = TypeVar("T", float, NDArray[np.float64])
+
+
 def freq_to_lambda2(
-    freq_hz: NDArray[np.float64],
-) -> NDArray[np.float64]:
+    freq_hz: T,
+) -> T:
     """Convert frequency to lambda^2.
 
     Args:
@@ -375,10 +301,11 @@ def freq_to_lambda2(
     Returns:
         float: Wavelength^2 in m^2
     """
-    return (float(speed_of_light.value) / freq_hz) ** 2.0
+    speed_of_light_m_s = float(speed_of_light.value)
+    return (speed_of_light_m_s / freq_hz) ** 2.0  # type: ignore[no-any-return]
 
 
-def lambda2_to_freq(lambda_sq_m2: NDArray[np.float64]) -> NDArray[np.float64]:
+def lambda2_to_freq(lambda_sq_m2: T) -> T:
     """Convert lambda^2 to frequency.
 
     Args:
@@ -387,7 +314,8 @@ def lambda2_to_freq(lambda_sq_m2: NDArray[np.float64]) -> NDArray[np.float64]:
     Returns:
         NDArray[np.float64]: Frequency in Hz
     """
-    return float(speed_of_light.value) / np.sqrt(lambda_sq_m2)
+    speed_of_light_m_s = float(speed_of_light.value)
+    return speed_of_light_m_s / np.sqrt(lambda_sq_m2)  # type: ignore[no-any-return]
 
 
 def compute_theoretical_noise(
@@ -504,7 +432,7 @@ def compute_rmsf_params(
 def compute_rmsynth_params(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
-    complex_pol_error: NDArray[np.float64],
+    complex_pol_error: NDArray[np.complex128],
     fdf_options: FDFOptions,
 ) -> RMSynthParams:
     """Calculate the parameters for RM-synthesis.
@@ -653,8 +581,7 @@ def rmsynth_nufft(
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
 
     Args:
-        stokes_q_arr (NDArray[np.float64]): Stokes Q data array
-        stokes_u_arr (NDArray[np.float64]): Stokes U data array
+        complex_pol_arr (NDArray[np.complex128]): Complex polarisation values (Q + iU)
         lambda_sq_arr_m2 (NDArray[np.float64]): Wavelength^2 values in m^2
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
         weight_arr (NDArray[np.float64]): Weight array
@@ -670,6 +597,7 @@ def rmsynth_nufft(
     Returns:
         NDArray[np.float64]: Dirty Faraday dispersion function cube
     """
+    tick = time.time()
     msg = f"Running RM-synthesis using the NUFFTs over {len(phi_arr_radm2)} Faraday depth channels."
     logger.info(msg)
     flagged_weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -756,6 +684,8 @@ def rmsynth_nufft(
         )
 
     # Remove redundant dimensions in the FDF array
+    tock = time.time()
+    logger.info(f"NUFFT complete in {tock - tick:.3g} seconds.")
     return np.squeeze(fdf_dirty_cube)
 
 
@@ -984,6 +914,43 @@ def get_rmsf_nufft(
     )
 
 
+fdf_params_schema = pl.Schema(
+    {
+        "fdf_error_mad": pl.Float64,
+        "peak_pi_fit": pl.Float64,
+        "peak_pi_error": pl.Float64,
+        "peak_pi_fit_debias": pl.Float64,
+        "peak_pi_fit_snr": pl.Float64,
+        "peak_pi_fit_index": pl.Int64,
+        "peak_rm_fit": pl.Float64,
+        "peak_rm_fit_error": pl.Float64,
+        "peak_q_fit": pl.Float64,
+        "peak_u_fit": pl.Float64,
+        "peak_pa_fit_deg": pl.Float64,
+        "peak_pa_fit_deg_error": pl.Float64,
+        "peak_pa0_fit_deg": pl.Float64,
+        "peak_pa0_fit_deg_error": pl.Float64,
+        "fit_function": pl.String,
+        "lam_sq_0_m2": pl.Float64,
+        "ref_freq_hz": pl.Float64,
+        "fwhm_rmsf_radm2": pl.Float64,
+        "fdf_error_noise": pl.Float64,
+        "fdf_q_noise": pl.Float64,
+        "fdf_u_noise": pl.Float64,
+        "min_freq_hz": pl.Float64,
+        "max_freq_hz": pl.Float64,
+        "n_channels": pl.Int64,
+        "median_d_freq_hz": pl.Float64,
+        "frac_pol": pl.Float64,
+        "frac_pol_error": pl.Float64,
+        "sigma_add": pl.Float64,
+        "sigma_add_minus": pl.Float64,
+        "sigma_add_plus": pl.Float64,
+    }
+)
+fdf_params_schema_df = fdf_params_schema.to_frame(eager=True)
+
+
 def get_fdf_parameters(
     fdf_arr: NDArray[np.complex128],
     phi_arr_radm2: NDArray[np.float64],
@@ -1021,8 +988,8 @@ def get_fdf_parameters(
     # ignore mean of empty slice warning
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
-        fdf_error_mad: float = mad_std(
-            np.concatenate([fdf_arr[mask].real, fdf_arr[mask].imag])
+        fdf_error_mad = float(
+            mad_std(np.concatenate([fdf_arr[mask].real, fdf_arr[mask].imag]))
         )
 
     n_good_phi = np.isfinite(fdf_arr).sum()
@@ -1099,40 +1066,42 @@ def get_fdf_parameters(
         rm_radm2=peak_rm_fit,
     )
 
-    return pl.DataFrame(
-        {
-            "fdf_error_mad": fdf_error_mad,
-            "peak_pi_fit": peak_pi_fit,
-            "peak_pi_error": theoretical_noise.fdf_error_noise,
-            "peak_pi_fit_debias": peak_pi_fit_debias,
-            "peak_pi_fit_snr": peak_pi_fit_snr,
-            "peak_pi_fit_index": peak_pi_fit_index,
-            "peak_rm_fit": peak_rm_fit,
-            "peak_rm_fit_error": peak_rm_fit_err,
-            "peak_q_fit": peak_q_fit,
-            "peak_u_fit": peak_u_fit,
-            "peak_pa_fit_deg": peak_pa_fit_deg,
-            "peak_pa_fit_deg_error": peak_pa_fit_deg_err,
-            "peak_pa0_fit_deg": peak_pa0_fit_deg,
-            "peak_pa0_fit_deg_error": peak_pa0_fit_deg_err,
-            "fit_function": fit_function,
-            "lam_sq_0_m2": lam_sq_0_m2,
-            "ref_freq_hz": lambda2_to_freq(lam_sq_0_m2),
-            "fwhm_rmsf_radm2": fwhm_rmsf_radm2,
-            "fdf_error_noise": theoretical_noise.fdf_error_noise,
-            "fdf_q_noise": theoretical_noise.fdf_q_noise,
-            "fdf_u_noise": theoretical_noise.fdf_u_noise,
-            "min_freq_hz": freq_arr_hz[good_chan_idx].min(),
-            "max_freq_hz": freq_arr_hz[good_chan_idx].max(),
-            "n_channels": n_good_chan,
-            "median_d_freq_hz": np.nanmedian(np.diff(freq_arr_hz[good_chan_idx])),
-            "frac_pol": peak_pi_fit_debias / stokes_i_reference_flux,
-            "frac_pol_error": theoretical_noise.fdf_error_noise
-            / stokes_i_reference_flux,
-            "sigma_add": stokes_sigma_add.sigma_add_p.sigma_add,
-            "sigma_add_minus": stokes_sigma_add.sigma_add_p.sigma_add_minus,
-            "sigma_add_plus": stokes_sigma_add.sigma_add_p.sigma_add_plus,
-        }
+    return fdf_params_schema_df.vstack(
+        pl.DataFrame(
+            {
+                "fdf_error_mad": fdf_error_mad,
+                "peak_pi_fit": peak_pi_fit,
+                "peak_pi_error": theoretical_noise.fdf_error_noise,
+                "peak_pi_fit_debias": peak_pi_fit_debias,
+                "peak_pi_fit_snr": peak_pi_fit_snr,
+                "peak_pi_fit_index": int(peak_pi_fit_index),
+                "peak_rm_fit": peak_rm_fit,
+                "peak_rm_fit_error": peak_rm_fit_err,
+                "peak_q_fit": peak_q_fit,
+                "peak_u_fit": peak_u_fit,
+                "peak_pa_fit_deg": peak_pa_fit_deg,
+                "peak_pa_fit_deg_error": peak_pa_fit_deg_err,
+                "peak_pa0_fit_deg": peak_pa0_fit_deg,
+                "peak_pa0_fit_deg_error": peak_pa0_fit_deg_err,
+                "fit_function": fit_function,
+                "lam_sq_0_m2": lam_sq_0_m2,
+                "ref_freq_hz": lambda2_to_freq(lam_sq_0_m2),
+                "fwhm_rmsf_radm2": fwhm_rmsf_radm2,
+                "fdf_error_noise": theoretical_noise.fdf_error_noise,
+                "fdf_q_noise": theoretical_noise.fdf_q_noise,
+                "fdf_u_noise": theoretical_noise.fdf_u_noise,
+                "min_freq_hz": freq_arr_hz[good_chan_idx].min(),
+                "max_freq_hz": freq_arr_hz[good_chan_idx].max(),
+                "n_channels": int(n_good_chan),
+                "median_d_freq_hz": np.nanmedian(np.diff(freq_arr_hz[good_chan_idx])),
+                "frac_pol": peak_pi_fit_debias / stokes_i_reference_flux,
+                "frac_pol_error": theoretical_noise.fdf_error_noise
+                / stokes_i_reference_flux,
+                "sigma_add": stokes_sigma_add.sigma_add_p.sigma_add,
+                "sigma_add_minus": stokes_sigma_add.sigma_add_p.sigma_add_minus,
+                "sigma_add_plus": stokes_sigma_add.sigma_add_p.sigma_add_plus,
+            }
+        )
     )
 
 
