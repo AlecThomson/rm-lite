@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import warnings
 from typing import Literal, NamedTuple, TypeVar
 
@@ -580,8 +581,7 @@ def rmsynth_nufft(
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
 
     Args:
-        stokes_q_arr (NDArray[np.float64]): Stokes Q data array
-        stokes_u_arr (NDArray[np.float64]): Stokes U data array
+        complex_pol_arr (NDArray[np.complex128]): Complex polarisation values (Q + iU)
         lambda_sq_arr_m2 (NDArray[np.float64]): Wavelength^2 values in m^2
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
         weight_arr (NDArray[np.float64]): Weight array
@@ -597,6 +597,7 @@ def rmsynth_nufft(
     Returns:
         NDArray[np.float64]: Dirty Faraday dispersion function cube
     """
+    tick = time.time()
     msg = f"Running RM-synthesis using the NUFFTs over {len(phi_arr_radm2)} Faraday depth channels."
     logger.info(msg)
     flagged_weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -683,6 +684,8 @@ def rmsynth_nufft(
         )
 
     # Remove redundant dimensions in the FDF array
+    tock = time.time()
+    logger.info(f"NUFFT complete in {tock - tick:.3g} seconds.")
     return np.squeeze(fdf_dirty_cube)
 
 
