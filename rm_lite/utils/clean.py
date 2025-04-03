@@ -454,7 +454,7 @@ def minor_cycle(
         phi_arr_radm2=rm_synth_1d_arrays.phi_arr_radm2,
         phi_double_arr_radm2=rm_synth_1d_arrays.phi_double_arr_radm2,
         rmsf_spectrum=rm_synth_1d_arrays.rmsf_arr,
-        rmsf_fwhm=float(rm_synth_1d_arrays.fwhm_rmsf_arr),
+        rmsf_fwhm=float(rm_synth_1d_arrays.fwhm_rmsf_arr.squeeze()),
     )
 
     minor_loop_options = MinorLoopOptions(

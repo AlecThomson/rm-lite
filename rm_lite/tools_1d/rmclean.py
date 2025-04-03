@@ -77,9 +77,9 @@ def run_rmclean_from_synth(
     stokes_i_arrs_df = rm_synth_1d_results.stokes_i_arrs
 
     theoretical_noise = TheoreticalNoise(
-        fdf_error_noise=float(fdf_parameters["fdf_error_noise"].to_numpy()),
-        fdf_q_noise=float(fdf_parameters["fdf_q_noise"].to_numpy()),
-        fdf_u_noise=float(fdf_parameters["fdf_u_noise"].to_numpy()),
+        fdf_error_noise=float(fdf_parameters["fdf_error_noise"].to_numpy().squeeze()),
+        fdf_q_noise=float(fdf_parameters["fdf_q_noise"].to_numpy().squeeze()),
+        fdf_u_noise=float(fdf_parameters["fdf_u_noise"].to_numpy().squeeze()),
     )
 
     logger.info(f"Theoretical noise: {theoretical_noise}")
@@ -97,7 +97,7 @@ def run_rmclean_from_synth(
     )
 
     stokes_i_reference_flux = stokes_i_model(
-        lambda2_to_freq(float(fdf_parameters["lam_sq_0_m2"].to_numpy()))
+        lambda2_to_freq(float(fdf_parameters["lam_sq_0_m2"].to_numpy()[0]))
     )
 
     fdf_dirty_arr = rmsyth_arrs_df["fdf_dirty_complex_arr"].to_numpy().astype(complex)
@@ -120,7 +120,7 @@ def run_rmclean_from_synth(
         fdf_arr=rm_clean_results.clean_fdf_arr,
         phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
         fwhm_rmsf_radm2=float(
-            fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float)
+            fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float).squeeze()
         ),
         freq_arr_hz=stokes_i_arrs_df["freq_arr_hz"].to_numpy().astype(float),
         complex_pol_arr=stokes_i_arrs_df["complex_frac_pol_arr"]
@@ -128,12 +128,12 @@ def run_rmclean_from_synth(
         .astype(complex),
         complex_pol_error=stokes_i_arrs_df["complex_frac_pol_error"]
         .to_numpy()
-        .astype(float),
+        .astype(complex),
         lambda_sq_arr_m2=stokes_i_arrs_df["lambda_sq_arr_m2"].to_numpy().astype(float),
-        lam_sq_0_m2=float(fdf_parameters["lam_sq_0_m2"].to_numpy()),
+        lam_sq_0_m2=float(fdf_parameters["lam_sq_0_m2"].to_numpy().squeeze()),
         stokes_i_reference_flux=stokes_i_reference_flux,
         theoretical_noise=theoretical_noise,
-        fit_function=str(fdf_parameters["fdf_u_noise"].to_numpy()),
+        fit_function=str(fdf_parameters["fit_function"].to_numpy().squeeze()),
     )
 
     rmclean_arrs = rmclean_arrs_schema_df.vstack(
