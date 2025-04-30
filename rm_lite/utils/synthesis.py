@@ -104,6 +104,9 @@ class TheoreticalNoise(NamedTuple):
         return TheoreticalNoise(**as_dict)
 
 
+WEIGHT_TYPES = Literal["variance", "uniform", "natural", "briggs"]
+
+
 class FDFOptions(NamedTuple):
     """Options for RM-synthesis"""
 
@@ -113,12 +116,14 @@ class FDFOptions(NamedTuple):
     """ Faraday depth resolution """
     n_samples: float | None = 10.0
     """ Number of samples """
-    weight_type: Literal["variance", "uniform"] = "variance"
+    weight_type: WEIGHT_TYPES = "uniform"
     """ Weight type """
     do_fit_rmsf: bool = False
     """ Fit RMSF """
     do_fit_rmsf_real: bool = False
     """ Fit real part of the RMSF """
+    robust: float | None = None
+    """ Briggs robust parameter """
 
 
 def calc_mom2_fdf(
@@ -429,6 +434,65 @@ def compute_rmsf_params(
     )
 
 
+def uniform_weight(
+    freq_hz: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    return np.ones_like(freq_hz) / len(freq_hz)
+
+
+def noise_weight(
+    noise: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    weights = 1 / noise**2
+    weights /= np.nansum(weights)
+    return weights
+
+
+def natural_weight(
+    freq_hz: NDArray[np.float64],
+    phi_max_radm2: float,
+    noise: NDArray[np.float64] | None = None,
+) -> NDArray[np.float64]:
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_hz)
+
+    # Compute the 'cell n_bins' in lambda^2 space
+    rmsf_properties = get_fwhm_rmsf(lambda_sq_arr_m2)
+
+    cell_size_m2 = np.sqrt(3) / phi_max_radm2
+
+    n_bins = int(rmsf_properties.lambda_sq_range_m2 / cell_size_m2)
+
+    binned_stat = stats.binned_statistic(
+        x=lambda_sq_arr_m2,
+        values=lambda_sq_arr_m2,
+        statistic="count",
+        bins=n_bins,
+    )
+
+    weight = binned_stat.statistic[binned_stat.binnumber - 1]
+    weight /= np.nansum(weight)
+    if noise is None:
+        return weight
+    var_weight = noise_weight(noise)
+    return weight * var_weight
+
+
+def briggs_weight(
+    robust: float,
+    freq_hz: NDArray[np.float64],
+    phi_max_radm2: float,
+    noise: NDArray[np.float64] | None = None,
+) -> NDArray[np.float64]:
+    # Briggs robust factor - CASA callsed it f**2
+    eff_squared = (5 * 10 ** -float(robust)) ** 2
+    nat_weights = natural_weight(
+        freq_hz=freq_hz,
+        noise=noise,
+        phi_max_radm2=phi_max_radm2,
+    )
+    return nat_weights / (1 + nat_weights * eff_squared)
+
+
 def compute_rmsynth_params(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
@@ -480,13 +544,34 @@ def compute_rmsynth_params(
         f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
     )
 
-    # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
-    if fdf_options.weight_type == "variance":
-        if (real_qu_error == 0).all():
-            real_qu_error = np.ones(len(real_qu_error))
-        weight_arr = 1.0 / real_qu_error**2
-    else:
-        weight_arr = np.ones_like(freq_arr_hz)
+    if (real_qu_error == 0).all():
+        real_qu_error = np.ones(len(real_qu_error))
+
+    logger.info(f"Computing weights for type {fdf_options.weight_type}...")
+    match fdf_options.weight_type:
+        case "variance":
+            weight_arr = noise_weight(noise=real_qu_error)
+        case "uniform":
+            weight_arr = uniform_weight(freq_hz=freq_arr_hz)
+        case "natural":
+            weight_arr = natural_weight(
+                freq_hz=freq_arr_hz,
+                noise=real_qu_error,
+                phi_max_radm2=phi_max_radm2,
+            )
+        case "briggs":
+            if fdf_options.robust is None:
+                msg = "Briggs weighting requires a robust parameter."
+                raise ValueError(msg)
+            weight_arr = briggs_weight(
+                robust=fdf_options.robust,
+                freq_hz=freq_arr_hz,
+                noise=real_qu_error,
+                phi_max_radm2=phi_max_radm2,
+            )
+        case _:
+            msg = f"Unknown weighting type: {fdf_options.weight_type}"
+            raise ValueError(msg)
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
 

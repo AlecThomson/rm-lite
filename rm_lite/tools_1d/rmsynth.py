@@ -12,6 +12,7 @@ from scipy import interpolate
 
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
+    WEIGHT_TYPES,
     FDFOptions,
     StokesData,
     compute_rmsynth_params,
@@ -76,11 +77,12 @@ def run_rmsynth(
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
-    weight_type: Literal["variance", "uniform"] = "variance",
+    weight_type: WEIGHT_TYPES = "uniform",
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real: bool = False,
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
+    robust: float | None = None,
 ) -> RMSynth1DResults:
     """Run RM-synthesis on 1D data
 
@@ -100,6 +102,8 @@ def run_rmsynth(
         do_fit_rmsf_real (bool, optional): The the real part of the RMSF. Defaults to False.
         fit_function ("log" | "linear", optional): _description_. Defaults to "log".
         fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
+        robust (float | None, optional): Briggs robustness parameter. Defaults to None.
+        cell_size_m2 (float | None, optional): Cell size in m^2. Defaults to None.
 
     Returns:
         RMSynth1DResults:
@@ -124,6 +128,7 @@ def run_rmsynth(
         weight_type=weight_type,
         do_fit_rmsf=do_fit_rmsf,
         do_fit_rmsf_real=do_fit_rmsf_real,
+        robust=robust,
     )
 
     return _run_rmsynth(stokes_data, fdf_options, fit_function, fit_order)
