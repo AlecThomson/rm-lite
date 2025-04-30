@@ -163,3 +163,4 @@ rm_lite/ms_test.ipynb
 rm_lite/multiscale.ipynb
 rm_lite/Untitled-1.ipynb
 2d.ipynb
+*.ipynb
