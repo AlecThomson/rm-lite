@@ -243,11 +243,11 @@ def static_fit(
         raise ValueError(msg)
 
     logger.debug(f"Fitting Stokes I model with {fit_type} model of order {fit_order}.")
-    initital_guess = np.zeros(fit_order + 1)
+    initial_guess = np.zeros(fit_order + 1)
     mean_spectrum = np.nanmean(stokes_i_arr)
     # Use 0 if errors are large and spectrum ends up negative
     mean_spectrum = max(mean_spectrum, 0)
-    initital_guess[0] = mean_spectrum
+    initial_guess[0] = mean_spectrum
     bounds = (
         [-np.inf] * (fit_order + 1),
         [np.inf] * (fit_order + 1),
@@ -263,7 +263,7 @@ def static_fit(
             stokes_i_arr,
             sigma=stokes_i_error_arr,
             absolute_sigma=True,
-            p0=initital_guess,
+            p0=initial_guess,
             bounds=bounds,
         )
     except (ValueError, RuntimeError) as e:
@@ -274,7 +274,7 @@ def static_fit(
             fit_func,
             freq_arr_hz / ref_freq_hz,
             stokes_i_arr,
-            p0=initital_guess,
+            p0=initial_guess,
         )
     stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
     ssr = float(np.sum((stokes_i_arr - stokes_i_model_arr) ** 2))
