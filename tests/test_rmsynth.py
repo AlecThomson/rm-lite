@@ -200,6 +200,7 @@ def test_real_data_bad_fit(test_data_path):
 @pytest.mark.filterwarnings(
     "ignore: Covariance of the parameters could not be estimated"
 )
+@pytest.mark.filterwarnings("ignore: invalid value encountered in std_dev")
 def test_real_data_bad_peak(test_data_path):
     # The following data from K. Rose caused the fit to the FDF to fail
     complex_spectrum = np.load(test_data_path / "complex_spectrum_bad_peak.npy")
