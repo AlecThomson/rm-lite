@@ -242,16 +242,16 @@ def create_fractional_spectra(
         cov=fit_result.pcov,  # type: ignore[assignment,unused-ignore]
         allow_singular=True,
     )
-    error_samples = error_distribution.rvs(n_error_samples)
+    error_samples = np.array(error_distribution.rvs(n_error_samples))
 
-    model_samples = np.array(
-        [
-            fit_result.stokes_i_model_func(
-                stokes_data.freq_arr_hz / ref_freq_hz, *sample
-            )
-            for sample in error_samples
-        ]
-    )
+    model_samples = np.empty((n_error_samples, len(stokes_data.freq_arr_hz)))
+    for i, sample in enumerate(error_samples):
+        if np.isscalar(sample):
+            sample = np.full_like(fit_result.popt, sample)  # noqa: PLW2901
+        model_samples[i] = fit_result.stokes_i_model_func(
+            stokes_data.freq_arr_hz / ref_freq_hz, *sample
+        )
+
     stokes_i_model_low, stokes_i_model_arr, stokes_i_model_high = np.nanpercentile(
         model_samples, [16, 50, 84], axis=0
     )
@@ -1001,17 +1001,21 @@ def get_fdf_parameters(
     n_good_chan = good_chan_idx.sum()
 
     if not (peak_pi_index > 0 and peak_pi_index < len(abs_fdf_arr) - 1):
-        msg = "Peak index is not within the FDF array."
-        raise ValueError(msg)
+        msg = "Peak index is not within the FDF array. Not fitting."
+        logger.critical(msg)
+        peak_pi_fit = np.nan
+        peak_rm_fit = np.nan
+        peak_pi_fit_snr = np.nan
+    else:
+        peak_pi_fit, peak_rm_fit, _ = fit_fdf(
+            fdf_to_fit_arr=abs_fdf_arr,
+            phi_arr_radm2=phi_arr_radm2,
+            fwhm_fdf_radm2=fwhm_rmsf_radm2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            peak_pi_fit_snr = peak_pi_fit / theoretical_noise.fdf_error_noise
 
-    peak_pi_fit, peak_rm_fit, _ = fit_fdf(
-        fdf_to_fit_arr=abs_fdf_arr,
-        phi_arr_radm2=phi_arr_radm2,
-        fwhm_fdf_radm2=fwhm_rmsf_radm2,
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
-        peak_pi_fit_snr = peak_pi_fit / theoretical_noise.fdf_error_noise
     # In rare cases, a parabola can be fitted to the edge of the spectrum,
     # producing a unreasonably large RM and polarized intensity.
     # In these cases, everything should get NaN'd out.
@@ -1074,7 +1078,9 @@ def get_fdf_parameters(
                 "peak_pi_error": theoretical_noise.fdf_error_noise,
                 "peak_pi_fit_debias": peak_pi_fit_debias,
                 "peak_pi_fit_snr": peak_pi_fit_snr,
-                "peak_pi_fit_index": int(peak_pi_fit_index),
+                "peak_pi_fit_index": int(peak_pi_fit_index)
+                if np.isfinite(peak_pi_fit_index)
+                else -1,
                 "peak_rm_fit": peak_rm_fit,
                 "peak_rm_fit_error": peak_rm_fit_err,
                 "peak_q_fit": peak_q_fit,
