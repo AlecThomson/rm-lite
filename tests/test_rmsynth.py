@@ -181,8 +181,8 @@ def test_2d_synth(racs_data: MockData, racs_model: MockModel):
 )
 def test_real_data_bad_fit(test_data_path):
     # The following data from K. Rose caused the fit to the Stokes I spectrum to fail
-    complex_spectrum = np.load(test_data_path / "complex_noise_bad_fit.npy")
-    complex_noise = np.load(test_data_path / "complex_noise_bad_fit.npy")
+    complex_spectrum = np.load(test_data_path / "complex_spectrum_bad_fit.npy")
+    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
     stokes_i_arr = np.load(test_data_path / "stokes_i_arr_bad_fit.npy")
     stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_bad_fit.npy")
     freq_hz = np.linspace(1e9, 3e9, len(complex_spectrum))
@@ -202,8 +202,8 @@ def test_real_data_bad_fit(test_data_path):
 )
 def test_real_data_bad_peak(test_data_path):
     # The following data from K. Rose caused the fit to the FDF to fail
-    complex_spectrum = np.load(test_data_path / "complex_noise_bad_peak.npy")
-    complex_noise = np.load(test_data_path / "complex_noise_bad_peak.npy")
+    complex_spectrum = np.load(test_data_path / "complex_spectrum_bad_peak.npy")
+    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
     freq_hz = np.linspace(1e9, 3e9, len(complex_spectrum))
     _ = run_rmsynth(
         freq_arr_hz=freq_hz,
