@@ -71,10 +71,10 @@ class StokesData(NamedTuple):
     """ Stokes I model error array """
 
     def with_options(self, **kwargs):
-        """Create a new TheoreticalNoise instance with keywords updated
+        """Create a new StokesData instance with keywords updated
 
         Returns:
-            TheoreticalNoise: New TheoreticalNoise instance with updated attributes
+            StokesData: New StokesData instance with updated attributes
         """
         # TODO: Update the signature to have the actual attributes to
         # help keep mypy and other linters happy
