@@ -505,7 +505,7 @@ def briggs_weight(
     phi_max_radm2: float,
     noise: NDArray[np.float64] | None = None,
 ) -> NDArray[np.float64]:
-    # Briggs robust factor - CASA callsed it f**2
+    # Briggs robust factor - CASA called it f**2
     eff_squared = (5 * 10 ** -float(robust)) ** 2
     nat_weights = natural_weight(
         freq_hz=freq_hz,
