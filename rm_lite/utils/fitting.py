@@ -165,7 +165,7 @@ def fit_fdf(
         logger.debug(f"Fit results: {popt}")
         amplitude_fit, mean_fit, stddev_fit = popt
     else:
-        msg = "Can't to single data point - just returning peak"
+        msg = "Can't fit single data point - just returning peak"
         logger.warning(msg)
         amplitude_fit, mean_fit, stddev_fit = amplitude_guess, mean_guess, stddev_guess
     return FDFFitResult(
