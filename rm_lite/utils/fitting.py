@@ -152,17 +152,22 @@ def fit_fdf(
         end = int(i + fwhm_fdf_arr_pix / 2)
         mask[start : end + 2] = True
 
-    amplitude_guess = np.nanmax(fdf_to_fit_arr[mask])
-    mean_guess = phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])]
-    stddev_guess = fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2)))
-    popt, pcov = optimize.curve_fit(
-        gaussian,
-        phi_arr_radm2[mask],
-        fdf_to_fit_arr[mask],
-        p0=[amplitude_guess, mean_guess, stddev_guess],
-    )
-    logger.debug(f"Fit results: {popt}")
-    amplitude_fit, mean_fit, stddev_fit = popt
+    amplitude_guess = float(np.nanmax(fdf_to_fit_arr[mask]))
+    mean_guess = float(phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])])
+    stddev_guess = float(fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2))))
+    if mask.sum() > 1:
+        popt, _ = optimize.curve_fit(
+            gaussian,
+            phi_arr_radm2[mask],
+            fdf_to_fit_arr[mask],
+            p0=[amplitude_guess, mean_guess, stddev_guess],
+        )
+        logger.debug(f"Fit results: {popt}")
+        amplitude_fit, mean_fit, stddev_fit = popt
+    else:
+        msg = "Can't fit single data point - just returning peak"
+        logger.warning(msg)
+        amplitude_fit, mean_fit, stddev_fit = amplitude_guess, mean_guess, stddev_guess
     return FDFFitResult(
         amplitude_fit=amplitude_fit,
         mean_fit=mean_fit,
@@ -243,8 +248,11 @@ def static_fit(
         raise ValueError(msg)
 
     logger.debug(f"Fitting Stokes I model with {fit_type} model of order {fit_order}.")
-    initital_guess = np.zeros(fit_order + 1)
-    initital_guess[0] = np.nanmean(stokes_i_arr)
+    initial_guess = np.zeros(fit_order + 1)
+    mean_spectrum = np.nanmean(stokes_i_arr)
+    # Use 0 if errors are large and spectrum ends up negative
+    mean_spectrum = max(mean_spectrum, 0)
+    initial_guess[0] = mean_spectrum
     bounds = (
         [-np.inf] * (fit_order + 1),
         [np.inf] * (fit_order + 1),
@@ -252,17 +260,29 @@ def static_fit(
     bounds[0][0] = 0.0
     if (stokes_i_error_arr == 0).all():
         stokes_i_error_arr = None
-    popt, pcov = optimize.curve_fit(
-        fit_func,
-        freq_arr_hz / ref_freq_hz,
-        stokes_i_arr,
-        sigma=stokes_i_error_arr,
-        absolute_sigma=True,
-        p0=initital_guess,
-        bounds=bounds,
-    )
+
+    try:
+        popt, pcov = optimize.curve_fit(
+            fit_func,
+            freq_arr_hz / ref_freq_hz,
+            stokes_i_arr,
+            sigma=stokes_i_error_arr,
+            absolute_sigma=True,
+            p0=initial_guess,
+            bounds=bounds,
+        )
+    except (ValueError, RuntimeError) as e:
+        logger.error(e)
+        msg = "Failed to fit Stokes I model. Trying again without errors."
+        logger.warning(msg)
+        popt, pcov = optimize.curve_fit(
+            fit_func,
+            freq_arr_hz / ref_freq_hz,
+            stokes_i_arr,
+            p0=initial_guess,
+        )
     stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
-    ssr = np.sum((stokes_i_arr - stokes_i_model_arr) ** 2)
+    ssr = float(np.sum((stokes_i_arr - stokes_i_model_arr) ** 2))
     with np.errstate(divide="ignore"):
         aic = akaike_info_criterion_lsq(
             ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz)

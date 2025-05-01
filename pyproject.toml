@@ -53,7 +53,8 @@ dev = [
     "nox",
     "nbconvert",
     "jupyter",
-    "ipython"
+    "ipython",
+    "pytest"
 ]
 docs = [
     "sphinx>=7.0",

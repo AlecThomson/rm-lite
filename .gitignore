@@ -166,3 +166,4 @@ rm_lite/Untitled-1.ipynb
 depol.ipynb
 nufft_test.ipynb
 robust.ipynb
+*.ipynb
