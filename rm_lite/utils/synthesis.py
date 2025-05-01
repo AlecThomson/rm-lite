@@ -276,7 +276,7 @@ def create_fractional_spectra(
         model_samples, [16, 50, 84], axis=0
     )
     stokes_i_model_error = np.abs(stokes_i_model_high - stokes_i_model_low)
-    # Avoid stupid overflows
+    # Avoid numerical overflows
     stokes_i_model_error[stokes_i_model_error > 1e99] = np.nan
     stokes_i_model_uarray = unumpy.uarray(
         stokes_i_model_arr,
