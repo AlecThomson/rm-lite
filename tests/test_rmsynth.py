@@ -185,7 +185,7 @@ def test_real_data_bad_fit(test_data_path):
     complex_spectrum = np.load(test_data_path / "complex_spectrum_bad_fit.npy")
     complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
     stokes_i_arr = np.load(test_data_path / "stokes_i_arr_bad_fit.npy")
-    stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_bad_fit.npy")
+    stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_bad.npy")
     freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
     _ = run_rmsynth(
         freq_arr_hz=freq_hz,
@@ -226,7 +226,7 @@ def test_real_data_bad_overflow(test_data_path):
     complex_spectrum = np.load(test_data_path / "complex_spectrum_overflow.npy")
     complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
     stokes_i_arr = np.load(test_data_path / "stokes_i_arr_overflow.npy")
-    stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_overflow.npy")
+    stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_bad.npy")
     freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
     _ = run_rmsynth(
         freq_arr_hz=freq_hz,
