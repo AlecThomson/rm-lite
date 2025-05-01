@@ -104,6 +104,9 @@ def test_rmsynth_nufft(racs_data: MockData, racs_model: MockModel):
     assert np.isclose(peak_rm, racs_model.rm, atol=1)
 
 
+@pytest.mark.filterwarnings(
+    "ignore: Covariance of the parameters could not be estimated"
+)
 def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
     complex_data = racs_data.stokes_q + 1j * racs_data.stokes_u
     complex_error = np.ones_like(racs_data.stokes_q) + 1j * np.ones_like(
