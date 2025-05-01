@@ -169,6 +169,11 @@ def _run_rmsynth(
 
     # Perform RM-synthesis on the spectrum
     no_nan_idx = fractional_spectra.no_nan_idx
+    all_flagged = (~no_nan_idx).all()
+    if all_flagged:
+        msg = "All channels have been masked!"
+        logger.warning(msg)
+
     fdf_dirty_arr = rmsynth_nufft(
         complex_pol_arr=fractional_spectra.complex_pol_frac_arr[no_nan_idx],
         lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2[no_nan_idx],
@@ -198,15 +203,24 @@ def _run_rmsynth(
     )
 
     assert stokes_data.freq_arr_hz.shape == fractional_spectra.stokes_i_model_arr.shape
-    stokes_i_model = interpolate.interp1d(
-        stokes_data.freq_arr_hz[no_nan_idx],
-        fractional_spectra.stokes_i_model_arr[no_nan_idx],
-    )
 
-    stokes_i_reference_flux = stokes_i_model(
-        lambda2_to_freq(rmsynth_params.lam_sq_0_m2)
-    )
+    if not all_flagged:
+        stokes_i_model = interpolate.interp1d(
+            stokes_data.freq_arr_hz[no_nan_idx],
+            fractional_spectra.stokes_i_model_arr[no_nan_idx],
+        )
+
+        stokes_i_reference_flux = float(
+            stokes_i_model(lambda2_to_freq(rmsynth_params.lam_sq_0_m2))
+        )
+    else:
+        logger.warning("Using mean as reference flux")
+        stokes_i_reference_flux = float(
+            np.nanmean(fractional_spectra.stokes_i_model_arr)
+        )
+
     fdf_dirty_arr *= stokes_i_reference_flux
+
     theoretical_noise = theoretical_noise.with_options(  # type: ignore[no-untyped-call]
         fdf_error_noise=theoretical_noise.fdf_error_noise * stokes_i_reference_flux,
         fdf_q_noise=theoretical_noise.fdf_q_noise * stokes_i_reference_flux,
