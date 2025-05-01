@@ -152,17 +152,22 @@ def fit_fdf(
         end = int(i + fwhm_fdf_arr_pix / 2)
         mask[start : end + 2] = True
 
-    amplitude_guess = np.nanmax(fdf_to_fit_arr[mask])
-    mean_guess = phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])]
-    stddev_guess = fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2)))
-    popt, pcov = optimize.curve_fit(
-        gaussian,
-        phi_arr_radm2[mask],
-        fdf_to_fit_arr[mask],
-        p0=[amplitude_guess, mean_guess, stddev_guess],
-    )
-    logger.debug(f"Fit results: {popt}")
-    amplitude_fit, mean_fit, stddev_fit = popt
+    amplitude_guess = float(np.nanmax(fdf_to_fit_arr[mask]))
+    mean_guess = float(phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])])
+    stddev_guess = float(fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2))))
+    if mask.sum() > 1:
+        popt, _ = optimize.curve_fit(
+            gaussian,
+            phi_arr_radm2[mask],
+            fdf_to_fit_arr[mask],
+            p0=[amplitude_guess, mean_guess, stddev_guess],
+        )
+        logger.debug(f"Fit results: {popt}")
+        amplitude_fit, mean_fit, stddev_fit = popt
+    else:
+        msg = "Can't to single data point - just returning peak"
+        logger.warning(msg)
+        amplitude_fit, mean_fit, stddev_fit = amplitude_guess, mean_guess, stddev_guess
     return FDFFitResult(
         amplitude_fit=amplitude_fit,
         mean_fit=mean_fit,

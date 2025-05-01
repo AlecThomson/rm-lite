@@ -214,3 +214,47 @@ def test_real_data_bad_peak(test_data_path):
         do_fit_rmsf=True,
         n_samples=100,
     )
+
+
+@pytest.mark.filterwarnings(
+    "ignore: Covariance of the parameters could not be estimated"
+)
+@pytest.mark.filterwarnings("ignore: invalid value encountered in std_dev")
+@pytest.mark.filterwarnings("ignore: overflow")
+def test_real_data_bad_overflow(test_data_path):
+    # The following data from K. Rose caused the fit to the FDF to fail
+    complex_spectrum = np.load(test_data_path / "complex_spectrum_overflow.npy")
+    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
+    stokes_i_arr = np.load(test_data_path / "stokes_i_arr_overflow.npy")
+    stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_overflow.npy")
+    freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
+    _ = run_rmsynth(
+        freq_arr_hz=freq_hz,
+        complex_pol_arr=complex_spectrum,
+        do_fit_rmsf=True,
+        n_samples=50,
+        complex_pol_error=complex_noise,
+        stokes_i_arr=stokes_i_arr,
+        stokes_i_error_arr=stokes_i_error_arr,
+        fit_order=3,
+        fit_function="log",
+    )
+
+
+@pytest.mark.filterwarnings(
+    "ignore: Covariance of the parameters could not be estimated"
+)
+@pytest.mark.filterwarnings("ignore: invalid value encountered")
+@pytest.mark.filterwarnings("ignore: divide by zero")
+def test_real_data_bad_zero(test_data_path):
+    # The following data from K. Rose caused the fit to the FDF to fail
+    complex_spectrum = np.load(test_data_path / "complex_spectrum_zero_div.npy")
+    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
+    freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
+    _ = run_rmsynth(
+        freq_arr_hz=freq_hz,
+        complex_pol_arr=complex_spectrum,
+        do_fit_rmsf=True,
+        n_samples=50,
+        complex_pol_error=complex_noise,
+    )

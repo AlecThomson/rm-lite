@@ -152,6 +152,22 @@ def create_fractional_spectra(
         & np.isfinite(stokes_data.freq_arr_hz)
     )
 
+    if (~no_nan_idx).all():
+        logger.warning(
+            "All channels have been masked! No fractional polarization will be calculated."
+        )
+        stokes_i_arr = np.ones_like(stokes_data.complex_pol_arr.real)
+        stokes_i_error_arr = np.zeros_like(stokes_data.complex_pol_error.real)
+
+        return FractionalSpectra(
+            stokes_i_model_arr=stokes_i_arr,
+            stokes_i_model_error=stokes_i_error_arr,
+            complex_pol_frac_arr=stokes_data.complex_pol_arr,
+            complex_pol_frac_error=stokes_data.complex_pol_error,
+            fit_result=None,
+            no_nan_idx=no_nan_idx,
+        )
+
     # If no Stokes I at all, just return the 'fractional' spectra
     if (
         stokes_data.stokes_i_arr is None or stokes_data.stokes_i_error_arr is None
@@ -227,6 +243,10 @@ def create_fractional_spectra(
     )
     logger.debug(f"{ref_freq_hz=}")
 
+    if (~no_nan_idx).all():
+        msg = "All channels have been masked!"
+        raise ValueError(msg)
+
     # Apply flagging here since fitting will fail if NaNs are present
     fit_result = fit_stokes_i_model(
         freq_arr_hz=stokes_data.freq_arr_hz[no_nan_idx],
@@ -256,6 +276,8 @@ def create_fractional_spectra(
         model_samples, [16, 50, 84], axis=0
     )
     stokes_i_model_error = np.abs(stokes_i_model_high - stokes_i_model_low)
+    # Avoid stupid overflows
+    stokes_i_model_error[stokes_i_model_error > 1e99] = np.nan
     stokes_i_model_uarray = unumpy.uarray(
         stokes_i_model_arr,
         stokes_i_model_error,
@@ -616,6 +638,14 @@ def rmsynth_nufft(
         msg = f"Data depth does not match lambda^2 vector ({complex_pol_arr.shape[0]} vs {lambda_sq_arr_m2.shape[0]})."
         raise ValueError(msg)
 
+    if complex_pol_arr.size == 0:
+        msg = "No unflagged data remains. Not doing rm-synthesis"
+        logger.critical(msg)
+        return (
+            np.ones_like(phi_arr_radm2) * np.nan
+            + 1j * np.ones_like(phi_arr_radm2) * np.nan
+        )
+
     # Reshape the data arrays to 2 dimensions
     if n_dims == 1:
         complex_pol_arr_2d = np.reshape(complex_pol_arr, (complex_pol_arr.shape[0], 1))
@@ -878,10 +908,7 @@ def get_rmsf_nufft(
                 )
                 fit_status = True
             except Exception as e:
-                if num_pixels == 1:
-                    raise e
-                logger.error(f"Failed to fit RMSF at pixel {i}.")
-                logger.error(e)
+                logger.error(f"Failed to fit RMSF at pixel {i}: {e}")
                 logger.warning("Setting RMSF FWHM to default value.")
                 fitted_rmsf = fwhm_rmsf_radm2
                 fit_status = False
@@ -973,12 +1000,19 @@ def get_fdf_parameters(
     """
 
     abs_fdf_arr = np.abs(fdf_arr)
-    peak_pi_index = np.nanargmax(abs_fdf_arr)
+
+    if (~np.isfinite(fdf_arr)).all():
+        # I hate this, but can happen with bad data
+        peak_pi_index = np.nan
+    else:
+        peak_pi_index = np.nanargmax(abs_fdf_arr)
 
     # Measure the RMS noise in the spectrum after masking the peak
     d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
     mask = np.ones_like(phi_arr_radm2, dtype=bool)
-    mask[peak_pi_index] = False
+
+    if not np.isnan(peak_pi_index):
+        mask[peak_pi_index] = False
     fwhm_rmsf_arr_pix = fwhm_rmsf_radm2 / d_phi
     for i in np.where(mask)[0]:
         start = int(i - fwhm_rmsf_arr_pix / 2)
@@ -1000,7 +1034,9 @@ def get_fdf_parameters(
     good_chan_idx = np.isfinite(freq_arr_hz)
     n_good_chan = good_chan_idx.sum()
 
-    if not (peak_pi_index > 0 and peak_pi_index < len(abs_fdf_arr) - 1):
+    if np.isnan(peak_pi_index) or not (
+        peak_pi_index > 0 and peak_pi_index < len(abs_fdf_arr) - 1
+    ):
         msg = "Peak index is not within the FDF array. Not fitting."
         logger.critical(msg)
         peak_pi_fit = np.nan
