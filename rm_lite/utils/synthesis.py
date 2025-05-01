@@ -592,7 +592,7 @@ def compute_rmsynth_params(
                 phi_max_radm2=phi_max_radm2,
             )
         case _:
-            msg = f"Unknown weighting type: {fdf_options.weight_type}"
+            msg = f"Unknown weighting type: {fdf_options.weight_type}"  # type: ignore[unreachable]
             raise ValueError(msg)
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
