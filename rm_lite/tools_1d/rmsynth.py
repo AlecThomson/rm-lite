@@ -97,7 +97,7 @@ def run_rmsynth(
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Spacing in Faraday depth. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
-        weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
+        weight_type ("variance", "uniform", "natural", "briggs"): Weighting type. Defaults to "uniform".
         do_fit_rmsf (bool, optional): Fit the RMSF main lobe. Defaults to False.
         do_fit_rmsf_real (bool, optional): The the real part of the RMSF. Defaults to False.
         fit_function ("log" | "linear", optional): _description_. Defaults to "log".
