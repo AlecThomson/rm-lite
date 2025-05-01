@@ -207,7 +207,7 @@ def create_fractional_spectra(
             stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
         )
 
-        fractional_stokes_data = stokes_data.with_options(
+        fractional_stokes_data = stokes_data.with_options(  # type: ignore[no-untyped-call]
             complex_pol_arr=stokes_qu_frac_arr.astype(np.complex128),
             complex_pol_error=stokes_qu_frac_error_arr.astype(np.complex128),
         )
@@ -286,7 +286,7 @@ def create_fractional_spectra(
     complex_pol_arr = stokes_q_frac_arr + 1j * stokes_u_frac_arr
     complex_pol_error = stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
 
-    fractional_stokes_data = stokes_data.with_options(
+    fractional_stokes_data = stokes_data.with_options(  # type: ignore[no-untyped-call]
         complex_pol_arr=complex_pol_arr,
         complex_pol_error=complex_pol_error,
         stokes_i_model_arr=stokes_i_model_arr,

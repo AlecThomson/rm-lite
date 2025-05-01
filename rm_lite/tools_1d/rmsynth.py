@@ -227,8 +227,6 @@ def _run_rmsynth(
     if not ignore_stokes_i:
         assert stokes_data.stokes_i_model_arr is not None
         assert stokes_data.freq_arr_hz.shape == stokes_data.stokes_i_model_arr.shape
-
-    if not ignore_stokes_i:
         if not all_flagged:
             stokes_i_model = interpolate.interp1d(
                 stokes_data.freq_arr_hz[no_nan_idx],
