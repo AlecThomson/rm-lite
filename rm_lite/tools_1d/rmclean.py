@@ -123,10 +123,8 @@ def run_rmclean_from_synth(
             fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float).squeeze()
         ),
         freq_arr_hz=stokes_i_arrs_df["freq_arr_hz"].to_numpy().astype(float),
-        complex_pol_arr=stokes_i_arrs_df["complex_frac_pol_arr"]
-        .to_numpy()
-        .astype(complex),
-        complex_pol_error=stokes_i_arrs_df["complex_frac_pol_error"]
+        complex_pol_arr=stokes_i_arrs_df["complex_pol_arr"].to_numpy().astype(complex),
+        complex_pol_error=stokes_i_arrs_df["complex_pol_error"]
         .to_numpy()
         .astype(complex),
         lambda_sq_arr_m2=stokes_i_arrs_df["lambda_sq_arr_m2"].to_numpy().astype(float),
