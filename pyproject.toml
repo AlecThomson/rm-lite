@@ -42,6 +42,7 @@ dependencies = [
     "corner",
     "polars",
     "sigfig",
+    "pandas",
 ]
 
 [project.optional-dependencies]

@@ -8,6 +8,7 @@ from typing import Literal, NamedTuple, TypeVar
 
 import finufft
 import numpy as np
+import pandas as pd
 import polars as pl
 from astropy.constants import c as speed_of_light
 from astropy.stats import mad_std
@@ -470,11 +471,19 @@ def noise_weight(
     return weights
 
 
-def natural_weight(
+class WaveSqBins(NamedTuple):
+    categories: pd.Categorical
+    """Categories for the bins"""
+    bins: NDArray[np.intp]
+    """The bins in wavelength^2 space"""
+    bin_counts: NDArray[np.intp]
+    """The counts in each bin per channel"""
+
+
+def _get_wave_sq_bins(
     freq_hz: NDArray[np.float64],
     phi_max_radm2: float,
-    noise: NDArray[np.float64] | None = None,
-) -> NDArray[np.float64]:
+) -> WaveSqBins:
     lambda_sq_arr_m2 = freq_to_lambda2(freq_hz)
 
     # Compute the 'cell n_bins' in lambda^2 space
@@ -484,19 +493,38 @@ def natural_weight(
 
     n_bins = int(rmsf_properties.lambda_sq_range_m2 / cell_size_m2)
 
-    binned_stat = stats.binned_statistic(
-        x=lambda_sq_arr_m2,
-        values=lambda_sq_arr_m2,
-        statistic="count",
+    categories, bins = pd.cut(
+        lambda_sq_arr_m2,
         bins=n_bins,
+        include_lowest=True,
+        retbins=True,
+    )
+    bin_idx = categories.codes
+    bin_counts = np.bincount(bin_idx)
+
+    # repeat the bin_counts to match the original array
+    bin_counts = bin_counts[bin_idx]
+    return WaveSqBins(categories, bins, bin_counts)
+
+
+def natural_weight(
+    freq_hz: NDArray[np.float64],
+    phi_max_radm2: float,
+    noise: NDArray[np.float64] | None = None,
+) -> NDArray[np.float64]:
+    wave_sq_bins = _get_wave_sq_bins(
+        freq_hz=freq_hz,
+        phi_max_radm2=phi_max_radm2,
     )
 
-    weight = binned_stat.statistic[binned_stat.binnumber - 1]
+    weight = wave_sq_bins.bin_counts.astype(np.float64)
     weight /= np.nansum(weight)
     if noise is None:
         return weight
     var_weight = noise_weight(noise)
-    return weight * var_weight
+    weight *= var_weight
+    weight /= np.nansum(weight)
+    return weight
 
 
 def briggs_weight(
@@ -512,7 +540,9 @@ def briggs_weight(
         noise=noise,
         phi_max_radm2=phi_max_radm2,
     )
-    return nat_weights / (1 + nat_weights * eff_squared)
+    weights = nat_weights / (1 + nat_weights * eff_squared)
+    weights /= np.nansum(weights)
+    return weights
 
 
 def compute_rmsynth_params(
