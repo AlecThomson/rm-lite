@@ -71,12 +71,22 @@ class StokesData(NamedTuple):
     stokes_i_model_error: NDArray[np.float64] | None = None
     """ Stokes I model error array """
 
+    def with_options(self, **kwargs):
+        """Create a new StokesData instance with keywords updated
+
+        Returns:
+            StokesData: New StokesData instance with updated attributes
+        """
+        # TODO: Update the signature to have the actual attributes to
+        # help keep mypy and other linters happy
+        as_dict = self._asdict()
+        as_dict.update(kwargs)
+
+        return StokesData(**as_dict)
+
 
 class FractionalSpectra(NamedTuple):
-    stokes_i_model_arr: NDArray[np.float64]
-    stokes_i_model_error: NDArray[np.float64]
-    complex_pol_frac_arr: NDArray[np.complex128]
-    complex_pol_frac_error: NDArray[np.complex128]
+    stokes_data: StokesData
     fit_result: FitResult | None
     no_nan_idx: NDArray[np.bool_]
 
@@ -145,53 +155,29 @@ def calc_mom2_fdf(
     )
 
 
+def get_mask_index(
+    stokes_data: StokesData,
+) -> NDArray[np.bool_]:
+    return (
+        np.isfinite(stokes_data.complex_pol_arr)
+        & np.isfinite(stokes_data.complex_pol_error)
+        & np.isfinite(stokes_data.freq_arr_hz)
+    )
+
+
 def create_fractional_spectra(
     stokes_data: StokesData,
     ref_freq_hz: float,
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     n_error_samples: int = 10_000,
-) -> FractionalSpectra:
-    no_nan_idx = (
-        np.isfinite(stokes_data.complex_pol_arr)
-        & np.isfinite(stokes_data.complex_pol_error)
-        & np.isfinite(stokes_data.freq_arr_hz)
-    )
+) -> FractionalSpectra | None:
+    no_nan_idx = get_mask_index(stokes_data)
 
     if (~no_nan_idx).all():
-        logger.warning(
-            "All channels have been masked! No fractional polarization will be calculated."
-        )
-        stokes_i_arr = np.ones_like(stokes_data.complex_pol_arr.real)
-        stokes_i_error_arr = np.zeros_like(stokes_data.complex_pol_error.real)
-
-        return FractionalSpectra(
-            stokes_i_model_arr=stokes_i_arr,
-            stokes_i_model_error=stokes_i_error_arr,
-            complex_pol_frac_arr=stokes_data.complex_pol_arr,
-            complex_pol_frac_error=stokes_data.complex_pol_error,
-            fit_result=None,
-            no_nan_idx=no_nan_idx,
-        )
-
-    # If no Stokes I at all, just return the 'fractional' spectra
-    if (
-        stokes_data.stokes_i_arr is None or stokes_data.stokes_i_error_arr is None
-    ) and stokes_data.stokes_i_model_arr is None:
-        logger.warning(
-            "Stokes I array/errors or model not provided. No fractional polarization will be calculated."
-        )
-        stokes_i_arr = np.ones_like(stokes_data.complex_pol_arr.real)
-        stokes_i_error_arr = np.zeros_like(stokes_data.complex_pol_error.real)
-
-        return FractionalSpectra(
-            stokes_i_model_arr=stokes_i_arr,
-            stokes_i_model_error=stokes_i_error_arr,
-            complex_pol_frac_arr=stokes_data.complex_pol_arr,
-            complex_pol_frac_error=stokes_data.complex_pol_error,
-            fit_result=None,
-            no_nan_idx=no_nan_idx,
-        )
+        msg = "All channels have been masked! No fractional polarization will be calculated."
+        logger.warning(msg)
+        return None
 
     # Uncertainties doesn't support complex numbers, so we need to split the
     # Stokes Q and U arrays into real and imaginary parts
@@ -227,11 +213,12 @@ def create_fractional_spectra(
             stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
         )
 
+        fractional_stokes_data = stokes_data.with_options(  # type: ignore[no-untyped-call]
+            complex_pol_arr=stokes_qu_frac_arr.astype(np.complex128),
+            complex_pol_error=stokes_qu_frac_error_arr.astype(np.complex128),
+        )
         return FractionalSpectra(
-            stokes_i_model_arr=stokes_data.stokes_i_model_arr,
-            stokes_i_model_error=stokes_data.stokes_i_model_error,
-            complex_pol_frac_arr=stokes_qu_frac_arr.astype(np.complex128),
-            complex_pol_frac_error=stokes_qu_frac_error_arr.astype(np.complex128),
+            stokes_data=fractional_stokes_data,
             fit_result=None,
             no_nan_idx=no_nan_idx,
         )
@@ -305,11 +292,15 @@ def create_fractional_spectra(
     complex_pol_arr = stokes_q_frac_arr + 1j * stokes_u_frac_arr
     complex_pol_error = stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
 
-    return FractionalSpectra(
+    fractional_stokes_data = stokes_data.with_options(  # type: ignore[no-untyped-call]
+        complex_pol_arr=complex_pol_arr,
+        complex_pol_error=complex_pol_error,
         stokes_i_model_arr=stokes_i_model_arr,
         stokes_i_model_error=stokes_i_model_error,
-        complex_pol_frac_arr=complex_pol_arr,
-        complex_pol_frac_error=complex_pol_error,
+    )
+
+    return FractionalSpectra(
+        stokes_data=fractional_stokes_data,
         fit_result=fit_result,
         no_nan_idx=no_nan_idx,
     )
@@ -347,15 +338,15 @@ def lambda2_to_freq(lambda_sq_m2: T) -> T:
 
 
 def compute_theoretical_noise(
-    complex_pol_frac_error: NDArray[np.complex128],
+    complex_pol_error: NDArray[np.complex128],
     weight_arr: NDArray[np.float64],
 ) -> TheoreticalNoise:
     weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
-    complex_pol_frac_error_flagged = np.nan_to_num(
-        complex_pol_frac_error, nan=0.0, posinf=0.0, neginf=0.0
+    complex_pol_error_flagged = np.nan_to_num(
+        complex_pol_error, nan=0.0, posinf=0.0, neginf=0.0
     )
     fdf_complex_noise = np.sqrt(
-        np.nansum(weight_arr**2 * complex_pol_frac_error_flagged**2)
+        np.nansum(weight_arr**2 * complex_pol_error_flagged**2)
         / (np.sum(weight_arr)) ** 2
     )
 

@@ -19,6 +19,7 @@ from rm_lite.utils.synthesis import (
     compute_theoretical_noise,
     create_fractional_spectra,
     get_fdf_parameters,
+    get_mask_index,
     get_rmsf_nufft,
     lambda2_to_freq,
     rmsynth_nufft,
@@ -59,8 +60,8 @@ stokes_i_arrs_schema = pl.Schema(
         "stokes_i_model_arr": pl.Float64,
         "stokes_i_model_error": pl.Float64,
         "flag_arr": pl.Boolean,
-        "complex_frac_pol_arr": pl.Object,
-        "complex_frac_pol_error": pl.Object,
+        "complex_pol_arr": pl.Object,
+        "complex_pol_error": pl.Object,
     }
 )
 stokes_i_arrs_schema_df = stokes_i_arrs_schema.to_frame(eager=True)
@@ -83,6 +84,7 @@ def run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
     robust: float | None = None,
+    ignore_stokes_i: bool = False,
 ) -> RMSynth1DResults:
     """Run RM-synthesis on 1D data
 
@@ -131,7 +133,21 @@ def run_rmsynth(
         robust=robust,
     )
 
-    return _run_rmsynth(stokes_data, fdf_options, fit_function, fit_order)
+    if (
+        stokes_i_arr is None or stokes_i_error_arr is None
+    ) and stokes_data.stokes_i_model_arr is None:
+        logger.warning(
+            "Stokes I array/errors or model not provided. No fractional polarization will be calculated."
+        )
+        ignore_stokes_i = True
+
+    return _run_rmsynth(
+        stokes_data=stokes_data,
+        fdf_options=fdf_options,
+        fit_function=fit_function,
+        fit_order=fit_order,
+        ignore_stokes_i=ignore_stokes_i,
+    )
 
 
 def _run_rmsynth(
@@ -139,6 +155,7 @@ def _run_rmsynth(
     fdf_options: FDFOptions,
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
+    ignore_stokes_i: bool = False,
 ) -> RMSynth1DResults:
     """Run RM-synthesis on 1D data with packed data
 
@@ -162,25 +179,30 @@ def _run_rmsynth(
         fdf_options=fdf_options,
     )
 
-    fractional_spectra = create_fractional_spectra(
-        stokes_data=stokes_data,
-        ref_freq_hz=lambda2_to_freq(rmsynth_params.lam_sq_0_m2),
-        fit_order=fit_order,
-        fit_function=fit_function,
-    )
+    no_nan_idx = get_mask_index(stokes_data=stokes_data)
+
+    if not ignore_stokes_i:
+        fractional_stokes_data = create_fractional_spectra(
+            stokes_data=stokes_data,
+            ref_freq_hz=lambda2_to_freq(rmsynth_params.lam_sq_0_m2),
+            fit_order=fit_order,
+            fit_function=fit_function,
+        )
+        if fractional_stokes_data is not None:
+            stokes_data = fractional_stokes_data.stokes_data
+            no_nan_idx = fractional_stokes_data.no_nan_idx
 
     # Compute after any fractional spectra have been created
     tick = time.time()
 
     # Perform RM-synthesis on the spectrum
-    no_nan_idx = fractional_spectra.no_nan_idx
     all_flagged = (~no_nan_idx).all()
     if all_flagged:
         msg = "All channels have been masked!"
         logger.warning(msg)
 
     fdf_dirty_arr = rmsynth_nufft(
-        complex_pol_arr=fractional_spectra.complex_pol_frac_arr[no_nan_idx],
+        complex_pol_arr=stokes_data.complex_pol_arr[no_nan_idx],
         lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2[no_nan_idx],
         phi_arr_radm2=rmsynth_params.phi_arr_radm2,
         weight_arr=rmsynth_params.weight_arr[no_nan_idx],
@@ -203,34 +225,36 @@ def _run_rmsynth(
     logger.info(f"RM-synthesis completed in {cpu_time * 1000:.2f}ms.")
 
     theoretical_noise = compute_theoretical_noise(
-        complex_pol_frac_error=fractional_spectra.complex_pol_frac_error[no_nan_idx],
+        complex_pol_error=stokes_data.complex_pol_error[no_nan_idx],
         weight_arr=rmsynth_params.weight_arr[no_nan_idx],
     )
 
-    assert stokes_data.freq_arr_hz.shape == fractional_spectra.stokes_i_model_arr.shape
+    if not ignore_stokes_i:
+        assert stokes_data.stokes_i_model_arr is not None
+        assert stokes_data.freq_arr_hz.shape == stokes_data.stokes_i_model_arr.shape
+        if not all_flagged:
+            stokes_i_model = interpolate.interp1d(
+                stokes_data.freq_arr_hz[no_nan_idx],
+                stokes_data.stokes_i_model_arr[no_nan_idx],
+            )
 
-    if not all_flagged:
-        stokes_i_model = interpolate.interp1d(
-            stokes_data.freq_arr_hz[no_nan_idx],
-            fractional_spectra.stokes_i_model_arr[no_nan_idx],
+            stokes_i_reference_flux = float(
+                stokes_i_model(lambda2_to_freq(rmsynth_params.lam_sq_0_m2))
+            )
+        else:
+            logger.warning("Using mean as reference flux")
+            stokes_i_reference_flux = float(np.nanmean(stokes_data.stokes_i_model_arr))
+
+        fdf_dirty_arr *= stokes_i_reference_flux
+
+        theoretical_noise = theoretical_noise.with_options(  # type: ignore[no-untyped-call]
+            fdf_error_noise=theoretical_noise.fdf_error_noise * stokes_i_reference_flux,
+            fdf_q_noise=theoretical_noise.fdf_q_noise * stokes_i_reference_flux,
+            fdf_u_noise=theoretical_noise.fdf_u_noise * stokes_i_reference_flux,
         )
 
-        stokes_i_reference_flux = float(
-            stokes_i_model(lambda2_to_freq(rmsynth_params.lam_sq_0_m2))
-        )
     else:
-        logger.warning("Using mean as reference flux")
-        stokes_i_reference_flux = float(
-            np.nanmean(fractional_spectra.stokes_i_model_arr)
-        )
-
-    fdf_dirty_arr *= stokes_i_reference_flux
-
-    theoretical_noise = theoretical_noise.with_options(  # type: ignore[no-untyped-call]
-        fdf_error_noise=theoretical_noise.fdf_error_noise * stokes_i_reference_flux,
-        fdf_q_noise=theoretical_noise.fdf_q_noise * stokes_i_reference_flux,
-        fdf_u_noise=theoretical_noise.fdf_u_noise * stokes_i_reference_flux,
-    )
+        stokes_i_reference_flux = np.nan
 
     # Measure the parameters of the dirty FDF
     # Use the theoretical noise to calculate uncertainties
@@ -239,8 +263,8 @@ def _run_rmsynth(
         phi_arr_radm2=rmsynth_params.phi_arr_radm2,
         fwhm_rmsf_radm2=float(rmsf_result.fwhm_rmsf_arr),
         freq_arr_hz=stokes_data.freq_arr_hz,
-        complex_pol_arr=fractional_spectra.complex_pol_frac_arr,
-        complex_pol_error=fractional_spectra.complex_pol_frac_error,
+        complex_pol_arr=stokes_data.complex_pol_arr,
+        complex_pol_error=stokes_data.complex_pol_error,
         lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
         stokes_i_reference_flux=stokes_i_reference_flux,
@@ -269,11 +293,11 @@ def _run_rmsynth(
             {
                 "freq_arr_hz": stokes_data.freq_arr_hz,
                 "lambda_sq_arr_m2": rmsynth_params.lambda_sq_arr_m2,
-                "stokes_i_model_arr": fractional_spectra.stokes_i_model_arr,
-                "stokes_i_model_error": fractional_spectra.stokes_i_model_error,
+                "stokes_i_model_arr": stokes_data.stokes_i_model_arr,
+                "stokes_i_model_error": stokes_data.stokes_i_model_error,
                 "flag_arr": no_nan_idx,
-                "complex_frac_pol_arr": fractional_spectra.complex_pol_frac_arr,
-                "complex_frac_pol_error": fractional_spectra.complex_pol_frac_error,
+                "complex_pol_arr": stokes_data.complex_pol_arr,
+                "complex_pol_error": stokes_data.complex_pol_error,
             }
         )
     )
