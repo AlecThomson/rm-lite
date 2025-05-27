@@ -163,4 +163,8 @@ rm_lite/ms_test.ipynb
 rm_lite/multiscale.ipynb
 rm_lite/Untitled-1.ipynb
 2d.ipynb
+depol.ipynb
+nufft_test.ipynb
+robust.ipynb
 *.ipynb
+dragons_120.23_9.59.txt
