@@ -11,7 +11,7 @@ authors = [
 ]
 license.file = "LICENSE"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Science/Research",
@@ -21,10 +21,10 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Typing :: Typed",
 ]
@@ -117,8 +117,8 @@ isort.required-imports = ["from __future__ import annotations"]
 "noxfile.py" = ["T20"]
 
 [tool.mypy]
-files = ["rm_tools", "tests"]
-python_version = "3.9"
+files = ["rm_lite", "tests"]
+python_version = "3.10"
 warn_unused_configs = true
 strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
@@ -127,12 +127,12 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
 [[tool.mypy.overrides]]
-module = "spinifex.*"
+module = "rm_lite.*"
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [[tool.mypy.overrides]]
-module = ["astropy.*", "requests", "casacore.*", "unlzw3.*", "ppigrf.*", "PyIRI.*"]
+module = ["astropy.*", "sigfig.*", "finufft.*", "uncertainties.*"]
 ignore_missing_imports = true
 
 

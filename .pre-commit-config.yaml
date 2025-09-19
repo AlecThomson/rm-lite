@@ -54,6 +54,16 @@ repos:
         args: ["--ignore-missing-imports"]
         additional_dependencies:
           - pytest
+          - scipy-stubs
+          - types-tqdm
+          - pandas-stubs
+          - types-Pygments
+          - types-colorama
+          - types-decorator
+          - types-defusedxml
+          - types-gevent
+          - types-pexpect
+          - types-pytz
 
   - repo: https://github.com/codespell-project/codespell
     rev: "v2.4.1"
