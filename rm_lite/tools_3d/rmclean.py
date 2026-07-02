@@ -31,7 +31,7 @@ from numpy.typing import NDArray
 
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults
 from rm_lite.utils.clean import rmclean
-from rm_lite.utils.logging import quiet_logs
+from rm_lite.utils.logging import logger, quiet_logs
 
 
 class RMClean3DResults(NamedTuple):
@@ -186,8 +186,8 @@ def rmclean_3d(
 
 def rmclean_3d_from_synth(
     rm_synth_3d_results: RMSynth3DResults,
-    mask: float,
-    threshold: float,
+    auto_mask: float = 7,
+    auto_threshold: float = 1,
     max_iter: int = 1000,
     gain: float = 0.1,
     log_level: int = logging.ERROR,
@@ -195,17 +195,20 @@ def rmclean_3d_from_synth(
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
 
     Convenience wrapper that unpacks an `RMSynth3DResults` into `rmclean_3d`,
-    mirroring `rm_lite.tools_1d.rmclean.run_rmclean_from_synth`. Unlike the 1D
-    version, `mask`/`threshold` are not derived automatically here: 3D
-    RM-synthesis only carries a per-channel (not per-pixel) noise estimate,
-    so there is no per-pixel theoretical noise to auto-scale from -- see
-    `rm_lite.utils.dask_io.estimate_channel_noise_mad` for computing a noise
-    estimate to derive `mask`/`threshold` from.
+    mirroring `rm_lite.tools_1d.rmclean.run_rmclean_from_synth`. `mask`/
+    `threshold` are scaled from `rm_synth_3d_results.theoretical_noise`, the
+    same way the 1D version scales from its per-pixel theoretical noise --
+    except 3D RM-synthesis only carries a per-channel (not per-pixel) noise
+    estimate (see `rm_lite.utils.dask_io.estimate_channel_noise_mad`), so the
+    resulting `mask`/`threshold` are uniform across the cube rather than
+    per-pixel.
 
     Args:
         rm_synth_3d_results (RMSynth3DResults): Results from `rmsynth_3d`.
-        mask (float): Masking threshold -- pixels below this value are not cleaned.
-        threshold (float): Cleaning threshold -- stop when all pixels are below this value.
+        auto_mask (float, optional): Masking threshold in SNR, scaled by the
+            theoretical FDF noise. Defaults to 7.
+        auto_threshold (float, optional): Cleaning threshold in SNR, scaled by
+            the theoretical FDF noise. Defaults to 1.
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
         log_level (int, optional): See `rmclean_3d`. Defaults to `logging.ERROR`.
@@ -213,6 +216,15 @@ def rmclean_3d_from_synth(
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
     """
+    fdf_error_noise = rm_synth_3d_results.theoretical_noise.fdf_error_noise
+    mask = auto_mask * fdf_error_noise
+    threshold = auto_threshold * fdf_error_noise
+
+    logger.info(
+        f"Theoretical FDF noise: {fdf_error_noise:0.3g}. "
+        f"Auto mask: {mask:0.3g}, auto threshold: {threshold:0.3g}."
+    )
+
     return rmclean_3d(
         fdf_dirty_cube=rm_synth_3d_results.fdf_dirty_cube,
         rmsf_cube=rm_synth_3d_results.rmsf_cube,
