@@ -23,6 +23,7 @@ from astropy.stats import mad_std
 from astropy.wcs import WCS
 from dask import delayed
 from dask.base import compute
+from dask.diagnostics import ProgressBar
 from numpy.typing import NDArray
 
 from rm_lite.utils.logging import logger
@@ -210,7 +211,8 @@ def write_zarr_group(
         for name, array in arrays.items()
     ]
     tick = time.time()
-    compute(*writes)
+    with ProgressBar():
+        compute(*writes)
     tock = time.time()
     logger.info(f"Wrote {list(arrays)} to {store} in {tock - tick:.3g} seconds.")
 
