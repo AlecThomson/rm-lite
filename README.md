@@ -31,8 +31,8 @@
 
 <!-- prettier-ignore-end -->
 
-A mini fork of RM-Tools - RM-synthesis, RM-clean and QU-fitting on polarised
-radio spectra.
+A mini fork of RM-Tools - RM-synthesis and RM-clean on polarised
+radio spectra, for both 1D spectra and 3D cubes (the latter via dask).
 
 This just exposes a Python API. No plotting, I/O utilities, or CLI are provided.
 See the main fork of [RM-Tools](https://github.com/CIRADA-Tools/RM-Tools) for
@@ -57,6 +57,13 @@ Current GitHub `main` commit:
 ```
 pip install git+https://github.com/AlecThomson/rm-lite.git
 ```
+
+## Usage
+
+Docs: [rm-lite.readthedocs.io](https://rm-lite.readthedocs.io/en/latest/)
+
+This is a library, by design - no CLI is provided. Import the API and call it
+from your own Python code; see the docs for usage examples.
 
 ## Citing
 
