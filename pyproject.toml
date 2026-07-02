@@ -42,6 +42,8 @@ dependencies = [
     "corner",
     "polars",
     "sigfig",
+    "dask[array]",
+    "zarr",
 ]
 
 [project.optional-dependencies]
@@ -134,6 +136,20 @@ disallow_incomplete_defs = true
 [[tool.mypy.overrides]]
 module = ["astropy.*", "sigfig.*", "finufft.*", "uncertainties.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# zarr's installed source uses PEP 695 generic syntax, unparseable under
+# python_version = "3.10"; dask imports it lazily inside Array.to_zarr.
+module = ["zarr.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# dask.array's public API (map_blocks, to_delayed, from_delayed, block,
+# to_zarr, from_array, delayed) is largely untyped.
+module = ["rm_lite.utils.dask_io", "rm_lite.tools_3d.rmsynth", "rm_lite.tools_3d.rmclean"]
+disallow_untyped_calls = false
+warn_return_any = false
 
 
 [tool.typos.default.extend-identifiers]

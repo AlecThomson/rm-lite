@@ -400,6 +400,8 @@ class RMSFParams(NamedTuple):
     """ Maximum Faraday depth """
     phi_max_scale: float
     """ Maximum Faraday depth scale """
+    rmsf_results: RMSFResults
+    """ Empirical RMSF """
 
 
 def compute_rmsf_params(
@@ -439,6 +441,7 @@ def compute_rmsf_params(
         rmsf_fwhm_meas=rmsf_fwhm_meas,
         phi_max=phi_max,
         phi_max_scale=float(phi_max_scale),
+        rmsf_results=rmsf_results,
     )
 
 

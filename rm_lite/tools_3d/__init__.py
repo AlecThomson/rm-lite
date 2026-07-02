@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-import pkg_resources
+from importlib.metadata import version
 
-__version__ = pkg_resources.get_distribution("RM-Tools").version
+__version__ = version("rm_lite")
