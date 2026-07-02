@@ -19,15 +19,17 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import dask.array as da
 import numpy as np
 from numpy.typing import NDArray
 
 from rm_lite.utils.dask_io import (
-    DEFAULT_TARGET_CHUNK_BYTES,
+    DEFAULT_TARGET_CHUNK_MB,
     complex_pol_dask,
+    estimate_channel_noise_mad,
+    freq_arr_hz_from_header,
     read_fits_cube_dask,
 )
 from rm_lite.utils.logging import quiet_logs
@@ -65,6 +67,7 @@ def _compute_global_params(
     phi_max_radm2: float | None,
     d_phi_radm2: float | None,
     n_samples: float | None,
+    weight_type: Literal["variance", "uniform"],
 ) -> RMSynthParams:
     """Compute phi_arr/lam_sq_0_m2/weight_arr once for the whole cube.
 
@@ -83,7 +86,7 @@ def _compute_global_params(
         phi_max_radm2=phi_max_radm2,
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
-        weight_type="variance",
+        weight_type=weight_type,
     )
     return compute_rmsynth_params(
         freq_arr_hz=freq_arr_hz,
@@ -101,6 +104,7 @@ def rmsynth_3d(
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
+    weight_type: Literal["variance", "uniform"] = "variance",
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis on chunked Stokes Q/U cubes.
@@ -117,6 +121,7 @@ def rmsynth_3d(
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
+        weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
         log_level (int, optional): Log level applied to `rm_lite`'s logger while
             each chunk runs. `rmsynth_nufft`/`get_rmsf_nufft` log at INFO per
             call, which is only useful for a single spectrum -- repeated once
@@ -134,7 +139,7 @@ def rmsynth_3d(
         msg = "Stokes Q and U must have identical chunking."
         raise ValueError(msg)
 
-    n_freq = stokes_q.shape[0]
+    n_freq = int(stokes_q.shape[0])
     if weight_arr is None:
         weight_arr = np.ones(n_freq, dtype=np.float64)
 
@@ -144,6 +149,7 @@ def rmsynth_3d(
         phi_max_radm2=phi_max_radm2,
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
+        weight_type=weight_type,
     )
     n_phi = rmsynth_params.phi_arr_radm2.shape[0]
     phi_double_arr_radm2 = make_double_phi_arr(rmsynth_params.phi_arr_radm2)
@@ -207,43 +213,52 @@ def rmsynth_3d(
 def rmsynth_3d_from_fits(
     stokes_q_file: str | Path,
     stokes_u_file: str | Path,
-    freq_arr_hz: NDArray[np.float64],
     weight_arr: NDArray[np.float64] | None = None,
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
-    target_chunk_bytes: int = DEFAULT_TARGET_CHUNK_BYTES,
+    weight_type: Literal["variance", "uniform"] = "variance",
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis directly on Stokes Q/U FITS cubes on disk.
 
     Convenience wrapper around `rm_lite.utils.dask_io.read_fits_cube_dask` +
     `rmsynth_3d`, for the common case where Q/U are FITS files rather than
-    already-loaded dask arrays.
+    already-loaded dask arrays. The frequency array is derived from the
+    Stokes Q header's spectral WCS, and, if `weight_arr` is not given, so is
+    the per-channel weight array (via `estimate_channel_noise_mad`).
 
     Args:
         stokes_q_file (str | Path): Path to the Stokes Q FITS cube.
         stokes_u_file (str | Path): Path to the Stokes U FITS cube, same
             shape as the Q cube.
-        freq_arr_hz (NDArray[np.float64]): Frequency array in Hz.
         weight_arr (NDArray[np.float64] | None, optional): Per-channel weight
-            array. Defaults to uniform weighting.
+            array. Defaults to an estimate from the cube noise (see
+            `rm_lite.utils.dask_io.estimate_channel_noise_mad`).
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
-        target_chunk_bytes (int, optional): Target per-chunk memory footprint,
-            see `read_fits_cube_dask`. Defaults to 256 MiB.
+        weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
+        target_chunk_mb (float, optional): Target per-chunk memory footprint
+            in MB, see `read_fits_cube_dask`. Defaults to 256.
         log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
 
     Returns:
         RMSynth3DResults: Lazy dirty FDF cube, RMSF cube, and associated parameters.
     """
-    stokes_q, _header_q = read_fits_cube_dask(
-        stokes_q_file, target_chunk_bytes=target_chunk_bytes
+    stokes_q, header_q = read_fits_cube_dask(
+        stokes_q_file, target_chunk_mb=target_chunk_mb
     )
     stokes_u, _header_u = read_fits_cube_dask(
-        stokes_u_file, target_chunk_bytes=target_chunk_bytes
+        stokes_u_file, target_chunk_mb=target_chunk_mb
     )
+
+    freq_arr_hz = freq_arr_hz_from_header(header_q, n_freq=int(stokes_q.shape[0]))
+
+    if weight_arr is None and weight_type == "variance":
+        noise_arr = estimate_channel_noise_mad(stokes_q, stokes_u)
+        weight_arr = 1.0 / noise_arr**2
 
     return rmsynth_3d(
         stokes_q=stokes_q,
@@ -253,5 +268,6 @@ def rmsynth_3d_from_fits(
         phi_max_radm2=phi_max_radm2,
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
+        weight_type=weight_type,
         log_level=log_level,
     )

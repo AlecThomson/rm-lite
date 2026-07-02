@@ -12,15 +12,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+import astropy.units as u
 import dask.array as da
 import numpy as np
 from astropy.io import fits
 from astropy.io.fits import Header
 from astropy.stats import mad_std
+from astropy.wcs import WCS
 from dask.base import compute
 from numpy.typing import NDArray
 
-DEFAULT_TARGET_CHUNK_BYTES = 256 * 1024**2
+DEFAULT_TARGET_CHUNK_MB = 256
 
 
 def spatial_chunk_size(
@@ -28,13 +30,13 @@ def spatial_chunk_size(
     ny: int,
     nx: int,
     itemsize: int,
-    target_chunk_bytes: int = DEFAULT_TARGET_CHUNK_BYTES,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
 ) -> tuple[int, int]:
     """Pick a square spatial chunk size for a fixed target chunk memory footprint.
 
     The frequency/Faraday-depth axis is never chunked, so a chunk's memory
     footprint is `n_freq * cy * cx * itemsize`. `cy` and `cx` are solved for
-    that footprint to equal `target_chunk_bytes`, then clipped to the image
+    that footprint to equal `target_chunk_mb`, then clipped to the image
     dimensions.
 
     Args:
@@ -42,12 +44,13 @@ def spatial_chunk_size(
         ny (int): Full image height in pixels.
         nx (int): Full image width in pixels.
         itemsize (int): Size in bytes of one array element.
-        target_chunk_bytes (int, optional): Target memory footprint of a
-            single chunk, in bytes. Defaults to 256 MiB.
+        target_chunk_mb (float, optional): Target memory footprint of a
+            single chunk, in MB. Defaults to 256.
 
     Returns:
         tuple[int, int]: Spatial chunk size (cy, cx).
     """
+    target_chunk_bytes = target_chunk_mb * 1024**2
     pixels_per_chunk = target_chunk_bytes / (n_freq * itemsize)
     side = max(1, int(np.floor(np.sqrt(pixels_per_chunk))))
     return min(side, ny), min(side, nx)
@@ -55,7 +58,7 @@ def spatial_chunk_size(
 
 def read_fits_cube_dask(
     path: str | Path,
-    target_chunk_bytes: int = DEFAULT_TARGET_CHUNK_BYTES,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
 ) -> tuple[da.Array, Header]:
     """Lazily read a Stokes FITS cube as a chunked dask array.
 
@@ -71,8 +74,8 @@ def read_fits_cube_dask(
         path (str | Path): Path to the FITS cube. Assumed axis order
             (freq, y, x) once degenerate axes are squeezed out, i.e. the
             frequency axis is first in numpy order.
-        target_chunk_bytes (int, optional): Target chunk memory footprint in
-            bytes, see `spatial_chunk_size`. Defaults to 256 MiB.
+        target_chunk_mb (float, optional): Target chunk memory footprint in
+            MB, see `spatial_chunk_size`. Defaults to 256.
 
     Returns:
         tuple[da.Array, Header]: Lazy dask array and the FITS header.
@@ -94,9 +97,24 @@ def read_fits_cube_dask(
         ny=ny,
         nx=nx,
         itemsize=data.itemsize,
-        target_chunk_bytes=target_chunk_bytes,
+        target_chunk_mb=target_chunk_mb,
     )
     return da.from_array(data, chunks=(-1, cy, cx)), header
+
+
+def freq_arr_hz_from_header(header: Header, n_freq: int) -> NDArray[np.float64]:
+    """Derive the frequency array in Hz from a FITS header's spectral WCS.
+
+    Args:
+        header (Header): FITS header containing a spectral axis.
+        n_freq (int): Number of channels along the spectral axis.
+
+    Returns:
+        NDArray[np.float64]: Frequency array in Hz.
+    """
+    spectral_wcs = WCS(header).spectral
+    freq_quantity = spectral_wcs.pixel_to_world(np.arange(n_freq))
+    return freq_quantity.to(u.Hz, equivalencies=u.spectral()).value
 
 
 def complex_pol_dask(stokes_q: da.Array, stokes_u: da.Array) -> da.Array:

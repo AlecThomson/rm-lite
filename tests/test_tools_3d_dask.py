@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import rm_lite.tools_3d.rmclean as rmclean3d_mod
 import zarr
+from astropy.io.fits import Header
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmclean import rmclean_3d
@@ -17,6 +18,7 @@ from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.clean import rmclean
 from rm_lite.utils.dask_io import (
     estimate_channel_noise_mad,
+    freq_arr_hz_from_header,
     spatial_chunk_size,
     write_zarr_group,
 )
@@ -288,14 +290,31 @@ def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
         np.testing.assert_allclose(group[name][:], array.compute(), atol=1e-10)
 
 
+def test_freq_arr_hz_from_header_reads_spectral_wcs():
+    header = Header()
+    header["NAXIS"] = 3
+    header["NAXIS1"] = 10
+    header["NAXIS2"] = 10
+    header["NAXIS3"] = 4
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = 1.0e9
+    header["CDELT3"] = 1.0e6
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+
+    freq_arr_hz = freq_arr_hz_from_header(header, n_freq=4)
+
+    np.testing.assert_allclose(freq_arr_hz, [1.000e9, 1.001e9, 1.002e9, 1.003e9])
+
+
 def test_spatial_chunk_size_respects_target_and_bounds():
     cy, cx = spatial_chunk_size(
-        n_freq=100, ny=1000, nx=1000, itemsize=16, target_chunk_bytes=1024**2
+        n_freq=100, ny=1000, nx=1000, itemsize=16, target_chunk_mb=1
     )
     assert cy * cx * 100 * 16 <= 1024**2 * 1.1
     # Clipped to image dims when the target budget exceeds the whole image.
     cy, cx = spatial_chunk_size(
-        n_freq=10, ny=5, nx=5, itemsize=16, target_chunk_bytes=1024**3
+        n_freq=10, ny=5, nx=5, itemsize=16, target_chunk_mb=1024
     )
     assert (cy, cx) == (5, 5)
 
