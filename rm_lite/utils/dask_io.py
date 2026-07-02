@@ -9,6 +9,7 @@ memory use is bounded by chunk size rather than cube size.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from astropy.stats import mad_std
 from astropy.wcs import WCS
 from dask.base import compute
 from numpy.typing import NDArray
+
+from rm_lite.utils.logging import logger
 
 DEFAULT_TARGET_CHUNK_MB = 256
 
@@ -157,7 +160,10 @@ def write_zarr_group(
         array.to_zarr(store, component=name, overwrite=overwrite, compute=False)
         for name, array in arrays.items()
     ]
+    tick = time.time()
     compute(*writes)
+    tock = time.time()
+    logger.info(f"Wrote {list(arrays)} to {store} in {tock - tick:.3g} seconds.")
 
 
 def _channel_mad_std_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -202,9 +208,13 @@ def estimate_channel_noise_mad(
         msg = f"Stokes Q and U must have the same shape. Got {stokes_q.shape} and {stokes_u.shape}."
         raise ValueError(msg)
 
+    logger.info(
+        "Rechunking Stokes Q/U to one spatial block per channel for noise estimation."
+    )
     q_full_spatial = stokes_q.rechunk({1: -1, 2: -1})
     u_full_spatial = stokes_u.rechunk({1: -1, 2: -1})
 
+    tick = time.time()
     q_noise, u_noise = compute(
         da.map_blocks(
             _channel_mad_std_block, q_full_spatial, drop_axis=(1, 2), dtype=np.float64
@@ -213,4 +223,6 @@ def estimate_channel_noise_mad(
             _channel_mad_std_block, u_full_spatial, drop_axis=(1, 2), dtype=np.float64
         ),
     )
+    tock = time.time()
+    logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
     return np.abs(q_noise + u_noise) / 2.0
