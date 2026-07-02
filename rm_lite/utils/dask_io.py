@@ -20,6 +20,7 @@ from astropy.io import fits
 from astropy.io.fits import Header
 from astropy.stats import mad_std
 from astropy.wcs import WCS
+from dask import delayed
 from dask.base import compute
 from numpy.typing import NDArray
 
@@ -59,19 +60,41 @@ def spatial_chunk_size(
     return min(side, ny), min(side, nx)
 
 
+def _chunk_bounds(size: int, chunk: int) -> list[tuple[int, int]]:
+    return [(start, min(start + chunk, size)) for start in range(0, size, chunk)]
+
+
+def _read_fits_block(
+    path: str | Path,
+    y_bounds: tuple[int, int],
+    x_bounds: tuple[int, int],
+) -> NDArray:
+    # Reopens the file per block rather than closing over one shared memmap:
+    # dask.array.from_array unconditionally does `x = x.copy()` on anything
+    # array-like (including a memmap-backed ndarray), and its default
+    # tokenizing hashes the full buffer -- both silently force a full-cube
+    # read into memory. Passing only cheap primitives (path, int bounds) to
+    # a `dask.delayed` call sidesteps both.
+    y0, y1 = y_bounds
+    x0, x1 = x_bounds
+    with fits.open(path, memmap=True) as hdul:
+        data = np.squeeze(hdul[0].data)
+        return np.asarray(data[:, y0:y1, x0:x1])
+
+
 def read_fits_cube_dask(
     path: str | Path,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
 ) -> tuple[da.Array, Header]:
     """Lazily read a Stokes FITS cube as a chunked dask array.
 
-    The FITS file is opened with `memmap=True` so the underlying numpy array
-    is a memmap; wrapping it in `dask.array.from_array` defers actual reads
-    from disk until a chunk is computed.
+    Each spatial block is read by its own `dask.delayed` task (reopening the
+    file with `memmap=True` and slicing out just that block), assembled into
+    one dask array with `dask.array.from_delayed` + `dask.array.block` --
+    actual reads from disk are deferred until a block is computed.
 
     Degenerate length-1 axes (e.g. a dummy Stokes axis, common in ASKAP/EMU
-    cutout cubes) are squeezed out first. `np.squeeze` on a memmap returns a
-    view, not a copy, so this stays lazy.
+    cutout cubes) are squeezed out first.
 
     Args:
         path (str | Path): Path to the FITS cube. Assumed axis order
@@ -95,14 +118,31 @@ def read_fits_cube_dask(
             raise ValueError(msg)
 
         n_freq, ny, nx = data.shape
-        cy, cx = spatial_chunk_size(
-            n_freq=n_freq,
-            ny=ny,
-            nx=nx,
-            itemsize=data.itemsize,
-            target_chunk_mb=target_chunk_mb,
-        )
-        dask_arr = da.from_array(data, chunks=(-1, cy, cx))
+        dtype = data.dtype
+        itemsize = data.itemsize
+
+    cy, cx = spatial_chunk_size(
+        n_freq=n_freq,
+        ny=ny,
+        nx=nx,
+        itemsize=itemsize,
+        target_chunk_mb=target_chunk_mb,
+    )
+    y_bounds = _chunk_bounds(ny, cy)
+    x_bounds = _chunk_bounds(nx, cx)
+
+    blocks = [
+        [
+            da.from_delayed(
+                delayed(_read_fits_block, pure=True)(path, yb, xb),
+                shape=(n_freq, yb[1] - yb[0], xb[1] - xb[0]),
+                dtype=dtype,
+            )
+            for xb in x_bounds
+        ]
+        for yb in y_bounds
+    ]
+    dask_arr = da.block(blocks)
 
     return dask_arr, header
 
@@ -118,7 +158,15 @@ def freq_arr_hz_from_header(header: Header, n_freq: int) -> NDArray[np.float64]:
         NDArray[np.float64]: Frequency array in Hz.
     """
     spectral_wcs = WCS(header).spectral
-    freq_quantity = spectral_wcs.pixel_to_world(np.arange(n_freq))
+    # Uses the low-level WCS API (`pixel_to_world_values`) rather than the
+    # high-level `pixel_to_world`: the latter builds a `SpectralCoord`, which
+    # requires a known observer reference frame from `SPECSYS` and raises
+    # `NotImplementedError` if that header keyword is absent -- common in
+    # ASKAP/RACS cutouts. The plain pixel-to-frequency transform needed here
+    # doesn't depend on an observer frame at all.
+    freq_values = spectral_wcs.pixel_to_world_values(np.arange(n_freq))
+    freq_unit = u.Unit(spectral_wcs.world_axis_units[0])
+    freq_quantity = freq_values * freq_unit
     return freq_quantity.to(u.Hz, equivalencies=u.spectral()).value
 
 

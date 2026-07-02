@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import os
+
+# Must be set before importing nbconvert/nbformat, which pull in jupyter_core
+# and emit a DeprecationWarning about path migration at import time otherwise.
+os.environ["JUPYTER_PLATFORM_DIRS"] = "1"
+
 import runpy
 from pathlib import Path
 
@@ -8,9 +13,6 @@ import matplotlib.pyplot as plt
 import nbconvert
 import nbformat
 import pytest
-
-# Make Jypyter happy
-os.environ["JUPYTER_PLATFORM_DIRS"] = "1"
 
 # Define the directory containing your example scripts
 EXAMPLES_DIR = Path("docs/examples").resolve()
