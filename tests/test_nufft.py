@@ -427,6 +427,7 @@ def test_rmsf():
             ["phi2Arr", "RMSFcube", "fwhmRMSFArr"],
             [phi2Arr, RMSFcube, fwhmRMSFArr],
             [phi2Arr_old, RMSFcube_old, fwhmRMSFArr_old],
+            strict=False,
         ):
             msg = f"Testing {name}"
             logger.info(msg)

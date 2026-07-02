@@ -31,8 +31,8 @@
 
 <!-- prettier-ignore-end -->
 
-A mini fork of RM-Tools - RM-synthesis and RM-clean on polarised
-radio spectra, for both 1D spectra and 3D cubes (the latter via dask).
+A mini fork of RM-Tools - RM-synthesis and RM-clean on polarised radio spectra,
+for both 1D spectra and 3D cubes (the latter via dask).
 
 This just exposes a Python API. No plotting, I/O utilities, or CLI are provided.
 See the main fork of [RM-Tools](https://github.com/CIRADA-Tools/RM-Tools) for

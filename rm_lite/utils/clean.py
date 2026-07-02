@@ -115,6 +115,7 @@ class RMCleanOptions(NamedTuple):
     gain: float = 0.1
     """Clean loop gain"""
 
+
 def rmclean(
     dirty_fdf_arr: NDArray[np.complex128],
     phi_arr_radm2: NDArray[np.float64],
@@ -201,7 +202,8 @@ def _rmclean_nd(
     if rm_synth_arrays.fdf_mask_arr is not None:
         checks.append(
             (
-                rm_synth_arrays.fdf_mask_arr.shape == rm_synth_arrays.dirty_fdf_arr.shape,
+                rm_synth_arrays.fdf_mask_arr.shape
+                == rm_synth_arrays.dirty_fdf_arr.shape,
                 f"Mask array dimensions {rm_synth_arrays.fdf_mask_arr.shape} must match the xy dimensions of the FDF cube {rm_synth_arrays.dirty_fdf_arr}.",
             )
         )

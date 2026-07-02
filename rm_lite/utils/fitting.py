@@ -289,7 +289,7 @@ def static_fit(
         )
 
     errors = np.sqrt(np.diag(pcov))
-    fit_vals = [sf.round(p, e) for p, e in zip(popt, errors)]
+    fit_vals = [sf.round(p, e) for p, e in zip(popt, errors, strict=False)]
     logger.info(f"Fit results: {fit_vals}")
 
     return FitResult(
