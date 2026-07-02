@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import astropy.units as u
 import dask.array as da
@@ -68,7 +69,7 @@ def _read_fits_block(
     path: str | Path,
     y_bounds: tuple[int, int],
     x_bounds: tuple[int, int],
-) -> NDArray:
+) -> NDArray[Any]:
     # Reopens the file per block rather than closing over one shared memmap:
     # dask.array.from_array unconditionally does `x = x.copy()` on anything
     # array-like (including a memmap-backed ndarray), and its default

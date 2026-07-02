@@ -36,7 +36,9 @@ from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.synthesis import (
     FDFOptions,
     RMSynthParams,
+    TheoreticalNoise,
     compute_rmsynth_params,
+    compute_theoretical_noise,
     get_fwhm_rmsf,
     get_rmsf_nufft,
     make_double_phi_arr,
@@ -59,6 +61,10 @@ class RMSynth3DResults(NamedTuple):
     """Analytic RMSF FWHM (per-pixel fitting is not performed in 3D)."""
     lam_sq_0_m2: float
     """Reference wavelength^2 value in m^2."""
+    theoretical_noise: TheoreticalNoise
+    """Theoretical FDF-domain noise from the per-channel weight array (uniform
+    across the cube -- 3D RM-synthesis only carries a per-channel, not
+    per-pixel, noise estimate)."""
 
 
 def _compute_global_params(
@@ -68,14 +74,16 @@ def _compute_global_params(
     d_phi_radm2: float | None,
     n_samples: float | None,
     weight_type: Literal["variance", "uniform"],
-) -> RMSynthParams:
-    """Compute phi_arr/lam_sq_0_m2/weight_arr once for the whole cube.
+) -> tuple[RMSynthParams, TheoreticalNoise]:
+    """Compute phi_arr/lam_sq_0_m2/weight_arr and theoretical FDF noise, once for the whole cube.
 
     `compute_rmsynth_params` is written for a single per-pixel spectrum, but
     its weight-array derivation round-trips exactly from a per-channel error
     spectrum (`weight = 1/error**2`), so a synthetic, fully-finite spectrum
     with `error = 1/sqrt(weight_arr)` reuses it unmodified for a per-channel
-    (not per-pixel) weight array shared by every spatial chunk.
+    (not per-pixel) weight array shared by every spatial chunk. The same
+    reconstructed error feeds `compute_theoretical_noise` for a per-channel
+    (not per-pixel) theoretical noise estimate.
     """
     with np.errstate(divide="ignore"):
         real_error = np.where(weight_arr > 0, 1.0 / np.sqrt(weight_arr), np.inf)
@@ -88,12 +96,17 @@ def _compute_global_params(
         n_samples=n_samples,
         weight_type=weight_type,
     )
-    return compute_rmsynth_params(
+    rmsynth_params = compute_rmsynth_params(
         freq_arr_hz=freq_arr_hz,
         complex_pol_arr=complex_pol_arr,
         complex_pol_error=complex_pol_error,
         fdf_options=fdf_options,
     )
+    theoretical_noise = compute_theoretical_noise(
+        complex_pol_error=complex_pol_error,
+        weight_arr=weight_arr,
+    )
+    return rmsynth_params, theoretical_noise
 
 
 def rmsynth_3d(
@@ -143,7 +156,7 @@ def rmsynth_3d(
     if weight_arr is None:
         weight_arr = np.ones(n_freq, dtype=np.float64)
 
-    rmsynth_params = _compute_global_params(
+    rmsynth_params, theoretical_noise = _compute_global_params(
         freq_arr_hz=freq_arr_hz,
         weight_arr=weight_arr,
         phi_max_radm2=phi_max_radm2,
@@ -207,6 +220,7 @@ def rmsynth_3d(
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+        theoretical_noise=theoretical_noise,
     )
 
 
