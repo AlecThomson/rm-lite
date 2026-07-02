@@ -117,7 +117,6 @@ def arange(
 
     if include_stop:
         if np.isclose(arr[-1] + step, stop, rtol=rtol, atol=atol):
-            # arr = np.c_[arr, arr[-1] + step]
             arr = np.append(arr, arr[-1] + step)
     elif np.isclose(arr[-1], stop, rtol=rtol, atol=atol):
         arr = np.delete(arr, -1)

@@ -128,14 +128,12 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
     assert np.isclose(
         fdf_parameters["peak_rm_fit"][0],
         racs_model.rm,
-        # atol=fdf_parameters["peak_rm_fit_error"][0],
         atol=1,
     )
 
     assert np.isclose(
         fdf_parameters["frac_pol"].to_numpy()[0],
         racs_model.frac_pol,
-        # atol=fdf_parameters["frac_pol_error"].to_numpy()[0],
         atol=0.1,
     )
 

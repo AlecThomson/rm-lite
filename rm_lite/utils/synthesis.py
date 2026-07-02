@@ -738,15 +738,6 @@ def inverse_rmsynth_nufft(
         NDArray[np.float64]: Complex polarisation array in wavelength^2 space
     """
 
-    # n_dims = len(fdf_q_arr.shape)
-    # if not n_dims <= 3:
-    #     msg = f"Data dimensions must be <= 3. Got {n_dims}"
-    #     raise ValueError(msg)
-
-    # if fdf_q_arr.shape[0] != phi_arr_radm2.shape[0]:
-    #     msg = f"Data depth does not match Faraday depth vector ({fdf_q_arr.shape[0]} vs {phi_arr_radm2.shape[0]})."
-    #     raise ValueError(msg)
-
     checks: list[tuple[bool, str]] = [
         (
             complex_fdf_arr.ndim <= 3,
