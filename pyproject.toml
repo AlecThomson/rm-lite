@@ -48,7 +48,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pre-commit",
     "ruff",
     "pytest",
     "pytest-cov",
@@ -56,7 +55,8 @@ dev = [
     "nbconvert",
     "jupyter",
     "ipython",
-    "pytest"
+    "pytest",
+    "prek>=0.4.6",
 ]
 docs = [
     "sphinx>=7.0",

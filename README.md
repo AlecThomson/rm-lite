@@ -94,10 +94,10 @@ pip install ".[dev]"
 ```
 
 Code formatting and style is handled by `ruff`, with tests run by `pytest`. A
-`pre-commit` hook is available to handle the autoformatting. After installing
-the `dev` dependencies, you can install the hooks by running:
+`prek` hook is available to handle the autoformatting. After installing the
+`dev` dependencies, you can install the hooks by running:
 
 ```bash
 cd rm-lite
-pre-commit install
+prek install
 ```
