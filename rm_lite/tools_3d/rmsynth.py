@@ -17,6 +17,7 @@ is otherwise a fully vectorized stage.
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import dask.array as da
@@ -24,6 +25,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from rm_lite.utils.dask_io import complex_pol_dask
+from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.synthesis import (
     FDFOptions,
     RMSynthParams,
@@ -94,6 +96,7 @@ def rmsynth_3d(
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
+    log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis on chunked Stokes Q/U cubes.
 
@@ -109,6 +112,12 @@ def rmsynth_3d(
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
+        log_level (int, optional): Log level applied to `rm_lite`'s logger while
+            each chunk runs. `rmsynth_nufft`/`get_rmsf_nufft` log at INFO per
+            call, which is only useful for a single spectrum -- repeated once
+            per chunk it's just noise, so this defaults to WARNING. Pass
+            `logging.INFO` to restore the per-chunk messages. Defaults to
+            `logging.WARNING`.
 
     Returns:
         RMSynth3DResults: Lazy dirty FDF cube, RMSF cube, and associated parameters.
@@ -140,13 +149,14 @@ def rmsynth_3d(
 
     def _synth_block(block: NDArray[np.complex128]) -> NDArray[np.complex128]:
         _, cy, cx = block.shape
-        fdf = rmsynth_nufft(
-            complex_pol_arr=block,
-            lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
-            phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-            weight_arr=rmsynth_params.weight_arr,
-            lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
-        )
+        with quiet_logs(log_level):
+            fdf = rmsynth_nufft(
+                complex_pol_arr=block,
+                lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
+                phi_arr_radm2=rmsynth_params.phi_arr_radm2,
+                weight_arr=rmsynth_params.weight_arr,
+                lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+            )
         # rmsynth_nufft squeezes size-1 spatial axes; restore the block shape.
         return fdf.reshape(n_phi, cy, cx)
 
@@ -159,14 +169,15 @@ def rmsynth_3d(
 
     def _rmsf_block(block: NDArray[np.complex128]) -> NDArray[np.complex128]:
         _, cy, cx = block.shape
-        rmsf_result = get_rmsf_nufft(
-            lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
-            phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-            weight_arr=rmsynth_params.weight_arr,
-            lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
-            mask_arr=~np.isfinite(block),
-            do_fit_rmsf=False,
-        )
+        with quiet_logs(log_level):
+            rmsf_result = get_rmsf_nufft(
+                lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
+                phi_arr_radm2=rmsynth_params.phi_arr_radm2,
+                weight_arr=rmsynth_params.weight_arr,
+                lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+                mask_arr=~np.isfinite(block),
+                do_fit_rmsf=False,
+            )
         # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is
         # actually complex128 at runtime (built from a finufft complex output).
         return rmsf_result.rmsf_cube.reshape(n_phi_double, cy, cx)  # type: ignore[return-value]

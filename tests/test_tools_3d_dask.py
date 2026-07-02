@@ -15,7 +15,11 @@ from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmclean import rmclean_3d
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.clean import rmclean
-from rm_lite.utils.dask_io import spatial_chunk_size, write_zarr_group
+from rm_lite.utils.dask_io import (
+    estimate_channel_noise_mad,
+    spatial_chunk_size,
+    write_zarr_group,
+)
 from rm_lite.utils.synthesis import freq_to_lambda2
 
 RNG = np.random.default_rng(2025)
@@ -197,6 +201,56 @@ def test_rmclean_3d_block_runs_once_per_chunk(
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
+def test_write_zarr_group_shares_computation_across_arrays(
+    synthetic_cube: SyntheticCube, monkeypatch, tmp_path
+):
+    """write_zarr_group must not recompute a shared upstream graph once per array.
+
+    rmclean_3d's four outputs all come from one per-chunk dask.delayed call;
+    writing them with a naive per-array `to_zarr()` loop (call to_zarr, which
+    defaults to compute=True, once per array) would rerun that delayed call
+    once per array instead of once per chunk.
+    """
+    call_count = 0
+    original = rmclean3d_mod._clean_block
+
+    def counting_wrapper(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(rmclean3d_mod, "_clean_block", counting_wrapper)
+
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    synth = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    clean = rmclean3d_mod.rmclean_3d(
+        synth.fdf_dirty_cube,
+        synth.rmsf_cube,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+    )
+
+    write_zarr_group(
+        tmp_path / "shared_compute.zarr",
+        {
+            "fdf_clean": clean.clean_fdf_cube,
+            "fdf_model": clean.model_fdf_cube,
+            "fdf_resid": clean.resid_fdf_cube,
+            "iter_count": clean.iter_count_map,
+        },
+    )
+
+    n_chunks = synth.fdf_dirty_cube.numblocks[1] * synth.fdf_dirty_cube.numblocks[2]
+    assert call_count == n_chunks
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
 def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
     """All six output cubes write and read back correctly via zarr."""
     q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
@@ -244,3 +298,42 @@ def test_spatial_chunk_size_respects_target_and_bounds():
         n_freq=10, ny=5, nx=5, itemsize=16, target_chunk_bytes=1024**3
     )
     assert (cy, cx) == (5, 5)
+
+
+def test_estimate_channel_noise_mad_recovers_true_noise():
+    rng = np.random.default_rng(99)
+    n_freq, ny, nx = 20, 64, 64
+    true_noise = np.linspace(0.05, 0.5, n_freq)
+    stokes_q = rng.normal(0, 1, (n_freq, ny, nx)) * true_noise[:, None, None]
+    stokes_u = rng.normal(0, 1, (n_freq, ny, nx)) * true_noise[:, None, None]
+
+    q_dask = _chunked(stokes_q, 16, 16)
+    u_dask = _chunked(stokes_u, 16, 16)
+
+    noise = estimate_channel_noise_mad(q_dask, u_dask)
+
+    assert isinstance(noise, np.ndarray)
+    assert noise.shape == (n_freq,)
+    np.testing.assert_allclose(noise, true_noise, rtol=0.1)
+
+
+def test_estimate_channel_noise_mad_is_spatial_chunk_invariant():
+    rng = np.random.default_rng(7)
+    n_freq, ny, nx = 12, 32, 32
+    stokes_q = rng.normal(0, 1, (n_freq, ny, nx))
+    stokes_u = rng.normal(0, 1, (n_freq, ny, nx))
+
+    fine = estimate_channel_noise_mad(
+        _chunked(stokes_q, 8, 8), _chunked(stokes_u, 8, 8)
+    )
+    coarse = estimate_channel_noise_mad(
+        _chunked(stokes_q, -1, -1), _chunked(stokes_u, -1, -1)
+    )
+    np.testing.assert_array_equal(fine, coarse)
+
+
+def test_estimate_channel_noise_mad_shape_mismatch_raises():
+    stokes_q = _chunked(np.zeros((5, 4, 4)), 2, 2)
+    stokes_u = _chunked(np.zeros((5, 3, 3)), 2, 2)
+    with pytest.raises(ValueError, match="same shape"):
+        estimate_channel_noise_mad(stokes_q, stokes_u)

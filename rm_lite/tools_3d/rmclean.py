@@ -21,6 +21,7 @@ flows through the task graph instead of a mutated shared array.
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import dask.array as da
@@ -29,6 +30,7 @@ from dask.delayed import delayed
 from numpy.typing import NDArray
 
 from rm_lite.utils.clean import rmclean
+from rm_lite.utils.logging import quiet_logs
 
 
 class RMClean3DResults(NamedTuple):
@@ -61,18 +63,20 @@ def _clean_block(
     threshold: float,
     max_iter: int,
     gain: float,
+    log_level: int,
 ) -> _RMCleanBlockResult:
-    result = rmclean(
-        dirty_fdf_arr=dirty_fdf_block,
-        phi_arr_radm2=phi_arr_radm2,
-        rmsf_arr=rmsf_block,
-        phi_double_arr_radm2=phi_double_arr_radm2,
-        fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
-        mask=mask,
-        threshold=threshold,
-        max_iter=max_iter,
-        gain=gain,
-    )
+    with quiet_logs(log_level):
+        result = rmclean(
+            dirty_fdf_arr=dirty_fdf_block,
+            phi_arr_radm2=phi_arr_radm2,
+            rmsf_arr=rmsf_block,
+            phi_double_arr_radm2=phi_double_arr_radm2,
+            fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
+            mask=mask,
+            threshold=threshold,
+            max_iter=max_iter,
+            gain=gain,
+        )
     return _RMCleanBlockResult(
         clean_fdf=result.clean_fdf_arr,
         model_fdf=result.model_fdf_arr,
@@ -93,6 +97,7 @@ def rmclean_3d(
     threshold: float,
     max_iter: int = 1000,
     gain: float = 0.1,
+    log_level: int = logging.ERROR,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on chunked dirty FDF and RMSF cubes.
 
@@ -110,6 +115,15 @@ def rmclean_3d(
         threshold (float): Cleaning threshold -- stop when all pixels are below this value.
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
+        log_level (int, optional): Log level applied to `rm_lite`'s logger while
+            each chunk runs. `rmclean`'s Hogbom loop logs at INFO and WARNING
+            per pixel (e.g. "Starting minor loop...", "All channels masked...
+            performed N iterations") -- these are routine per-pixel loop
+            termination conditions, not anomalies, and at cube scale they're
+            just noise, so this defaults to ERROR (silencing both). Pass
+            `logging.WARNING` or `logging.INFO` to restore progressively more
+            per-pixel verbosity, e.g. while debugging a specific chunk.
+            Defaults to `logging.ERROR`.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -145,6 +159,7 @@ def rmclean_3d(
             threshold,
             max_iter,
             gain,
+            log_level,
         )
 
         clean_blocks[idx] = da.from_delayed(

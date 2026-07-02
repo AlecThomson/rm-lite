@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 
 class TqdmToLogger(io.StringIO):
@@ -75,3 +78,45 @@ def get_logger(
 
 
 logger = get_logger()
+
+
+class _QuietState:
+    """Multiset of active requested levels backing `quiet_logs` (avoids module globals)."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.active_levels: list[int] = []
+        self.level_before_quiet = logger.level
+
+
+_quiet_state = _QuietState()
+
+
+@contextmanager
+def quiet_logs(level: int = logging.WARNING) -> Iterator[None]:
+    """Temporarily raise the rm-lite logger's level to at least `level`.
+
+    Reentrant and thread-safe: concurrent callers (e.g. dask workers running
+    one call per chunk, possibly requesting different levels -- `rmsynth_3d`
+    defaults to WARNING, `rmclean_3d` to ERROR) share a multiset of active
+    requested levels. The logger's level is always the max (most restrictive)
+    of whatever's currently active, recomputed on every entry/exit, and only
+    restored to its original value once every caller has exited. Tracking a
+    plain reentrant depth counter instead of the actual requested levels would
+    let a concurrent, less-restrictive request silently under-suppress a
+    stricter one running at the same time.
+    """
+    with _quiet_state.lock:
+        if not _quiet_state.active_levels:
+            _quiet_state.level_before_quiet = logger.level
+        _quiet_state.active_levels.append(level)
+        logger.setLevel(max(_quiet_state.active_levels))
+    try:
+        yield
+    finally:
+        with _quiet_state.lock:
+            _quiet_state.active_levels.remove(level)
+            if _quiet_state.active_levels:
+                logger.setLevel(max(_quiet_state.active_levels))
+            else:
+                logger.setLevel(_quiet_state.level_before_quiet)
