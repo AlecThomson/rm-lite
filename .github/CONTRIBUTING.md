@@ -47,16 +47,16 @@ py -m install -v -e .[dev]
 
 # Pre-commit
 
-You should prepare pre-commit, which will help you by checking that commits pass
+You should prepare prek, which will help you by checking that commits pass
 required checks:
 
 ```bash
-pip install pre-commit # or brew install pre-commit on macOS
-pre-commit install # Will install a pre-commit hook into the git repo
+pip install prek # or brew install prek on macOS
+prek install # Will install a pre-commit hook into the git repo
 ```
 
-You can also/alternatively run `pre-commit run` (changes only) or
-`pre-commit run --all-files` to check even without installing the hook.
+You can also/alternatively run `prek run` (changes only) or
+`prek run --all-files` to check even without installing the hook.
 
 # Testing
 

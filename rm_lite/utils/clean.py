@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -34,7 +34,7 @@ class RMCleanResults(NamedTuple):
     resid_fdf_arr: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> RMCleanResults:
         as_dict = self._asdict()
         as_dict.update(kwargs)
 
@@ -114,8 +114,6 @@ class RMCleanOptions(NamedTuple):
     """Maximum clean iterations"""
     gain: float = 0.1
     """Clean loop gain"""
-    mask_arr: NDArray[np.bool_] | None = None
-    """Additional mask of pixels to avoid"""
 
 
 def rmclean(
@@ -154,13 +152,13 @@ def rmclean(
         rmsf_arr=rmsf_arr,
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_arr=fwhm_rmsf_arr,
+        fdf_mask_arr=mask_arr,
     )
     clean_options = RMCleanOptions(
         mask=mask,
         threshold=threshold,
         max_iter=max_iter,
         gain=gain,
-        mask_arr=mask_arr,
     )
 
     return _rmclean_nd(rm_synth_arrays, clean_options)
@@ -201,11 +199,12 @@ def _rmclean_nd(
             f"The xy dimensions of the RMSF {rm_synth_arrays.rmsf_arr.shape[1:]} and FDF {rm_synth_arrays.dirty_fdf_arr.shape[1:]} must match.",
         ),
     ]
-    if clean_options.mask_arr is not None:
+    if rm_synth_arrays.fdf_mask_arr is not None:
         checks.append(
             (
-                clean_options.mask_arr.shape == rm_synth_arrays.dirty_fdf_arr.shape[1:],
-                f"Mask array dimensions {clean_options.mask_arr.shape} must match the xy dimensions of the FDF cube {rm_synth_arrays.dirty_fdf_arr.shape[1:]}.",
+                rm_synth_arrays.fdf_mask_arr.shape
+                == rm_synth_arrays.dirty_fdf_arr.shape,
+                f"Mask array dimensions {rm_synth_arrays.fdf_mask_arr.shape} must match the xy dimensions of the FDF cube {rm_synth_arrays.dirty_fdf_arr}.",
             )
         )
 
@@ -227,7 +226,7 @@ def _rmclean_nd(
     resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
 
     # Loop through the pixels containing a polarised signal
-    for pix_idx in tqdm(range(dirty_fdf_arr_2d.shape[1])):
+    for pix_idx in tqdm(range(dirty_fdf_arr_2d.shape[1]), file=TQDM_OUT, leave=False):
         clean_loop_results = minor_cycle(
             rm_synth_1d_arrays=RMSynthArrays(
                 dirty_fdf_arr=resid_fdf_arr_2d[:, pix_idx],
@@ -235,7 +234,7 @@ def _rmclean_nd(
                 rmsf_arr=rmsf_arr_2d[:, pix_idx],
                 phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
                 fwhm_rmsf_arr=fwhm_rmsf_arr_2d,
-                fdf_mask_arr=nd_to_two_d(rm_synth_arrays.fdf_mask_arr)
+                fdf_mask_arr=nd_to_two_d(rm_synth_arrays.fdf_mask_arr)[:, pix_idx]
                 if rm_synth_arrays.fdf_mask_arr is not None
                 else None,
             ),
@@ -286,7 +285,7 @@ class MinorLoopArrays(NamedTuple):
     peak_find_arr: NDArray[np.float64] | None = None
     """Peak finding array"""
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> MinorLoopArrays:
         as_dict = self._asdict()
         as_dict.update(kwargs)
 
@@ -309,7 +308,7 @@ class MinorLoopOptions(NamedTuple):
     update_mask: bool = True
     """Update the mask after each iteration"""
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> MinorLoopOptions:
         as_dict = self._asdict()
         as_dict.update(kwargs)
 

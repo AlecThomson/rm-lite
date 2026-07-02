@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 import numpy as np
 import sigfig as sf
@@ -15,7 +15,9 @@ GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
 
 
 class StokesIModel(Protocol):
-    def __call__(self, x: NDArray[np.float64], *params) -> NDArray[np.float64]: ...
+    def __call__(
+        self, x: NDArray[np.float64], *params: float
+    ) -> NDArray[np.float64]: ...
 
 
 class FitResult(NamedTuple):
@@ -97,7 +99,7 @@ def unit_gaussian(
         raise ValueError(msg)
     if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
-    return Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x)
+    return np.array(Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x))
 
 
 def unit_centred_gaussian(
@@ -108,7 +110,7 @@ def unit_centred_gaussian(
         raise ValueError(msg)
     if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
-    return Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x)
+    return np.array(Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x))
 
 
 def fit_rmsf(
@@ -176,33 +178,33 @@ def fit_fdf(
 
 
 def polynomial(order: int) -> StokesIModel:
-    def poly_func(x: NDArray[np.float64], *params) -> NDArray[np.float64]:
+    def poly_func(x: NDArray[np.float64], *params: float) -> NDArray[np.float64]:
         if len(params) != order + 1:
             msg = f"Polynomial function of order {order} requires {order + 1} parameters, {len(params)} given."
             raise ValueError(msg)
-        result = 0
+        result = np.zeros_like(x)
         for i in range(order + 1):
-            result += params[i] * x**i
+            result = result + params[i] * x**i
         return result
 
     return poly_func
 
 
 def power_law(order: int) -> StokesIModel:
-    def power_func(x: NDArray[np.float64], *params) -> NDArray[np.float64]:
+    def power_func(x: NDArray[np.float64], *params: float) -> NDArray[np.float64]:
         if len(params) != order + 1:
             msg = f"Power law function of order {order} requires {order + 1} parameters, {len(params)} given."
             raise ValueError(msg)
-        power = 0
+        power = np.zeros_like(x)
         for i in range(1, order + 1):
-            power += params[i] * np.log10(x) ** i
-        return params[0] * 10**power
+            power = power + params[i] * np.log10(x) ** i
+        return np.asarray(params[0] * 10**power)
 
     return power_func
 
 
 def best_aic_func(
-    aics: NDArray[np.float64], n_param: NDArray[np.int32]
+    aics: NDArray[np.float64], n_param: NDArray[np.integer[Any]]
 ) -> tuple[float, int, int]:
     """Find the best AIC for a set of AICs using Occam's razor."""
     # Find the best AIC
@@ -249,24 +251,25 @@ def static_fit(
 
     logger.debug(f"Fitting Stokes I model with {fit_type} model of order {fit_order}.")
     initial_guess = np.zeros(fit_order + 1)
-    mean_spectrum = np.nanmean(stokes_i_arr)
+    mean_spectrum = float(np.nanmean(stokes_i_arr))
     # Use 0 if errors are large and spectrum ends up negative
-    mean_spectrum = max(mean_spectrum, 0)
+    mean_spectrum = max(mean_spectrum, 0.0)
     initial_guess[0] = mean_spectrum
     bounds = (
         [-np.inf] * (fit_order + 1),
         [np.inf] * (fit_order + 1),
     )
     bounds[0][0] = 0.0
+    sigma_arr: NDArray[np.float64] | None = stokes_i_error_arr
     if (stokes_i_error_arr == 0).all():
-        stokes_i_error_arr = None
+        sigma_arr = None
 
     try:
         popt, pcov = optimize.curve_fit(
             fit_func,
             freq_arr_hz / ref_freq_hz,
             stokes_i_arr,
-            sigma=stokes_i_error_arr,
+            sigma=sigma_arr,
             absolute_sigma=True,
             p0=initial_guess,
             bounds=bounds,
@@ -289,7 +292,7 @@ def static_fit(
         )
 
     errors = np.sqrt(np.diag(pcov))
-    fit_vals = [sf.round(p, e) for p, e in zip(popt, errors)]
+    fit_vals = [sf.round(p, e) for p, e in zip(popt, errors, strict=False)]
     logger.info(f"Fit results: {fit_vals}")
 
     return FitResult(
@@ -314,13 +317,13 @@ def dynamic_fit(
     n_parameters = orders + 1
     fit_results: list[FitResult] = []
 
-    for _i, order in enumerate(orders):
+    for order in orders:
         fit_result = static_fit(
             freq_arr_hz,
             ref_freq_hz,
             stokes_i_arr,
             stokes_i_error_arr,
-            order,
+            int(order),
             fit_type,
         )
         fit_results.append(fit_result)

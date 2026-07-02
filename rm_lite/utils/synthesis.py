@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import warnings
-from typing import Literal, NamedTuple, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar
 
 import finufft
 import numpy as np
@@ -70,7 +70,7 @@ class StokesData(NamedTuple):
     stokes_i_model_error: NDArray[np.float64] | None = None
     """ Stokes I model error array """
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> StokesData:
         """Create a new StokesData instance with keywords updated
 
         Returns:
@@ -100,7 +100,7 @@ class TheoreticalNoise(NamedTuple):
     fdf_u_noise: float
     """Theoretical noise of the imaginary FDF"""
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> TheoreticalNoise:
         """Create a new TheoreticalNoise instance with keywords updated
 
         Returns:
@@ -207,7 +207,7 @@ def create_fractional_spectra(
             stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
         )
 
-        fractional_stokes_data = stokes_data.with_options(  # type: ignore[no-untyped-call]
+        fractional_stokes_data = stokes_data.with_options(
             complex_pol_arr=stokes_qu_frac_arr.astype(np.complex128),
             complex_pol_error=stokes_qu_frac_error_arr.astype(np.complex128),
         )
@@ -245,8 +245,8 @@ def create_fractional_spectra(
     )
 
     error_distribution = stats.multivariate_normal(
-        mean=fit_result.popt,
-        cov=fit_result.pcov,  # type: ignore[assignment,unused-ignore]
+        mean=np.asarray(fit_result.popt),
+        cov=np.asarray(fit_result.pcov),
         allow_singular=True,
     )
     error_samples = np.array(error_distribution.rvs(n_error_samples))
@@ -286,7 +286,7 @@ def create_fractional_spectra(
     complex_pol_arr = stokes_q_frac_arr + 1j * stokes_u_frac_arr
     complex_pol_error = stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
 
-    fractional_stokes_data = stokes_data.with_options(  # type: ignore[no-untyped-call]
+    fractional_stokes_data = stokes_data.with_options(
         complex_pol_arr=complex_pol_arr,
         complex_pol_error=complex_pol_error,
         stokes_i_model_arr=stokes_i_model_arr,
@@ -400,6 +400,8 @@ class RMSFParams(NamedTuple):
     """ Maximum Faraday depth """
     phi_max_scale: float
     """ Maximum Faraday depth scale """
+    rmsf_results: RMSFResults
+    """ Empirical RMSF """
 
 
 def compute_rmsf_params(
@@ -410,9 +412,9 @@ def compute_rmsf_params(
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
     # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
     scale_factor = 1.0 / np.nansum(weight_arr)
-    lam_sq_0_m2 = scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2)
+    lam_sq_0_m2 = float(scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2))
     if not np.isfinite(lam_sq_0_m2):
-        lam_sq_0_m2 = np.nanmean(lambda_sq_arr_m2)
+        lam_sq_0_m2 = float(np.nanmean(lambda_sq_arr_m2))
 
     lambda_sq_m2_max = np.nanmax(lambda_sq_arr_m2)
     lambda_sq_m2_min = np.nanmin(lambda_sq_arr_m2)
@@ -439,6 +441,7 @@ def compute_rmsf_params(
         rmsf_fwhm_meas=rmsf_fwhm_meas,
         phi_max=phi_max,
         phi_max_scale=float(phi_max_scale),
+        rmsf_results=rmsf_results,
     )
 
 
@@ -707,7 +710,7 @@ def rmsynth_nufft(
     # Remove redundant dimensions in the FDF array
     tock = time.time()
     logger.info(f"NUFFT complete in {tock - tick:.3g} seconds.")
-    return np.squeeze(fdf_dirty_cube)
+    return np.asarray(np.squeeze(fdf_dirty_cube))
 
 
 def inverse_rmsynth_nufft(
@@ -734,15 +737,6 @@ def inverse_rmsynth_nufft(
     Returns:
         NDArray[np.float64]: Complex polarisation array in wavelength^2 space
     """
-
-    # n_dims = len(fdf_q_arr.shape)
-    # if not n_dims <= 3:
-    #     msg = f"Data dimensions must be <= 3. Got {n_dims}"
-    #     raise ValueError(msg)
-
-    # if fdf_q_arr.shape[0] != phi_arr_radm2.shape[0]:
-    #     msg = f"Data depth does not match Faraday depth vector ({fdf_q_arr.shape[0]} vs {phi_arr_radm2.shape[0]})."
-    #     raise ValueError(msg)
 
     checks: list[tuple[bool, str]] = [
         (
@@ -777,7 +771,7 @@ def inverse_rmsynth_nufft(
         pol_cube_inv = two_d_to_nd(pol_cube_inv, original_shape=complex_fdf_arr.shape)
 
     # Remove redundant dimensions in the FDF array
-    return np.squeeze(pol_cube_inv).astype(np.complex128)
+    return np.asarray(np.squeeze(pol_cube_inv).astype(np.complex128))
 
 
 def get_rmsf_nufft(
@@ -787,7 +781,7 @@ def get_rmsf_nufft(
     lam_sq_0_m2: float,
     mask_arr: NDArray[np.bool_] | None = None,
     do_fit_rmsf: bool = False,
-    do_fit_rmsf_real=False,
+    do_fit_rmsf_real: bool = False,
     eps: float = 1e-6,
 ) -> RMSFResults:
     """Compute the RMSF for a given set of lambda^2 values.
@@ -994,15 +988,15 @@ def get_fdf_parameters(
 
     if (~np.isfinite(fdf_arr)).all():
         # I hate this, but can happen with bad data
-        peak_pi_index = np.nan
+        peak_pi_index = None
     else:
-        peak_pi_index = np.nanargmax(abs_fdf_arr)
+        peak_pi_index = int(np.nanargmax(abs_fdf_arr))
 
     # Measure the RMS noise in the spectrum after masking the peak
     d_phi = phi_arr_radm2[1] - phi_arr_radm2[0]
     mask = np.ones_like(phi_arr_radm2, dtype=bool)
 
-    if not np.isnan(peak_pi_index):
+    if peak_pi_index is not None:
         mask[peak_pi_index] = False
     fwhm_rmsf_arr_pix = fwhm_rmsf_radm2 / d_phi
     for i in np.where(mask)[0]:
@@ -1025,7 +1019,7 @@ def get_fdf_parameters(
     good_chan_idx = np.isfinite(freq_arr_hz)
     n_good_chan = good_chan_idx.sum()
 
-    if np.isnan(peak_pi_index) or not (
+    if peak_pi_index is None or not (
         peak_pi_index > 0 and peak_pi_index < len(abs_fdf_arr) - 1
     ):
         msg = "Peak index is not within the FDF array. Not fitting."
@@ -1139,7 +1133,7 @@ def get_fdf_parameters(
 
 
 def cdf_percentile(
-    values: NDArray[np.float64], cdf: NDArray[np.float64], q=50.0
+    values: NDArray[np.float64], cdf: NDArray[np.float64], q: float = 50.0
 ) -> float:
     """Return the value at a given percentile of a cumulative distribution function
 
@@ -1272,7 +1266,9 @@ def faraday_simple_spectrum(
     """
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
 
-    return frac_pol * np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lambda_sq_arr_m2))
+    return np.asarray(
+        frac_pol * np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lambda_sq_arr_m2))
+    )
 
 
 def measure_qu_complexity(

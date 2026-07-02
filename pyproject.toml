@@ -11,7 +11,7 @@ authors = [
 ]
 license.file = "LICENSE"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Science/Research",
@@ -21,10 +21,10 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
     "Typing :: Typed",
 ]
@@ -42,11 +42,12 @@ dependencies = [
     "corner",
     "polars",
     "sigfig",
+    "dask[array]",
+    "zarr",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pre-commit",
     "ruff",
     "pytest",
     "pytest-cov",
@@ -54,7 +55,8 @@ dev = [
     "nbconvert",
     "jupyter",
     "ipython",
-    "pytest"
+    "pytest",
+    "prek>=0.4.6",
 ]
 docs = [
     "sphinx>=7.0",
@@ -115,10 +117,11 @@ isort.required-imports = ["from __future__ import annotations"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["T20"]
 "noxfile.py" = ["T20"]
+"docs/examples/**" = ["T20"]
 
 [tool.mypy]
-files = ["rm_tools", "tests"]
-python_version = "3.9"
+files = ["rm_lite", "tests"]
+python_version = "3.10"
 warn_unused_configs = true
 strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
@@ -127,17 +130,51 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
 [[tool.mypy.overrides]]
-module = "spinifex.*"
+module = "rm_lite.*"
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [[tool.mypy.overrides]]
-module = ["astropy.*", "requests", "casacore.*", "unlzw3.*", "ppigrf.*", "PyIRI.*"]
+module = ["astropy.*", "sigfig.*", "finufft.*", "uncertainties.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# zarr's installed source uses PEP 695 generic syntax, unparsable under
+# python_version = "3.10"; dask imports it lazily inside Array.to_zarr.
+module = ["zarr.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# dask.array's public API (map_blocks, to_delayed, from_delayed, block,
+# to_zarr, from_array, delayed) is largely untyped.
+module = [
+    "rm_lite.utils.dask_io",
+    "rm_lite.tools_3d.rmsynth",
+    "rm_lite.tools_3d.rmclean",
+    "tests.test_tools_3d_dask",
+    "tests._dask_memory_worker",
+]
+disallow_untyped_calls = false
+warn_return_any = false
+
+[[tool.mypy.overrides]]
+# nbconvert/nbformat have no type stubs.
+module = ["tests.test_examples"]
+disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+# Placeholder module: unconditionally raises NotImplementedError at import
+# time, so everything below it is intentionally unreachable/unfinished.
+module = ["rm_lite.utils.multiscale"]
+ignore_errors = true
 
 
 [tool.typos.default.extend-identifiers]
 arange = "arange"
+
+[tool.codespell]
+skip = "uv.lock"
 
 
 [tool.pytest.ini_options]

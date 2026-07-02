@@ -58,7 +58,7 @@ def racs_model() -> MockModel:
 
 @pytest.fixture
 def racs_data(racs_model):
-    freqs = np.arange(744, 1032, 1) * 1e6
+    freqs = (np.arange(744, 1032, 1) * 1e6).astype(np.float64)
     lsq = freq_to_lambda2(freqs)
     stokes_i = np.ones_like(freqs) * racs_model.flux
     stokes_q = (
@@ -128,14 +128,12 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
     assert np.isclose(
         fdf_parameters["peak_rm_fit"][0],
         racs_model.rm,
-        # atol=fdf_parameters["peak_rm_fit_error"][0],
         atol=1,
     )
 
     assert np.isclose(
         fdf_parameters["frac_pol"].to_numpy()[0],
         racs_model.frac_pol,
-        # atol=fdf_parameters["frac_pol_error"].to_numpy()[0],
         atol=0.1,
     )
 

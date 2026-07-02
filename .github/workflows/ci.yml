@@ -23,28 +23,25 @@ env:
   JUPYTER_PLATFORM_DIRS: 1
 
 jobs:
-  pre-commit:
+  prek:
     name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: j178/prek-action@v2
         with:
-          python-version: "3.x"
-      - uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --hook-stage manual --all-files
+          extra-args: --hook-stage manual --all-files
 
   checks:
     name: Check Python ${{ matrix.python-version }} on ${{ matrix.runs-on }}
     runs-on: ${{ matrix.runs-on }}
-    needs: [pre-commit]
+    needs: [prek]
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
         runs-on: [ubuntu-latest]
 
     steps:
@@ -52,17 +49,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
+          enable-cache: true
           python-version: ${{ matrix.python-version }}
-          allow-prereleases: true
-
-      - name: Install package
-        run: python -m pip install uv && uv pip install .[dev] --system
 
       - name: Test package
         run: >-
-          python -m pytest -ra --cov --cov-report=xml --cov-report=term
+          uv run --extra dev pytest -ra --cov --cov-report=xml --cov-report=term
           --durations=20 --junitxml=junit.xml -o junit_family=legacy
 
       - name: Upload coverage reports to Codecov

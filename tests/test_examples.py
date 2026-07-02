@@ -4,6 +4,7 @@ import os
 import runpy
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import nbconvert
 import nbformat
 import pytest
@@ -37,7 +38,10 @@ def test_example_notebook(notebook: Path, tmpdir):
     with tmp_script_path.open("w", encoding="utf-8") as f:
         f.write(script_content)
 
-    runpy.run_path(str(tmp_script_path))
+    try:
+        runpy.run_path(str(tmp_script_path))
+    finally:
+        plt.close("all")
 
 
 @pytest.mark.filterwarnings("ignore:'datfix' made the change")

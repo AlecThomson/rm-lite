@@ -242,7 +242,7 @@ def _run_rmsynth(
 
         fdf_dirty_arr *= stokes_i_reference_flux
 
-        theoretical_noise = theoretical_noise.with_options(  # type: ignore[no-untyped-call]
+        theoretical_noise = theoretical_noise.with_options(
             fdf_error_noise=theoretical_noise.fdf_error_noise * stokes_i_reference_flux,
             fdf_q_noise=theoretical_noise.fdf_q_noise * stokes_i_reference_flux,
             fdf_u_noise=theoretical_noise.fdf_u_noise * stokes_i_reference_flux,
