@@ -80,26 +80,28 @@ def read_fits_cube_dask(
     Returns:
         tuple[da.Array, Header]: Lazy dask array and the FITS header.
     """
-    hdul = fits.open(path, memmap=True)
-    data = np.squeeze(hdul[0].data)
-    header = hdul[0].header
+    with fits.open(path, memmap=True) as hdul:
+        data = np.squeeze(hdul[0].data)
+        header = hdul[0].header.copy()
 
-    if data.ndim != 3:
-        msg = (
-            "Expected a 3D (freq, y, x) cube after squeezing degenerate axes, "
-            f"got shape {data.shape} from {path}."
+        if data.ndim != 3:
+            msg = (
+                "Expected a 3D (freq, y, x) cube after squeezing degenerate axes, "
+                f"got shape {data.shape} from {path}."
+            )
+            raise ValueError(msg)
+
+        n_freq, ny, nx = data.shape
+        cy, cx = spatial_chunk_size(
+            n_freq=n_freq,
+            ny=ny,
+            nx=nx,
+            itemsize=data.itemsize,
+            target_chunk_mb=target_chunk_mb,
         )
-        raise ValueError(msg)
+        dask_arr = da.from_array(data, chunks=(-1, cy, cx))
 
-    n_freq, ny, nx = data.shape
-    cy, cx = spatial_chunk_size(
-        n_freq=n_freq,
-        ny=ny,
-        nx=nx,
-        itemsize=data.itemsize,
-        target_chunk_mb=target_chunk_mb,
-    )
-    return da.from_array(data, chunks=(-1, cy, cx)), header
+    return dask_arr, header
 
 
 def freq_arr_hz_from_header(header: Header, n_freq: int) -> NDArray[np.float64]:

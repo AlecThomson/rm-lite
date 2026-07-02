@@ -334,8 +334,8 @@ def get_rmsf_planes_old(
 
 def make_fake_data() -> FakeData:
     # Set up
-    freq = np.arange(744, 1032, 1) * 1e6
-    lsq = (2.998e8 / freq) ** 2
+    freq = (np.arange(744, 1032, 1) * 1e6).astype(np.float64)
+    lsq = ((2.998e8 / freq) ** 2).astype(np.float64)
     rm = -100
 
     # Make fake data

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -88,7 +88,7 @@ def arange(
     atol: float = 1e-08,
     include_start: bool = True,
     include_stop: bool = False,
-    **kwargs,
+    **kwargs: Any,
 ) -> NDArray[np.float64]:
     """
     Combines numpy.arange and numpy.isclose to mimic open, half-open and closed intervals.

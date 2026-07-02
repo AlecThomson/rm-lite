@@ -117,6 +117,7 @@ isort.required-imports = ["from __future__ import annotations"]
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["T20"]
 "noxfile.py" = ["T20"]
+"docs/examples/**" = ["T20"]
 
 [tool.mypy]
 files = ["rm_lite", "tests"]
@@ -138,7 +139,7 @@ module = ["astropy.*", "sigfig.*", "finufft.*", "uncertainties.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-# zarr's installed source uses PEP 695 generic syntax, unparseable under
+# zarr's installed source uses PEP 695 generic syntax, unparsable under
 # python_version = "3.10"; dask imports it lazily inside Array.to_zarr.
 module = ["zarr.*"]
 ignore_missing_imports = true
@@ -147,13 +148,33 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 # dask.array's public API (map_blocks, to_delayed, from_delayed, block,
 # to_zarr, from_array, delayed) is largely untyped.
-module = ["rm_lite.utils.dask_io", "rm_lite.tools_3d.rmsynth", "rm_lite.tools_3d.rmclean"]
+module = [
+    "rm_lite.utils.dask_io",
+    "rm_lite.tools_3d.rmsynth",
+    "rm_lite.tools_3d.rmclean",
+    "tests.test_tools_3d_dask",
+    "tests._dask_memory_worker",
+]
 disallow_untyped_calls = false
 warn_return_any = false
+
+[[tool.mypy.overrides]]
+# nbconvert/nbformat have no type stubs.
+module = ["tests.test_examples"]
+disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+# Placeholder module: unconditionally raises NotImplementedError at import
+# time, so everything below it is intentionally unreachable/unfinished.
+module = ["rm_lite.utils.multiscale"]
+ignore_errors = true
 
 
 [tool.typos.default.extend-identifiers]
 arange = "arange"
+
+[tool.codespell]
+skip = "uv.lock"
 
 
 [tool.pytest.ini_options]

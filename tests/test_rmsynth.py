@@ -58,7 +58,7 @@ def racs_model() -> MockModel:
 
 @pytest.fixture
 def racs_data(racs_model):
-    freqs = np.arange(744, 1032, 1) * 1e6
+    freqs = (np.arange(744, 1032, 1) * 1e6).astype(np.float64)
     lsq = freq_to_lambda2(freqs)
     stokes_i = np.ones_like(freqs) * racs_model.flux
     stokes_q = (

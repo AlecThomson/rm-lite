@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -34,7 +34,7 @@ class RMCleanResults(NamedTuple):
     resid_fdf_arr: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> RMCleanResults:
         as_dict = self._asdict()
         as_dict.update(kwargs)
 
@@ -285,7 +285,7 @@ class MinorLoopArrays(NamedTuple):
     peak_find_arr: NDArray[np.float64] | None = None
     """Peak finding array"""
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> MinorLoopArrays:
         as_dict = self._asdict()
         as_dict.update(kwargs)
 
@@ -308,7 +308,7 @@ class MinorLoopOptions(NamedTuple):
     update_mask: bool = True
     """Update the mask after each iteration"""
 
-    def with_options(self, **kwargs):
+    def with_options(self, **kwargs: Any) -> MinorLoopOptions:
         as_dict = self._asdict()
         as_dict.update(kwargs)
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Literal, NamedTuple, cast
 
 import numpy as np
 import polars as pl
@@ -96,8 +96,10 @@ def run_rmclean_from_synth(
         stokes_i_arrs_df["stokes_i_model_arr"],
     )
 
-    stokes_i_reference_flux = stokes_i_model(
-        lambda2_to_freq(float(fdf_parameters["lam_sq_0_m2"].to_numpy()[0]))
+    stokes_i_reference_flux = float(
+        stokes_i_model(
+            lambda2_to_freq(float(fdf_parameters["lam_sq_0_m2"].to_numpy()[0]))
+        )
     )
 
     fdf_dirty_arr = rmsyth_arrs_df["fdf_dirty_complex_arr"].to_numpy().astype(complex)
@@ -131,7 +133,10 @@ def run_rmclean_from_synth(
         lam_sq_0_m2=float(fdf_parameters["lam_sq_0_m2"].to_numpy().squeeze()),
         stokes_i_reference_flux=stokes_i_reference_flux,
         theoretical_noise=theoretical_noise,
-        fit_function=str(fdf_parameters["fit_function"].to_numpy().squeeze()),
+        fit_function=cast(
+            "Literal['log', 'linear']",
+            str(fdf_parameters["fit_function"].to_numpy().squeeze()),
+        ),
     )
 
     rmclean_arrs = rmclean_arrs_schema_df.vstack(

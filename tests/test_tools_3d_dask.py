@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import dask
 import dask.array as da
 import numpy as np
 import pytest
 import rm_lite.tools_3d.rmclean as rmclean3d_mod
 import zarr
 from astropy.io.fits import Header
+from dask.base import compute
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmclean import rmclean_3d
@@ -41,7 +41,7 @@ class SyntheticCube(NamedTuple):
 @pytest.fixture
 def synthetic_cube() -> SyntheticCube:
     """A small Stokes Q/U cube with a different RM/PA/noise draw per pixel."""
-    freq_arr_hz = np.arange(744, 1032, 3) * 1e6
+    freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
     ny, nx = 7, 9
 
@@ -122,7 +122,7 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
         mask=MASK_THRESHOLD,
         threshold=CLEAN_THRESHOLD,
     )
-    clean_cube, model_cube, resid_cube, iter_map = dask.compute(
+    clean_cube, model_cube, resid_cube, iter_map = compute(
         clean.clean_fdf_cube,
         clean.model_fdf_cube,
         clean.resid_fdf_cube,
@@ -188,7 +188,7 @@ def test_rmclean_3d_block_runs_once_per_chunk(
         mask=MASK_THRESHOLD,
         threshold=CLEAN_THRESHOLD,
     )
-    dask.compute(
+    compute(
         clean.clean_fdf_cube,
         clean.model_fdf_cube,
         clean.resid_fdf_cube,
