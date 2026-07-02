@@ -18,13 +18,18 @@ is otherwise a fully vectorized stage.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import NamedTuple
 
 import dask.array as da
 import numpy as np
 from numpy.typing import NDArray
 
-from rm_lite.utils.dask_io import complex_pol_dask
+from rm_lite.utils.dask_io import (
+    DEFAULT_TARGET_CHUNK_BYTES,
+    complex_pol_dask,
+    read_fits_cube_dask,
+)
 from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.synthesis import (
     FDFOptions,
@@ -196,4 +201,57 @@ def rmsynth_3d(
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+    )
+
+
+def rmsynth_3d_from_fits(
+    stokes_q_file: str | Path,
+    stokes_u_file: str | Path,
+    freq_arr_hz: NDArray[np.float64],
+    weight_arr: NDArray[np.float64] | None = None,
+    phi_max_radm2: float | None = None,
+    d_phi_radm2: float | None = None,
+    n_samples: float | None = 10.0,
+    target_chunk_bytes: int = DEFAULT_TARGET_CHUNK_BYTES,
+    log_level: int = logging.WARNING,
+) -> RMSynth3DResults:
+    """Run RM-synthesis directly on Stokes Q/U FITS cubes on disk.
+
+    Convenience wrapper around `rm_lite.utils.dask_io.read_fits_cube_dask` +
+    `rmsynth_3d`, for the common case where Q/U are FITS files rather than
+    already-loaded dask arrays.
+
+    Args:
+        stokes_q_file (str | Path): Path to the Stokes Q FITS cube.
+        stokes_u_file (str | Path): Path to the Stokes U FITS cube, same
+            shape as the Q cube.
+        freq_arr_hz (NDArray[np.float64]): Frequency array in Hz.
+        weight_arr (NDArray[np.float64] | None, optional): Per-channel weight
+            array. Defaults to uniform weighting.
+        phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
+        d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
+        n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
+        target_chunk_bytes (int, optional): Target per-chunk memory footprint,
+            see `read_fits_cube_dask`. Defaults to 256 MiB.
+        log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
+
+    Returns:
+        RMSynth3DResults: Lazy dirty FDF cube, RMSF cube, and associated parameters.
+    """
+    stokes_q, _header_q = read_fits_cube_dask(
+        stokes_q_file, target_chunk_bytes=target_chunk_bytes
+    )
+    stokes_u, _header_u = read_fits_cube_dask(
+        stokes_u_file, target_chunk_bytes=target_chunk_bytes
+    )
+
+    return rmsynth_3d(
+        stokes_q=stokes_q,
+        stokes_u=stokes_u,
+        freq_arr_hz=freq_arr_hz,
+        weight_arr=weight_arr,
+        phi_max_radm2=phi_max_radm2,
+        d_phi_radm2=d_phi_radm2,
+        n_samples=n_samples,
+        log_level=log_level,
     )
