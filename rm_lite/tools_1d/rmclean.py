@@ -57,6 +57,7 @@ def run_rmclean_from_synth(
     max_iter: int = 10_000,
     gain: float = 0.1,
     mask_arr: NDArray[np.bool_] | None = None,
+    moment_threshold_snr: float = 5.0,
 ) -> RMClean1DResults:
     """Run RM-CLEAN on the results of RM-synth.
 
@@ -67,6 +68,7 @@ def run_rmclean_from_synth(
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 10_000.
         gain (float, optional): CLEAN gain. Defaults to 0.1.
         mask_arr (NDArray[np.bool_] | None, optional): Optional mask array. Defaults to None.
+        moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to the clean FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
 
     Returns:
         RMClean1DResults: RM-CLEAN results: `fdf_parameters`, `fdf_arrs`, `clean_parameters`.
@@ -137,6 +139,7 @@ def run_rmclean_from_synth(
             "Literal['log', 'linear']",
             str(fdf_parameters["fit_function"].to_numpy().squeeze()),
         ),
+        moment_threshold_snr=moment_threshold_snr,
     )
 
     rmclean_arrs = rmclean_arrs_schema_df.vstack(

@@ -83,6 +83,7 @@ def run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
     ignore_stokes_i: bool = False,
+    moment_threshold_snr: float = 5.0,
 ) -> RMSynth1DResults:
     """Run RM-synthesis on 1D data
 
@@ -102,6 +103,7 @@ def run_rmsynth(
         do_fit_rmsf_real (bool, optional): The the real part of the RMSF. Defaults to False.
         fit_function ("log" | "linear", optional): _description_. Defaults to "log".
         fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
+        moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
 
     Returns:
         RMSynth1DResults:
@@ -142,6 +144,7 @@ def run_rmsynth(
         fit_function=fit_function,
         fit_order=fit_order,
         ignore_stokes_i=ignore_stokes_i,
+        moment_threshold_snr=moment_threshold_snr,
     )
 
 
@@ -151,6 +154,7 @@ def _run_rmsynth(
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
     ignore_stokes_i: bool = False,
+    moment_threshold_snr: float = 5.0,
 ) -> RMSynth1DResults:
     """Run RM-synthesis on 1D data with packed data
 
@@ -265,6 +269,7 @@ def _run_rmsynth(
         stokes_i_reference_flux=stokes_i_reference_flux,
         theoretical_noise=theoretical_noise,
         fit_function=fit_function,
+        moment_threshold_snr=moment_threshold_snr,
     )
     rmsyth_arrs = rmsyth_arrs_schema_df.vstack(
         pl.DataFrame(

@@ -137,6 +137,34 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
         atol=0.1,
     )
 
+    assert fdf_parameters["moment_threshold_snr"][0] == 5.0
+
+    # The synthetic data are noiseless, so the default 5-sigma moment cut sits
+    # far below the RMSF sidelobes and the moments pick them up. Cut at half
+    # the fitted peak instead so only the main lobe survives: mom1 recovers
+    # the RM, mom0 is of order the peak polarised flux, and mom2 is below the
+    # RMSF width.
+    half_peak_snr = float(
+        0.5 * fdf_parameters["peak_pi_fit"][0] / fdf_parameters["fdf_error_noise"][0]
+    )
+    fdf_parameters = run_rmsynth(
+        freq_arr_hz=racs_data.freqs,
+        complex_pol_arr=complex_data,
+        complex_pol_error=complex_error,
+        stokes_i_arr=racs_data.stokes_i,
+        stokes_i_error_arr=np.ones_like(racs_data.stokes_i) * 1e-3,
+        moment_threshold_snr=half_peak_snr,
+    ).fdf_parameters
+    expected_pi = racs_model.flux * racs_model.frac_pol
+    assert np.isclose(fdf_parameters["mom1_radm2"][0], racs_model.rm, atol=1)
+    assert 0 < fdf_parameters["mom0"][0] < 2 * expected_pi
+    assert 0 < fdf_parameters["mom2_radm2"][0] < racs_model.fwhm
+    # Bias correction shrinks mom0, and only slightly at this SNR
+    assert 0 < fdf_parameters["mom0_debias"][0] <= fdf_parameters["mom0"][0]
+    assert np.isclose(
+        fdf_parameters["mom0_debias"][0], fdf_parameters["mom0"][0], rtol=0.01
+    )
+
 
 def test_2d_synth(racs_data: MockData, racs_model: MockModel):
     stokes_q = racs_data.stokes_q
