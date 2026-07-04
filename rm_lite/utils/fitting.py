@@ -73,7 +73,7 @@ def gaussian_integrand(
 def gaussian(
     x: NDArray[np.float64],
     amplitude: float | complex,
-    mean: float,
+    mean: float | NDArray[np.float64],
     stddev: float | None = None,
     fwhm: float | None = None,
 ) -> NDArray[np.float64]:

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from matplotlib.pylab import Generator
 from numpy.typing import NDArray
-from rm_lite.utils.fitting import gaussian_integrand
+from rm_lite.utils.fitting import gaussian, gaussian_integrand
 from rm_lite.utils.synthesis import (
     calc_faraday_moments,
     debias_fdf,
@@ -55,24 +55,12 @@ def test_doubel_phi_arr():
             assert phi_double_arr[len(phi_double_arr) // 2] == 0
 
 
-def gaussian_fdf(
-    phi_arr: NDArray[np.float64],
-    amplitude: float,
-    center: float | NDArray[np.float64],
-    fwhm: float,
-) -> NDArray[np.float64]:
-    return np.asarray(
-        amplitude * np.exp(-4 * np.log(2) * (phi_arr - center) ** 2 / fwhm**2),
-        dtype=np.float64,
-    )
-
-
 def test_moments_unresolved_gaussian():
     phi_arr = make_phi_arr(1000, 1)
     fwhm = 60.0
     amplitude = 3.0
     center = 123.0
-    fdf = gaussian_fdf(phi_arr, amplitude, center, fwhm).astype(np.complex128)
+    fdf = gaussian(phi_arr, amplitude, center, fwhm=fwhm).astype(np.complex128)
 
     moments = calc_faraday_moments(fdf, phi_arr, fwhm)
 
@@ -85,7 +73,7 @@ def test_moments_unresolved_gaussian():
 def test_moments_ignore_phase():
     phi_arr = make_phi_arr(1000, 1)
     fwhm = 60.0
-    fdf_real = gaussian_fdf(phi_arr, 2.0, -50.0, fwhm).astype(np.complex128)
+    fdf_real = gaussian(phi_arr, 2.0, -50.0, fwhm=fwhm).astype(np.complex128)
     fdf_rotated = fdf_real * np.exp(2j * 0.5 * phi_arr)
 
     moments_real = calc_faraday_moments(fdf_real, phi_arr, fwhm)
@@ -116,7 +104,7 @@ def test_moments_delta_function():
 def test_moments_nd_and_axis():
     phi_arr = make_phi_arr(1000, 1)
     fwhm = 60.0
-    fdf_1d = gaussian_fdf(phi_arr, 3.0, 123.0, fwhm).astype(np.complex128)
+    fdf_1d = gaussian(phi_arr, 3.0, 123.0, fwhm=fwhm).astype(np.complex128)
     moments_1d = calc_faraday_moments(fdf_1d, phi_arr, fwhm)
 
     fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 2, 3))
@@ -134,8 +122,8 @@ def test_moments_nd_and_axis():
 def test_moments_threshold():
     phi_arr = make_phi_arr(1000, 1)
     fwhm = 60.0
-    strong = gaussian_fdf(phi_arr, 3.0, 100.0, fwhm)
-    weak = gaussian_fdf(phi_arr, 0.05, -300.0, fwhm)
+    strong = gaussian(phi_arr, 3.0, 100.0, fwhm=fwhm)
+    weak = gaussian(phi_arr, 0.05, -300.0, fwhm=fwhm)
     fdf = (strong + weak).astype(np.complex128)
 
     moments = calc_faraday_moments(fdf, phi_arr, fwhm, threshold=0.5)
@@ -153,7 +141,7 @@ def test_moments_auto_threshold():
     fwhm = 60.0
     center = 100.0
     noise_sigma = 0.1
-    signal = gaussian_fdf(phi_arr, 5.0, center, fwhm)
+    signal = gaussian(phi_arr, 5.0, center, fwhm=fwhm)
     noise = rng.normal(0, noise_sigma, phi_arr.shape) + 1j * rng.normal(
         0, noise_sigma, phi_arr.shape
     )
@@ -185,7 +173,7 @@ def test_moments_shape_mismatch():
 def test_moments_empty_spectrum():
     phi_arr = make_phi_arr(100, 1)
     fdf = np.zeros((len(phi_arr), 2), dtype=np.complex128)
-    fdf[:, 1] = gaussian_fdf(phi_arr, 1.0, 0.0, 20.0)
+    fdf[:, 1] = gaussian(phi_arr, 1.0, 0.0, fwhm=20.0)
 
     moments = calc_faraday_moments(fdf, phi_arr, 20.0)
 
@@ -198,7 +186,7 @@ def test_moments_empty_spectrum():
 def test_moments_dask():
     phi_arr = make_phi_arr(1000, 1)
     fwhm = 60.0
-    fdf_1d = gaussian_fdf(phi_arr, 3.0, 123.0, fwhm).astype(np.complex128)
+    fdf_1d = gaussian(phi_arr, 3.0, 123.0, fwhm=fwhm).astype(np.complex128)
     fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 4, 4))
     fdf_dask = da.from_array(fdf_3d, chunks=(len(phi_arr), 2, 2))
 
@@ -268,7 +256,7 @@ def gradient_rm_cube(
     # pixel, breaking the smooth-angle assumption of the underotated filter
     rm_map = np.broadcast_to(np.linspace(-80, 80, nx), (ny, nx))
     psi0 = 0.5
-    profile = gaussian_fdf(phi_arr[:, None, None], 1.0, rm_map[None], fwhm)
+    profile = gaussian(phi_arr[:, None, None], 1.0, rm_map[None], fwhm=fwhm)
     fdf = profile * np.exp(2j * (psi0 + rm_map[None] * lam_sq_0_m2))
     fdf += rng.normal(0, 0.02, fdf.shape) + 1j * rng.normal(0, 0.02, fdf.shape)
     return fdf, phi_arr, lam_sq_0_m2, np.sum(profile, axis=0)
@@ -320,7 +308,7 @@ def test_debias_fdf_validation():
 def test_moments_signed_real_input():
     phi_arr = make_phi_arr(100, 1)
     fwhm = 20.0
-    signed = gaussian_fdf(phi_arr, 2.0, 0.0, fwhm) - 0.5
+    signed = gaussian(phi_arr, 2.0, 0.0, fwhm=fwhm) - 0.5
 
     moments = calc_faraday_moments(signed, phi_arr, fwhm)
 
