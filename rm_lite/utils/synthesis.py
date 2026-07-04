@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import warnings
-from typing import Any, Literal, NamedTuple, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar, cast
 
 import finufft
 import numpy as np
@@ -12,13 +12,23 @@ import polars as pl
 from astropy.constants import c as speed_of_light
 from astropy.stats import mad_std
 from numpy.typing import NDArray
-from scipy import stats
+from scipy import ndimage, stats
 from tqdm.auto import trange
 from uncertainties import unumpy
 
 from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
-from rm_lite.utils.fitting import FitResult, fit_fdf, fit_rmsf, fit_stokes_i_model
+from rm_lite.utils.fitting import (
+    FitResult,
+    fit_fdf,
+    fit_rmsf,
+    fit_stokes_i_model,
+    gaussian_integrand,
+)
 from rm_lite.utils.logging import logger
+
+# Ricean polarisation-bias correction: debiased P = sqrt(P^2 - factor * sigma^2)
+# (POSSUM report 11).
+POLARISATION_BIAS_FACTOR = 2.3
 
 
 class FWHM(NamedTuple):
@@ -146,6 +156,369 @@ def calc_mom2_fdf(
             np.sum(np.power((phi_arr_radm2 - phi_mean), 2.0) * np.abs(complex_fdf_arr))
             / phi_weights
         )
+    )
+
+
+class FaradayMoments(NamedTuple):
+    """Moments of the polarised intensity Faraday depth spectrum."""
+
+    mom0: NDArray[np.float64]
+    """Zeroth moment: total polarised intensity, in the input FDF amplitude units"""
+    mom1: NDArray[np.float64]
+    """First moment: intensity-weighted mean Faraday depth in rad/m^2"""
+    mom2: NDArray[np.float64]
+    """Second moment: intensity-weighted Faraday depth dispersion in rad/m^2"""
+
+
+def _require_single_chunk_on_axis(arr: Any, axis: int, reason: str) -> None:
+    """Raise if `arr` is a dask array with more than one chunk along `axis`.
+
+    A median reduction across the Faraday depth axis is not supported by dask.
+    """
+    if hasattr(arr, "chunks") and len(arr.chunks[axis]) != 1:
+        msg = (
+            f"The Faraday depth axis must be a single chunk {reason}. "
+            f"Rechunk with e.g. `.rechunk({{{axis}: -1}})`."
+        )
+        raise ValueError(msg)
+
+
+def calc_faraday_moments(
+    complex_fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    phi_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_radm2: float | NDArray[np.float64],
+    axis: int = 0,
+    threshold: float | None = None,
+    auto_threshold_sigma: float | None = None,
+    debias: bool = False,
+    lam_sq_0_m2: float | None = None,
+    debias_filter_size: int = 5,
+    min_weight_fraction: float | None = None,
+) -> FaradayMoments:
+    """Compute the zeroth, first, and second moments of a Faraday depth spectrum.
+
+    The FDF amplitude is assumed to be in units per RMSF (the native scale of
+    RM-synthesis outputs). The zeroth moment is converted to integrated units
+    by dividing the Faraday-depth sum by the RMSF area (a Gaussian of FWHM
+    `fwhm_rmsf_radm2`), so an unresolved component of peak amplitude P yields
+    `mom0 = P`.
+
+    Complex input is reduced with `np.abs`; real input is used as-is, so
+    signed debiased amplitudes (see `debias_fdf`) integrate without re-folding
+    their noise into a positive floor. With `debias=True` (requires
+    `lam_sq_0_m2` and at least one spatial axis) that debiasing is applied
+    internally, giving unbiased moments without an amplitude threshold.
+
+    Works on numpy or dask arrays of any dimensionality: the Faraday depth
+    axis is reduced away and all other axes are preserved. `auto_threshold_sigma`
+    and `debias=True` reduce over the Faraday depth axis, so for dask input that
+    axis must be a single chunk.
+
+    Args:
+        complex_fdf_arr (NDArray[np.complex128]): Complex (or real) FDF.
+        phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth array in rad/m^2.
+        fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
+            An array must broadcast against the FDF shape with the Faraday depth axis removed.
+        axis (int, optional): Faraday depth axis of `complex_fdf_arr`. Defaults to 0.
+        threshold (float | None, optional): Exclude amplitudes below this value
+            (in FDF amplitude units). Not supported with `debias=True`. Defaults to None.
+        auto_threshold_sigma (float | None, optional): Exclude amplitudes below this
+            multiple of the per-spectrum noise (a robust `mad_std` of the real and
+            imaginary parts). Mutually exclusive with `threshold`, and not supported
+            with `debias=True`. Defaults to None.
+        debias (bool, optional): Debias the FDF amplitudes with `debias_fdf`
+            before computing the moments. Requires complex input with a spatial
+            axis, and `lam_sq_0_m2`. Defaults to False.
+        lam_sq_0_m2 (float | None, optional): Reference wavelength^2 of the
+            RM-synthesis derotation, passed to `debias_fdf`. Required when
+            `debias=True`. Defaults to None.
+        debias_filter_size (int, optional): Spatial median filter size passed
+            to `debias_fdf`. Defaults to 5.
+        min_weight_fraction (float | None, optional): Opt-in guard for signed
+            input. When set, mom1/mom2 are NaN wherever the net weight
+            `|sum(amplitude)|` is below this fraction of the total absolute
+            weight `sum(|amplitude|)`, so near-cancelling noise spectra do not
+            yield spurious finite Faraday depths. mom0 is unaffected. Off by
+            default (irreversible masking); a mom0 detection cut is the
+            alternative. Defaults to None.
+
+    Returns:
+        FaradayMoments: mom0 (FDF amplitude units), mom1 (rad/m^2), and mom2
+            (dispersion, rad/m^2). Spectra with no valid amplitude have
+            mom0 = 0 and mom1 = mom2 = NaN.
+    """
+    if threshold is not None and auto_threshold_sigma is not None:
+        msg = "`threshold` and `auto_threshold_sigma` are mutually exclusive."
+        raise ValueError(msg)
+
+    phi_arr_radm2 = np.asarray(phi_arr_radm2, dtype=np.float64)
+    if phi_arr_radm2.ndim != 1 or phi_arr_radm2.shape[0] < 2:
+        msg = "`phi_arr_radm2` must be 1D with at least two samples."
+        raise ValueError(msg)
+    if complex_fdf_arr.shape[axis] != phi_arr_radm2.shape[0]:
+        msg = (
+            f"Axis {axis} of the FDF has length {complex_fdf_arr.shape[axis]}, "
+            f"but `phi_arr_radm2` has length {phi_arr_radm2.shape[0]}."
+        )
+        raise ValueError(msg)
+
+    if debias:
+        if auto_threshold_sigma is not None:
+            msg = "`auto_threshold_sigma` is not supported with `debias=True`."
+            raise ValueError(msg)
+        if threshold is not None:
+            msg = (
+                "`threshold` is not supported with `debias=True`: a positive cut "
+                "on signed debiased amplitudes clips the negative noise samples "
+                "that make the bias cancel."
+            )
+            raise ValueError(msg)
+        if lam_sq_0_m2 is None:
+            msg = "`lam_sq_0_m2` is required when `debias=True`."
+            raise ValueError(msg)
+        abs_fdf_arr = debias_fdf(
+            cast("NDArray[np.complex128]", complex_fdf_arr),
+            phi_arr_radm2=phi_arr_radm2,
+            lam_sq_0_m2=lam_sq_0_m2,
+            axis=axis,
+            filter_size=debias_filter_size,
+        )
+    elif np.iscomplexobj(complex_fdf_arr):
+        abs_fdf_arr = np.abs(complex_fdf_arr)
+    else:
+        # Real input is taken as-is: signed debiased amplitudes must keep
+        # their negative noise samples so the bias cancels in the sums
+        abs_fdf_arr = cast("NDArray[np.float64]", complex_fdf_arr)
+
+    if auto_threshold_sigma is not None:
+        _require_single_chunk_on_axis(
+            complex_fdf_arr, axis, "for the auto-threshold noise estimate"
+        )
+        # Per-spectrum noise from a robust MAD estimate of the zero-mean real
+        # and imaginary components: signal-robust (tolerates <50% occupancy)
+        # and the same estimator the rest of the module uses. The median of
+        # |FDF| assumed pure-Rayleigh noise and biased high once signal filled
+        # many channels.
+        if np.iscomplexobj(complex_fdf_arr):
+            components = np.concatenate(
+                [complex_fdf_arr.real, complex_fdf_arr.imag], axis=axis
+            )
+        else:
+            components = abs_fdf_arr
+        noise = np.expand_dims(mad_std(components, axis=axis, ignore_nan=True), axis)
+        abs_fdf_arr = np.where(
+            abs_fdf_arr >= auto_threshold_sigma * noise, abs_fdf_arr, np.nan
+        )
+    elif threshold is not None:
+        abs_fdf_arr = np.where(abs_fdf_arr >= threshold, abs_fdf_arr, np.nan)
+
+    phi_shape = [1] * complex_fdf_arr.ndim
+    phi_shape[axis] = phi_arr_radm2.shape[0]
+    phi_nd = phi_arr_radm2.reshape(phi_shape)
+    delta_phi = float(np.abs(phi_arr_radm2[1] - phi_arr_radm2[0]))
+
+    weight_sum = np.nansum(abs_fdf_arr, axis=axis, keepdims=True)
+    if min_weight_fraction is not None:
+        # Signed input can sum to a tiny (positive or negative) net weight in
+        # noise regions, giving a finite but meaningless mom1/mom2. Mask where
+        # the net weight is a small fraction of the total absolute weight, so
+        # near-cancelling spectra become NaN symmetrically. No-op for |FDF|
+        # input, whose weights are all positive (ratio == 1).
+        total_abs_weight = np.nansum(np.abs(abs_fdf_arr), axis=axis, keepdims=True)
+        safe_weight_sum = np.where(
+            np.abs(weight_sum) >= min_weight_fraction * total_abs_weight,
+            weight_sum,
+            np.nan,
+        )
+    else:
+        safe_weight_sum = np.where(weight_sum > 0, weight_sum, np.nan)
+    mom1 = np.nansum(abs_fdf_arr * phi_nd, axis=axis, keepdims=True) / safe_weight_sum
+    # Signed (debiased) amplitudes can produce a negative variance in noise
+    # regions; map it to NaN rather than warn
+    mom2_variance = (
+        np.nansum(abs_fdf_arr * (phi_nd - mom1) ** 2, axis=axis, keepdims=True)
+        / safe_weight_sum
+    )
+    mom2 = np.sqrt(np.where(mom2_variance >= 0, mom2_variance, np.nan))
+    rmsf_area = fwhm_rmsf_radm2 * gaussian_integrand(amplitude=1.0, fwhm=1.0)
+    mom0 = np.squeeze(weight_sum, axis=axis) * delta_phi / rmsf_area
+
+    return FaradayMoments(
+        mom0=mom0,
+        mom1=np.squeeze(mom1, axis=axis),
+        mom2=np.squeeze(mom2, axis=axis),
+    )
+
+
+def _debias_fdf_block(
+    complex_fdf_arr: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    lam_sq_0_m2: float,
+    axis: int,
+    filter_size: int,
+) -> NDArray[np.float64]:
+    n_phi = phi_arr_radm2.shape[0]
+    phi_shape = [1] * complex_fdf_arr.ndim
+    phi_shape[axis] = n_phi
+    phi_nd = phi_arr_radm2.reshape(phi_shape)
+
+    # Derotate the deterministic 2*lam_sq_0*(RM - phi) angle ramp away (see
+    # `debias_fdf` docstring) using a per-pixel peak Faraday depth: the
+    # amplitude-weighted centroid of the half-max region about the peak, which
+    # is less noise-prone than a 3-point parabola on an oversampled RMSF.
+    abs_fdf_arr = np.abs(complex_fdf_arr)
+    abs_fdf_arr = np.where(np.isfinite(abs_fdf_arr), abs_fdf_arr, 0.0)
+    peak_amp = np.max(abs_fdf_arr, axis=axis, keepdims=True)
+    lobe_weight = np.where(
+        abs_fdf_arr >= 0.5 * peak_amp, abs_fdf_arr - 0.5 * peak_amp, 0.0
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        peak_rm_radm2 = np.where(
+            peak_amp > 0,
+            np.sum(lobe_weight * phi_nd, axis=axis, keepdims=True)
+            / np.sum(lobe_weight, axis=axis, keepdims=True),
+            0.0,
+        )
+    derotated = complex_fdf_arr * np.exp(-2j * lam_sq_0_m2 * (peak_rm_radm2 - phi_nd))
+
+    theta = np.arctan2(derotated.imag, derotated.real)
+
+    # Median-filter the angle via its cos/sin components to avoid the
+    # -pi/pi discontinuity (Mueller et al. 2017, Sect. 2)
+    footprint_shape = [1] * complex_fdf_arr.ndim
+    for dim in range(complex_fdf_arr.ndim):
+        if dim != axis:
+            footprint_shape[dim] = filter_size
+    footprint = np.ones(footprint_shape, dtype=bool)
+    footprint_modified = footprint.copy()
+    centre = tuple(size // 2 for size in footprint_shape)
+    footprint_modified[centre] = False
+
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+    # 'Modified median filter': the centre pixel carries the very bias being
+    # corrected, so blend the plain median with a centre-excluded median
+    # (1:2 weighting, the empirical choice of Mueller et al. 2017)
+    cos_filt = (
+        ndimage.median_filter(cos_theta, footprint=footprint)
+        + 2.0 * ndimage.median_filter(cos_theta, footprint=footprint_modified)
+    ) / 3.0
+    sin_filt = (
+        ndimage.median_filter(sin_theta, footprint=footprint)
+        + 2.0 * ndimage.median_filter(sin_theta, footprint=footprint_modified)
+    ) / 3.0
+    theta_filt = np.arctan2(sin_filt, cos_filt)
+
+    # Project Q + iU onto the filtered-angle direction (Mueller et al. 2017,
+    # Eq. 9); |derotated| == |fdf|, so this is the debiased FDF amplitude
+    return cast(
+        "NDArray[np.float64]",
+        derotated.imag * np.sin(theta_filt) + derotated.real * np.cos(theta_filt),
+    )
+
+
+def debias_fdf(
+    complex_fdf_arr: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    lam_sq_0_m2: float,
+    axis: int = 0,
+    filter_size: int = 5,
+) -> NDArray[np.float64]:
+    """Compute debiased polarised intensity amplitudes from a complex FDF cube.
+
+    Implements the polarisation de-biasing of Mueller, Beck & Krause (2017,
+    A&A 600, A63), adapted to Faraday depth cubes: the polarisation angle in
+    each Faraday depth plane is median-filtered over the spatial axes (via
+    its cos/sin components, dodging the angle wrap), and the observed Q + iU
+    is projected onto the filtered-angle direction,
+    `P* = U sin(theta_m) + Q cos(theta_m)`. Unlike `abs(fdf)`, the result is
+    noise-like (zero-mean Gaussian) in signal-free regions, at the cost of
+    allowing negative values -- summed over Faraday depth (e.g. by
+    `calc_faraday_moments`) the noise cancels instead of accumulating a
+    positive floor.
+
+    The Mueller et al. method assumes the angle is smooth across the filter
+    box, which an FDF plane violates wherever RM varies: its angle is
+    `2 psi0 + 2 lam_sq_0 (RM - phi)`. That deterministic ramp is removed
+    first, by derotating each spectrum with a per-pixel peak Faraday depth
+    estimate (the amplitude-weighted centroid of the half-max region about
+    the peak), so only the intrinsic angle `2 psi0` -- assumed spatially
+    smooth -- is filtered.
+    Sightlines with multiple components at very different Faraday depths are
+    only derotated for the dominant peak; secondary components lose
+    `cos(2 lam_sq_0 dRM)` of amplitude in the projection.
+
+    Works on numpy or dask arrays (dask via `map_overlap` with a
+    `filter_size // 2` spatial halo; the Faraday depth axis must be a single
+    chunk, as produced by `rm_lite.tools_3d`).
+
+    Args:
+        complex_fdf_arr (NDArray[np.complex128]): Complex FDF with at least
+            one spatial axis (2D or 3D).
+        phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth
+            array in rad/m^2.
+        lam_sq_0_m2 (float): Reference wavelength^2 of the RM-synthesis
+            derotation (e.g. `RMSynth3DResults.lam_sq_0_m2`). Pass 0 to skip
+            the RM derotation (the original Mueller et al. method, valid only
+            for spatially smooth RM).
+        axis (int, optional): Faraday depth axis, excluded from the spatial
+            median filter (each Faraday depth plane is filtered
+            independently). Defaults to 0.
+        filter_size (int, optional): Odd spatial median filter box size in
+            pixels. Defaults to 5.
+
+    Returns:
+        NDArray[np.float64]: Debiased polarised intensity, same shape as the input.
+    """
+    if filter_size < 3 or filter_size % 2 == 0:
+        msg = f"`filter_size` must be an odd integer >= 3. Got {filter_size}."
+        raise ValueError(msg)
+    if complex_fdf_arr.ndim < 2:
+        msg = "`complex_fdf_arr` must have at least one spatial axis to filter over."
+        raise ValueError(msg)
+
+    axis = axis % complex_fdf_arr.ndim
+    phi_arr_radm2 = np.asarray(phi_arr_radm2, dtype=np.float64)
+    if phi_arr_radm2.ndim != 1 or phi_arr_radm2.shape[0] < 2:
+        msg = "`phi_arr_radm2` must be 1D with at least two samples."
+        raise ValueError(msg)
+    if complex_fdf_arr.shape[axis] != phi_arr_radm2.shape[0]:
+        msg = (
+            f"Axis {axis} of the FDF has length {complex_fdf_arr.shape[axis]}, "
+            f"but `phi_arr_radm2` has length {phi_arr_radm2.shape[0]}."
+        )
+        raise ValueError(msg)
+
+    if hasattr(complex_fdf_arr, "map_overlap"):  # dask array
+        if len(complex_fdf_arr.chunks[axis]) != 1:  # type: ignore[attr-defined]
+            msg = (
+                "The Faraday depth axis must be a single chunk for the "
+                "per-pixel peak derotation. Rechunk with e.g. "
+                f"`.rechunk({{{axis}: -1}})`."
+            )
+            raise ValueError(msg)
+        halo = filter_size // 2
+        depth = {dim: 0 if dim == axis else halo for dim in range(complex_fdf_arr.ndim)}
+        return cast(
+            "NDArray[np.float64]",
+            complex_fdf_arr.map_overlap(
+                _debias_fdf_block,
+                depth=depth,
+                boundary="reflect",
+                dtype=np.float64,
+                phi_arr_radm2=phi_arr_radm2,
+                lam_sq_0_m2=lam_sq_0_m2,
+                axis=axis,
+                filter_size=filter_size,
+            ),
+        )
+
+    return _debias_fdf_block(
+        complex_fdf_arr,
+        phi_arr_radm2=phi_arr_radm2,
+        lam_sq_0_m2=lam_sq_0_m2,
+        axis=axis,
+        filter_size=filter_size,
     )
 
 
@@ -958,6 +1331,11 @@ fdf_params_schema = pl.Schema(
         "sigma_add": pl.Float64,
         "sigma_add_minus": pl.Float64,
         "sigma_add_plus": pl.Float64,
+        "mom0": pl.Float64,
+        "mom0_debias": pl.Float64,
+        "mom1_radm2": pl.Float64,
+        "mom2_radm2": pl.Float64,
+        "moment_threshold_snr": pl.Float64,
     }
 )
 fdf_params_schema_df = fdf_params_schema.to_frame(eager=True)
@@ -976,12 +1354,19 @@ def get_fdf_parameters(
     theoretical_noise: TheoreticalNoise,
     fit_function: Literal["log", "linear"],
     bias_correction_snr: float = 5.0,
+    moment_threshold_snr: float = 5.0,
 ) -> pl.DataFrame:
     """
     Measure standard parameters from a complex Faraday Dispersion Function.
     Currently this function assumes that the noise levels in the Stokes Q
     and U spectra are the same.
     Returns a dictionary containing measured parameters.
+
+    Faraday moments (see `calc_faraday_moments`) are computed with amplitudes
+    below `moment_threshold_snr` times the theoretical FDF noise excluded.
+    `mom0_debias` additionally corrects each amplitude for polarisation bias
+    (the same 2.3 sigma^2 correction applied to the fitted peak) before
+    integrating.
     """
 
     abs_fdf_arr = np.abs(fdf_arr)
@@ -1053,7 +1438,8 @@ def get_fdf_parameters(
     peak_pi_fit_debias = peak_pi_fit
     if peak_pi_fit_snr >= bias_correction_snr:
         peak_pi_fit_debias = np.sqrt(
-            peak_pi_fit**2.0 - 2.3 * theoretical_noise.fdf_error_noise**2.0
+            peak_pi_fit**2.0
+            - POLARISATION_BIAS_FACTOR * theoretical_noise.fdf_error_noise**2.0
         )
 
     # Calculate the polarisation angle from the fitted peak
@@ -1081,6 +1467,35 @@ def get_fdf_parameters(
         * ((n_good_phi - 1) / n_good_phi + lam_sq_0_m2**2.0 / lambda_sq_arr_m2_variance)
     )
     peak_pa0_fit_deg_err = float(np.degrees(peak_pa0_fit_rad_err))
+
+    moment_threshold = moment_threshold_snr * theoretical_noise.fdf_error_noise
+    moments = calc_faraday_moments(
+        complex_fdf_arr=fdf_arr,
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        threshold=moment_threshold,
+    )
+    # Debiased zeroth moment: correct each amplitude for polarisation bias
+    # (same Ricean correction as the fitted peak) before integrating. The cut
+    # is deliberately on the raw amplitude, not the debiased one, so it selects
+    # the same samples as `mom0` above; the debiased value is what gets summed.
+    abs_fdf_debias_arr = np.sqrt(
+        np.clip(
+            abs_fdf_arr**2.0
+            - POLARISATION_BIAS_FACTOR * theoretical_noise.fdf_error_noise**2.0,
+            0,
+            None,
+        )
+    )
+    mom0_debias = float(
+        calc_faraday_moments(
+            complex_fdf_arr=np.where(
+                abs_fdf_arr >= moment_threshold, abs_fdf_debias_arr, np.nan
+            ),
+            phi_arr_radm2=phi_arr_radm2,
+            fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        ).mom0
+    )
 
     stokes_sigma_add = measure_qu_complexity(
         freq_arr_hz=freq_arr_hz,
@@ -1127,6 +1542,11 @@ def get_fdf_parameters(
                 "sigma_add": stokes_sigma_add.sigma_add_p.sigma_add,
                 "sigma_add_minus": stokes_sigma_add.sigma_add_p.sigma_add_minus,
                 "sigma_add_plus": stokes_sigma_add.sigma_add_p.sigma_add_plus,
+                "mom0": float(moments.mom0),
+                "mom0_debias": mom0_debias,
+                "mom1_radm2": float(moments.mom1),
+                "mom2_radm2": float(moments.mom2),
+                "moment_threshold_snr": moment_threshold_snr,
             }
         )
     )
