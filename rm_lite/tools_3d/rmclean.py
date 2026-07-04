@@ -32,6 +32,7 @@ from numpy.typing import NDArray
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults
 from rm_lite.utils.clean import rmclean
 from rm_lite.utils.logging import logger, quiet_logs
+from rm_lite.utils.synthesis import calc_faraday_moments
 
 
 class RMClean3DResults(NamedTuple):
@@ -45,6 +46,13 @@ class RMClean3DResults(NamedTuple):
     """Residual FDF cube, same shape as `clean_fdf_cube`."""
     iter_count_map: da.Array
     """Per-pixel CLEAN iteration count, lazy dask array of shape (ny, nx)."""
+    mom0_map: da.Array
+    """Zeroth Faraday moment (total polarised intensity) of the clean FDF,
+    lazy dask array of shape (ny, nx). See `calc_faraday_moments`."""
+    mom1_map: da.Array
+    """First Faraday moment (mean Faraday depth, rad/m^2), shape (ny, nx)."""
+    mom2_map: da.Array
+    """Second Faraday moment (Faraday depth dispersion, rad/m^2), shape (ny, nx)."""
 
 
 class _RMCleanBlockResult(NamedTuple):
@@ -98,6 +106,7 @@ def rmclean_3d(
     threshold: float,
     max_iter: int = 1000,
     gain: float = 0.1,
+    moment_threshold: float | None = None,
     log_level: int = logging.ERROR,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on chunked dirty FDF and RMSF cubes.
@@ -116,6 +125,10 @@ def rmclean_3d(
         threshold (float): Cleaning threshold -- stop when all pixels are below this value.
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
+        moment_threshold (float | None, optional): Amplitude cut (in FDF
+            amplitude units) applied to the clean FDF before computing the
+            Faraday moment maps, passed to `calc_faraday_moments`. None includes
+            all amplitudes (noise-biased). Defaults to None.
         log_level (int, optional): Log level applied to `rm_lite`'s logger while
             each chunk runs. `rmclean`'s Hogbom loop logs at INFO and WARNING
             per pixel (e.g. "Starting minor loop...", "All channels masked...
@@ -176,11 +189,22 @@ def rmclean_3d(
             block_result.iter_count, shape=(cy, cx), dtype=np.int64
         )
 
+    clean_fdf_cube = da.block(clean_blocks.tolist())
+    moments = calc_faraday_moments(
+        clean_fdf_cube,
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        threshold=moment_threshold,
+    )
+
     return RMClean3DResults(
-        clean_fdf_cube=da.block(clean_blocks.tolist()),
+        clean_fdf_cube=clean_fdf_cube,
         model_fdf_cube=da.block(model_blocks.tolist()),
         resid_fdf_cube=da.block(resid_blocks.tolist()),
         iter_count_map=da.block(iter_blocks.tolist()),
+        mom0_map=moments.mom0,
+        mom1_map=moments.mom1,
+        mom2_map=moments.mom2,
     )
 
 
@@ -190,6 +214,7 @@ def rmclean_3d_from_synth(
     auto_threshold: float = 1,
     max_iter: int = 1000,
     gain: float = 0.1,
+    moment_threshold_snr: float = 5.0,
     log_level: int = logging.ERROR,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
@@ -211,6 +236,9 @@ def rmclean_3d_from_synth(
             the theoretical FDF noise. Defaults to 1.
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
+        moment_threshold_snr (float, optional): SNR cut (times the theoretical
+            FDF noise) applied to the clean FDF before computing the Faraday
+            moment maps. Defaults to 5.0.
         log_level (int, optional): See `rmclean_3d`. Defaults to `logging.ERROR`.
 
     Returns:
@@ -219,6 +247,7 @@ def rmclean_3d_from_synth(
     fdf_error_noise = rm_synth_3d_results.theoretical_noise.fdf_error_noise
     mask = auto_mask * fdf_error_noise
     threshold = auto_threshold * fdf_error_noise
+    moment_threshold = moment_threshold_snr * fdf_error_noise
 
     logger.info(
         f"Theoretical FDF noise: {fdf_error_noise:0.3g}. "
@@ -235,5 +264,6 @@ def rmclean_3d_from_synth(
         threshold=threshold,
         max_iter=max_iter,
         gain=gain,
+        moment_threshold=moment_threshold,
         log_level=log_level,
     )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal, NamedTuple, Protocol, TypeVar
+from typing import Any, Literal, NamedTuple, Protocol
 
 import numpy as np
 import sigfig as sf
@@ -12,8 +12,6 @@ from scipy import optimize
 from rm_lite.utils.logging import logger
 
 GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
-
-T = TypeVar("T", float, NDArray[np.float64])
 
 
 class StokesIModel(Protocol):
@@ -56,18 +54,18 @@ def sigma_to_fwhm(sigma: float) -> float:
 
 def gaussian_integrand(
     amplitude: float,
-    stddev: T | None = None,
-    fwhm: T | None = None,
-) -> T:
+    stddev: float | None = None,
+    fwhm: float | None = None,
+) -> float:
     if stddev is None and fwhm is None:
         msg = "Must provide either stddev or fwhm."
         raise ValueError(msg)
     if stddev is None and fwhm is not None:
-        stddev = fwhm / GAUSSIAN_SIGMA_TO_FWHM
+        stddev = fwhm_to_sigma(fwhm)
     if stddev is None:
         msg = "stddev cannot be None"
         raise ValueError(msg)
-    return amplitude * stddev * np.sqrt(2 * np.pi)  # type: ignore[no-any-return]
+    return float(amplitude * stddev * np.sqrt(2 * np.pi))
 
 
 def gaussian(

@@ -348,3 +348,76 @@ def test_moments_debias_option():
             lam_sq_0_m2=lam_sq_0_m2,
             auto_threshold_sigma=5.0,
         )
+
+
+def test_moments_auto_threshold_dask_multichunk_guard():
+    # calc_faraday_moments' auto-threshold noise estimate reduces over the
+    # Faraday depth axis, which dask cannot do across chunks -- must raise a
+    # clear error rather than an opaque dask failure (mirrors debias_fdf).
+    phi_arr = make_phi_arr(200, 1)
+    fdf = np.zeros((len(phi_arr), 4, 4), dtype=np.complex128)
+    fdf_dask = da.from_array(fdf, chunks=(50, 4, 4))
+    with pytest.raises(ValueError, match="single chunk"):
+        calc_faraday_moments(fdf_dask, phi_arr, 20.0, auto_threshold_sigma=5.0)
+
+
+def test_moments_auto_threshold_broad_source():
+    # A broad component fills most of the band, so median(|FDF|) is dominated
+    # by signal and would inflate the noise estimate past the peak, masking the
+    # source entirely. The mad_std estimate on the real/imag parts stays robust.
+    rng = np.random.default_rng(7)
+    phi_arr = make_phi_arr(150, 1)
+    fwhm = 200.0
+    noise_sigma = 0.05
+    signal = gaussian(phi_arr, 5.0, 0.0, fwhm=fwhm)
+    noise = rng.normal(0, noise_sigma, phi_arr.shape) + 1j * rng.normal(
+        0, noise_sigma, phi_arr.shape
+    )
+    fdf = signal + noise
+
+    moments = calc_faraday_moments(fdf, phi_arr, fwhm, auto_threshold_sigma=5.0)
+
+    assert np.isfinite(moments.mom1)
+    assert float(moments.mom0) > 0
+    assert abs(float(moments.mom1)) < 30.0
+
+
+def test_moments_debias_threshold_guard():
+    # A positive threshold on the signed debiased amplitudes would clip the
+    # negative noise samples the debias relies on -- must be rejected.
+    phi_arr = make_phi_arr(50, 1)
+    fdf = np.ones((len(phi_arr), 4, 4), dtype=np.complex128)
+    with pytest.raises(ValueError, match="not supported"):
+        calc_faraday_moments(
+            fdf, phi_arr, 20.0, debias=True, lam_sq_0_m2=0.1, threshold=0.5
+        )
+
+
+def test_moments_min_weight_fraction_signed():
+    phi_arr = make_phi_arr(100, 1)
+    fwhm = 20.0
+    # Signed spectrum that nearly cancels: net weight is a tiny positive value
+    signed = np.zeros_like(phi_arr)
+    signed[10] = 1.0
+    signed[20] = -0.999
+
+    # Default guard (weight_sum > 0) admits the tiny positive sum -> the mean
+    # Faraday depth is a finite but meaningless value.
+    default = calc_faraday_moments(signed, phi_arr, fwhm)
+    assert np.isfinite(default.mom1)
+
+    # Opt-in floor masks the near-cancelling spectrum symmetrically.
+    guarded = calc_faraday_moments(signed, phi_arr, fwhm, min_weight_fraction=0.1)
+    assert np.isnan(guarded.mom1)
+    assert np.isnan(guarded.mom2)
+    # mom0 (integrated flux) is unaffected by the guard.
+    assert np.isclose(float(guarded.mom0), float(default.mom0))
+
+    # For non-negative |FDF| input the guard is a no-op (ratio == 1).
+    pos = gaussian(phi_arr, 2.0, 0.0, fwhm=fwhm).astype(np.complex128)
+    plain = calc_faraday_moments(pos, phi_arr, fwhm)
+    floored = calc_faraday_moments(pos, phi_arr, fwhm, min_weight_fraction=0.5)
+    assert np.allclose(
+        [plain.mom0, plain.mom1, plain.mom2],
+        [floored.mom0, floored.mom1, floored.mom2],
+    )

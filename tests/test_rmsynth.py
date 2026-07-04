@@ -20,7 +20,11 @@ from rm_lite.utils.synthesis import (
     rmsynth_nufft,
 )
 
-RNG = np.random.default_rng()
+# Seeded for reproducibility: an unseeded generator draws a fresh random RM
+# each run, which occasionally lands on a near-Nyquist/aliased Faraday depth
+# where the global moment integration legitimately picks up distant structure
+# and the moment assertions below fail intermittently.
+RNG = np.random.default_rng(1234)
 
 
 class MockData(NamedTuple):

@@ -13,7 +13,7 @@ from astropy.io.fits import Header
 from dask.base import compute
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
-from rm_lite.tools_3d.rmclean import rmclean_3d
+from rm_lite.tools_3d.rmclean import rmclean_3d, rmclean_3d_from_synth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.clean import rmclean
 from rm_lite.utils.dask_io import (
@@ -22,7 +22,7 @@ from rm_lite.utils.dask_io import (
     spatial_chunk_size,
     write_zarr_group,
 )
-from rm_lite.utils.synthesis import freq_to_lambda2
+from rm_lite.utils.synthesis import calc_faraday_moments, freq_to_lambda2
 
 RNG = np.random.default_rng(2025)
 
@@ -356,3 +356,61 @@ def test_estimate_channel_noise_mad_shape_mismatch_raises():
     stokes_u = _chunked(np.zeros((5, 3, 3)), 2, 2)
     with pytest.raises(ValueError, match="same shape"):
         estimate_channel_noise_mad(stokes_q, stokes_u)
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_rmclean_3d_moment_maps(synthetic_cube: SyntheticCube):
+    """3D RM-CLEAN exposes Faraday moment maps matching a direct call."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+
+    synth = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    moment_threshold = 5.0 * synth.theoretical_noise.fdf_error_noise
+    clean = rmclean_3d(
+        synth.fdf_dirty_cube,
+        synth.rmsf_cube,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+        moment_threshold=moment_threshold,
+    )
+
+    assert isinstance(clean.mom0_map, da.Array)
+    assert clean.mom0_map.shape == synthetic_cube.rm_map.shape
+
+    ref = calc_faraday_moments(
+        clean.clean_fdf_cube,
+        synth.phi_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        threshold=moment_threshold,
+    )
+    m0, m1, m2, r0, r1, r2 = compute(
+        clean.mom0_map, clean.mom1_map, clean.mom2_map, ref.mom0, ref.mom1, ref.mom2
+    )
+    np.testing.assert_allclose(m0, r0, equal_nan=True)
+    np.testing.assert_allclose(m1, r1, equal_nan=True)
+    np.testing.assert_allclose(m2, r2, equal_nan=True)
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
+    """The from_synth convenience wrapper scales the moment threshold from SNR."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+
+    synth = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    clean = rmclean_3d_from_synth(synth, moment_threshold_snr=5.0)
+
+    assert isinstance(clean.mom1_map, da.Array)
+    assert clean.mom1_map.shape == synthetic_cube.rm_map.shape
+    # Every pixel holds a strong polarised source, so the moment maps must be
+    # populated (positive flux, finite mean Faraday depth), not all-NaN.
+    mom0, mom1 = compute(clean.mom0_map, clean.mom1_map)
+    assert (mom0 > 0).any()
+    assert np.isfinite(mom1).any()
