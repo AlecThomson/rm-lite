@@ -7,12 +7,23 @@ apply that block function across a dask-chunked cube with `dask.array.map_blocks
 chunked only on the two spatial axes (the frequency axis is always kept whole
 per chunk, see `rm_lite.utils.dask_io`).
 
-Per-pixel Stokes I fractional-polarization division and per-pixel FDF parameter
-fitting (as done in `rm_lite.tools_1d.rmsynth`) are out of scope here; this
-produces the dirty FDF cube and RMSF cube only. RMSF per-pixel Gaussian fitting
-(`do_fit_rmsf`) is also not performed in 3D -- the analytic FWHM is used
-everywhere, since fitting every pixel would add a real per-pixel loop to what
-is otherwise a fully vectorized stage.
+Optional per-pixel Stokes I fractional-polarization division is supported (see
+`rmsynth_3d`'s `stokes_i`/`stokes_i_model` arguments): a Stokes I model is
+either supplied as a cube or fitted per pixel (with `rm_lite.utils.fitting.
+fit_stokes_i_model`, the same fitter the 1D tools use), Q/U are divided by it
+to form fractional spectra `q = Q/I`, `u = U/I`, and the resulting FDF is scaled
+back to absolute polarised flux by the per-pixel reference-frequency Stokes I
+flux (mirroring `rm_lite.tools_1d.rmsynth`). This removes the spurious Faraday-
+depth broadening a steep Stokes I spectral index would otherwise imprint on the
+FDF. The per-pixel fit is a genuine per-pixel loop within each chunk, like the
+Hogbom loop in `rm_lite.tools_3d.rmclean`; the fractional division and rescaling
+are vectorized dask ops.
+
+Per-pixel FDF parameter fitting (as done in `rm_lite.tools_1d.rmsynth`) is out
+of scope here. RMSF per-pixel Gaussian fitting (`do_fit_rmsf`) is also not
+performed in 3D -- the analytic FWHM is used everywhere, since fitting every
+pixel would add a real per-pixel loop to what is otherwise a fully vectorized
+stage.
 """
 
 from __future__ import annotations
@@ -24,14 +35,17 @@ from typing import Literal, NamedTuple
 import dask.array as da
 import numpy as np
 from numpy.typing import NDArray
+from scipy import stats
 
 from rm_lite.utils.dask_io import (
     DEFAULT_TARGET_CHUNK_MB,
     complex_pol_dask,
     estimate_channel_noise_mad,
+    estimate_stokes_i_channel_noise,
     freq_arr_hz_from_header,
     read_fits_cube_dask,
 )
+from rm_lite.utils.fitting import fit_stokes_i_model
 from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.synthesis import (
     FDFOptions,
@@ -41,6 +55,7 @@ from rm_lite.utils.synthesis import (
     compute_theoretical_noise,
     get_fwhm_rmsf,
     get_rmsf_nufft,
+    lambda2_to_freq,
     make_double_phi_arr,
     rmsynth_nufft,
 )
@@ -64,7 +79,21 @@ class RMSynth3DResults(NamedTuple):
     theoretical_noise: TheoreticalNoise
     """Theoretical FDF-domain noise from the per-channel weight array (uniform
     across the cube -- 3D RM-synthesis only carries a per-channel, not
-    per-pixel, noise estimate)."""
+    per-pixel, noise estimate). When a Stokes I model is used, the FDF is
+    rescaled to absolute polarised flux per pixel; this noise stays in the
+    absolute Q/U-error domain it was computed in, which the per-pixel rescaling
+    keeps approximately consistent (exactly so for a flat Stokes I spectrum)."""
+    stokes_i_model_cube: da.Array | None = None
+    """Per-pixel Stokes I model cube, lazy dask array of shape (n_freq, ny, nx).
+    None unless a Stokes I cube/model was supplied to `rmsynth_3d`."""
+    stokes_i_model_error_cube: da.Array | None = None
+    """Per-pixel Stokes I model 1-sigma error cube, shape (n_freq, ny, nx).
+    None unless `compute_model_error=True` (opt-in; adds a second per-pixel
+    Monte-Carlo fit pass)."""
+    stokes_i_ref_flux_map: da.Array | None = None
+    """Per-pixel reference-frequency Stokes I flux, shape (ny, nx). The factor
+    the fractional FDF was multiplied by to reach absolute units. None unless a
+    Stokes I cube/model was supplied."""
 
 
 def _compute_global_params(
@@ -109,6 +138,169 @@ def _compute_global_params(
     return rmsynth_params, theoretical_noise
 
 
+def _pixel_stokes_i_error(
+    err_block: NDArray[np.float64] | None,
+    err_1d: NDArray[np.float64] | None,
+    n_freq: int,
+    y: int,
+    x: int,
+) -> NDArray[np.float64]:
+    """Per-pixel Stokes I error spectrum from a 3D error cube, 1D per-channel
+    array, or neither (zeros -> `fit_stokes_i_model` fits unweighted)."""
+    if err_block is not None:
+        return err_block[:, y, x]
+    if err_1d is not None:
+        return err_1d
+    return np.zeros(n_freq, dtype=np.float64)
+
+
+def _fit_stokes_i_block(
+    *arrays: NDArray[np.float64],
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: float,
+    err_1d: NDArray[np.float64] | None,
+    fit_order: int,
+    fit_function: Literal["log", "linear"],
+    log_level: int,
+) -> NDArray[np.float64]:
+    """Fit a Stokes I model per pixel over one spatial chunk -> model cube block.
+
+    `arrays` is `(i_block,)` or `(i_block, err_block)`; the error cube is
+    optional (see `_pixel_stokes_i_error`). Pixels with too few finite channels
+    to constrain the fit are left NaN, which flags them downstream.
+    """
+    i_block = arrays[0]
+    err_block = arrays[1] if len(arrays) > 1 else None
+    n_freq, cy, cx = i_block.shape
+    x_arr = freq_arr_hz / ref_freq_hz
+    model = np.full((n_freq, cy, cx), np.nan, dtype=np.float64)
+    # fit_stokes_i_model logs per fit (INFO), and per-pixel fit failures at
+    # WARNING/ERROR -- at cube scale that's a flood, so quiet the fit to at
+    # least ERROR regardless of the caller's log_level (a failed pixel just
+    # yields a NaN model column, handled downstream).
+    with quiet_logs(max(log_level, logging.ERROR)):
+        for y in range(cy):
+            for x in range(cx):
+                i_spec = i_block[:, y, x]
+                e_spec = _pixel_stokes_i_error(err_block, err_1d, n_freq, y, x)
+                good = np.isfinite(i_spec) & np.isfinite(e_spec)
+                if int(good.sum()) < fit_order + 2:
+                    continue
+                fit = fit_stokes_i_model(
+                    freq_arr_hz=freq_arr_hz[good],
+                    ref_freq_hz=ref_freq_hz,
+                    stokes_i_arr=i_spec[good],
+                    stokes_i_error_arr=e_spec[good],
+                    fit_order=fit_order,
+                    fit_type=fit_function,
+                )
+                model[:, y, x] = fit.stokes_i_model_func(x_arr, *np.asarray(fit.popt))
+    return model
+
+
+def _fit_stokes_i_error_block(
+    *arrays: NDArray[np.float64],
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: float,
+    err_1d: NDArray[np.float64] | None,
+    fit_order: int,
+    fit_function: Literal["log", "linear"],
+    n_error_samples: int,
+    log_level: int,
+) -> NDArray[np.float64]:
+    """Per-pixel Stokes I model 1-sigma error via Monte-Carlo over the fit
+    covariance -> error cube block. Mirrors `create_fractional_spectra`'s
+    16th/84th-percentile spread. Opt-in: a second per-pixel fit pass."""
+    i_block = arrays[0]
+    err_block = arrays[1] if len(arrays) > 1 else None
+    n_freq, cy, cx = i_block.shape
+    x_arr = freq_arr_hz / ref_freq_hz
+    model_error = np.full((n_freq, cy, cx), np.nan, dtype=np.float64)
+    with quiet_logs(max(log_level, logging.ERROR)):
+        for y in range(cy):
+            for x in range(cx):
+                i_spec = i_block[:, y, x]
+                e_spec = _pixel_stokes_i_error(err_block, err_1d, n_freq, y, x)
+                good = np.isfinite(i_spec) & np.isfinite(e_spec)
+                if int(good.sum()) < fit_order + 2:
+                    continue
+                fit = fit_stokes_i_model(
+                    freq_arr_hz=freq_arr_hz[good],
+                    ref_freq_hz=ref_freq_hz,
+                    stokes_i_arr=i_spec[good],
+                    stokes_i_error_arr=e_spec[good],
+                    fit_order=fit_order,
+                    fit_type=fit_function,
+                )
+                dist = stats.multivariate_normal(
+                    mean=np.asarray(fit.popt),
+                    cov=np.asarray(fit.pcov),
+                    allow_singular=True,
+                )
+                samples = np.atleast_2d(dist.rvs(n_error_samples))
+                model_samples = np.array(
+                    [fit.stokes_i_model_func(x_arr, *s) for s in samples]
+                )
+                low, high = np.nanpercentile(model_samples, [16, 84], axis=0)
+                err = np.abs(high - low)
+                err[err > 1e99] = np.nan
+                model_error[:, y, x] = err
+    return model_error
+
+
+def _ref_flux_block(
+    model_block: NDArray[np.float64],
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: float,
+) -> NDArray[np.float64]:
+    """Interpolate a Stokes I model cube block at the reference frequency ->
+    (cy, cx) reference-flux map block."""
+    _, cy, cx = model_block.shape
+    ref_flux = np.full((cy, cx), np.nan, dtype=np.float64)
+    for y in range(cy):
+        for x in range(cx):
+            spec = model_block[:, y, x]
+            if np.isfinite(spec).all():
+                ref_flux[y, x] = np.interp(ref_freq_hz, freq_arr_hz, spec)
+    return ref_flux
+
+
+def _stokes_i_model_cube(
+    stokes_i: da.Array,
+    stokes_i_error: NDArray[np.float64] | da.Array | None,
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: float,
+    fit_order: int,
+    fit_function: Literal["log", "linear"],
+    log_level: int,
+) -> da.Array:
+    """Lazy per-pixel Stokes I model cube, chunked like `stokes_i`.
+
+    `stokes_i_error` is a per-channel 1D array (n_freq,), a per-pixel error cube
+    (n_freq, ny, nx), or None (unweighted fit).
+    """
+    err_1d: NDArray[np.float64] | None = None
+    err_cube: da.Array | None = None
+    if stokes_i_error is not None:
+        if getattr(stokes_i_error, "ndim", 1) == 3:
+            err_cube = stokes_i_error.rechunk(stokes_i.chunks)  # type: ignore[union-attr]
+        else:
+            err_1d = np.asarray(stokes_i_error, dtype=np.float64)
+
+    kwargs = {
+        "freq_arr_hz": freq_arr_hz,
+        "ref_freq_hz": ref_freq_hz,
+        "err_1d": err_1d,
+        "fit_order": fit_order,
+        "fit_function": fit_function,
+        "log_level": log_level,
+    }
+    args = (stokes_i,) if err_cube is None else (stokes_i, err_cube)
+    return da.map_blocks(
+        _fit_stokes_i_block, *args, dtype=np.float64, chunks=stokes_i.chunks, **kwargs
+    )
+
+
 def rmsynth_3d(
     stokes_q: da.Array,
     stokes_u: da.Array,
@@ -118,6 +310,14 @@ def rmsynth_3d(
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
     weight_type: Literal["variance", "uniform"] = "variance",
+    stokes_i: da.Array | None = None,
+    stokes_i_error: NDArray[np.float64] | da.Array | None = None,
+    stokes_i_model: da.Array | None = None,
+    estimate_stokes_i_noise: bool = False,
+    fit_order: int = 2,
+    fit_function: Literal["log", "linear"] = "log",
+    compute_model_error: bool = False,
+    n_error_samples: int = 1000,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis on chunked Stokes Q/U cubes.
@@ -135,6 +335,31 @@ def rmsynth_3d(
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
         weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
+        stokes_i (da.Array | None, optional): Stokes I cube (measurements),
+            shape (n_freq, ny, nx). If given, a Stokes I model is fitted per
+            pixel with `rm_lite.utils.fitting.fit_stokes_i_model` and used to
+            form fractional spectra. Ignored if `stokes_i_model` is given.
+            Defaults to None (no fractional division -- FDF stays in Q/U flux).
+        stokes_i_error (NDArray[np.float64] | da.Array | None, optional): Stokes
+            I error, either per-channel 1D shape (n_freq,) or a per-pixel cube
+            shape (n_freq, ny, nx), used to weight the per-pixel fit. Defaults
+            to None (unweighted fit, or estimated if `estimate_stokes_i_noise`).
+        stokes_i_model (da.Array | None, optional): Pre-computed Stokes I model
+            cube, shape (n_freq, ny, nx). Used directly (no fitting) to form
+            fractional spectra. Takes precedence over `stokes_i`. Defaults to None.
+        estimate_stokes_i_noise (bool, optional): If True and `stokes_i` is given
+            without `stokes_i_error`, derive a per-channel error from the Stokes
+            I cube with `estimate_stokes_i_channel_noise`. Defaults to False.
+        fit_order (int, optional): Stokes I fit order. Negative iterates orders
+            and picks the best by AIC (see `fit_stokes_i_model`). Defaults to 2.
+        fit_function ("log", "linear", optional): Stokes I fit family ("log" =
+            power law, "linear" = polynomial). Defaults to "log".
+        compute_model_error (bool, optional): Also compute a per-pixel Stokes I
+            model error cube via Monte-Carlo over the fit covariance. Opt-in: a
+            second per-pixel fit pass, so it roughly doubles fit cost. The FDF
+            itself does not depend on this. Defaults to False.
+        n_error_samples (int, optional): Monte-Carlo samples per pixel when
+            `compute_model_error` is True. Defaults to 1000.
         log_level (int, optional): Log level applied to `rm_lite`'s logger while
             each chunk runs. `rmsynth_nufft`/`get_rmsf_nufft` log at INFO per
             call, which is only useful for a single spectrum -- repeated once
@@ -143,7 +368,10 @@ def rmsynth_3d(
             `logging.WARNING`.
 
     Returns:
-        RMSynth3DResults: Lazy dirty FDF cube, RMSF cube, and associated parameters.
+        RMSynth3DResults: Lazy dirty FDF cube, RMSF cube, and associated
+            parameters. When a Stokes I model is used, the FDF is fractional-
+            corrected then rescaled to absolute polarised flux, and the Stokes I
+            model cube / reference-flux map are populated.
     """
     if stokes_q.shape != stokes_u.shape:
         msg = f"Stokes Q and U must have the same shape. Got {stokes_q.shape} and {stokes_u.shape}."
@@ -171,6 +399,67 @@ def rmsynth_3d(
 
     pol_cube = complex_pol_dask(stokes_q, stokes_u)
 
+    # Optional per-pixel Stokes I fractional-polarization correction. Either a
+    # model cube is supplied directly, or one is fitted per pixel; Q/U are then
+    # divided by it and the FDF is rescaled to absolute flux by the per-pixel
+    # reference-frequency Stokes I flux (see module docstring).
+    ref_freq_hz = float(lambda2_to_freq(rmsynth_params.lam_sq_0_m2))
+    stokes_i_model_cube: da.Array | None = None
+    stokes_i_model_error_cube: da.Array | None = None
+    ref_flux_map: da.Array | None = None
+    if stokes_i_model is not None:
+        stokes_i_model_cube = stokes_i_model.rechunk(stokes_q.chunks)
+    elif stokes_i is not None:
+        stokes_i = stokes_i.rechunk(stokes_q.chunks)
+        if stokes_i_error is None and estimate_stokes_i_noise:
+            stokes_i_error = estimate_stokes_i_channel_noise(stokes_i)
+        stokes_i_model_cube = _stokes_i_model_cube(
+            stokes_i=stokes_i,
+            stokes_i_error=stokes_i_error,
+            freq_arr_hz=freq_arr_hz,
+            ref_freq_hz=ref_freq_hz,
+            fit_order=fit_order,
+            fit_function=fit_function,
+            log_level=log_level,
+        )
+        if compute_model_error:
+            err_1d = (
+                np.asarray(stokes_i_error, dtype=np.float64)
+                if stokes_i_error is not None
+                and getattr(stokes_i_error, "ndim", 1) != 3
+                else None
+            )
+            err_args = (
+                (stokes_i, stokes_i_error.rechunk(stokes_q.chunks))  # type: ignore[union-attr]
+                if stokes_i_error is not None
+                and getattr(stokes_i_error, "ndim", 1) == 3
+                else (stokes_i,)
+            )
+            stokes_i_model_error_cube = da.map_blocks(
+                _fit_stokes_i_error_block,
+                *err_args,
+                dtype=np.float64,
+                chunks=stokes_i.chunks,
+                freq_arr_hz=freq_arr_hz,
+                ref_freq_hz=ref_freq_hz,
+                err_1d=err_1d,
+                fit_order=fit_order,
+                fit_function=fit_function,
+                n_error_samples=n_error_samples,
+                log_level=log_level,
+            )
+
+    if stokes_i_model_cube is not None:
+        pol_cube = pol_cube / stokes_i_model_cube
+        ref_flux_map = da.map_blocks(
+            _ref_flux_block,
+            stokes_i_model_cube,
+            drop_axis=0,
+            dtype=np.float64,
+            freq_arr_hz=freq_arr_hz,
+            ref_freq_hz=ref_freq_hz,
+        )
+
     def _synth_block(block: NDArray[np.complex128]) -> NDArray[np.complex128]:
         _, cy, cx = block.shape
         with quiet_logs(log_level):
@@ -190,6 +479,10 @@ def rmsynth_3d(
         chunks=((n_phi,), pol_cube.chunks[1], pol_cube.chunks[2]),
         dtype=np.complex128,
     )
+
+    if ref_flux_map is not None:
+        # Rescale fractional FDF to absolute polarised flux per pixel.
+        fdf_dirty_cube = fdf_dirty_cube * ref_flux_map[np.newaxis, :, :]
 
     def _rmsf_block(block: NDArray[np.complex128]) -> NDArray[np.complex128]:
         _, cy, cx = block.shape
@@ -221,6 +514,9 @@ def rmsynth_3d(
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
         theoretical_noise=theoretical_noise,
+        stokes_i_model_cube=stokes_i_model_cube,
+        stokes_i_model_error_cube=stokes_i_model_error_cube,
+        stokes_i_ref_flux_map=ref_flux_map,
     )
 
 
@@ -232,6 +528,14 @@ def rmsynth_3d_from_fits(
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
     weight_type: Literal["variance", "uniform"] = "variance",
+    stokes_i_file: str | Path | None = None,
+    stokes_i_error_file: str | Path | None = None,
+    stokes_i_model_file: str | Path | None = None,
+    estimate_stokes_i_noise: bool = False,
+    fit_order: int = 2,
+    fit_function: Literal["log", "linear"] = "log",
+    compute_model_error: bool = False,
+    n_error_samples: int = 1000,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
@@ -254,6 +558,19 @@ def rmsynth_3d_from_fits(
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
         weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
+        stokes_i_file (str | Path | None, optional): Path to a Stokes I FITS cube
+            (measurements) to fit per pixel for fractional-polarization
+            correction. See `rmsynth_3d`. Defaults to None.
+        stokes_i_error_file (str | Path | None, optional): Path to a Stokes I
+            error FITS cube used to weight the per-pixel fit. Defaults to None.
+        stokes_i_model_file (str | Path | None, optional): Path to a pre-computed
+            Stokes I model FITS cube, used directly (no fitting). Takes
+            precedence over `stokes_i_file`. Defaults to None.
+        estimate_stokes_i_noise (bool, optional): See `rmsynth_3d`. Defaults to False.
+        fit_order (int, optional): See `rmsynth_3d`. Defaults to 2.
+        fit_function ("log", "linear", optional): See `rmsynth_3d`. Defaults to "log".
+        compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
+        n_error_samples (int, optional): See `rmsynth_3d`. Defaults to 1000.
         target_chunk_mb (float, optional): Target per-chunk memory footprint
             in MB, see `read_fits_cube_dask`. Defaults to 256.
         log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
@@ -274,6 +591,22 @@ def rmsynth_3d_from_fits(
         noise_arr = estimate_channel_noise_mad(stokes_q, stokes_u)
         weight_arr = 1.0 / noise_arr**2
 
+    stokes_i = None
+    stokes_i_model = None
+    stokes_i_error: NDArray[np.float64] | da.Array | None = None
+    if stokes_i_model_file is not None:
+        stokes_i_model, _ = read_fits_cube_dask(
+            stokes_i_model_file, target_chunk_mb=target_chunk_mb
+        )
+    elif stokes_i_file is not None:
+        stokes_i, _ = read_fits_cube_dask(
+            stokes_i_file, target_chunk_mb=target_chunk_mb
+        )
+        if stokes_i_error_file is not None:
+            stokes_i_error, _ = read_fits_cube_dask(
+                stokes_i_error_file, target_chunk_mb=target_chunk_mb
+            )
+
     return rmsynth_3d(
         stokes_q=stokes_q,
         stokes_u=stokes_u,
@@ -283,5 +616,13 @@ def rmsynth_3d_from_fits(
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
         weight_type=weight_type,
+        stokes_i=stokes_i,
+        stokes_i_error=stokes_i_error,
+        stokes_i_model=stokes_i_model,
+        estimate_stokes_i_noise=estimate_stokes_i_noise,
+        fit_order=fit_order,
+        fit_function=fit_function,
+        compute_model_error=compute_model_error,
+        n_error_samples=n_error_samples,
         log_level=log_level,
     )

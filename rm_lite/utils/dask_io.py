@@ -222,6 +222,47 @@ def _channel_mad_std_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
     return mad_std(block.reshape(n_freq_block, -1), axis=1, ignore_nan=True)
 
 
+def _channel_noise_single(cube: da.Array) -> NDArray[np.float64]:
+    """Per-channel MAD std over every spatial pixel of a single cube.
+
+    Rechunks the spatial axes to one block per channel (a robust median can't
+    be combined incrementally across separate spatial chunks) and reduces each
+    channel plane to a scalar. Returns a computed numpy array, not lazy.
+    """
+    full_spatial = cube.rechunk({1: -1, 2: -1})
+    (noise,) = compute(
+        da.map_blocks(
+            _channel_mad_std_block, full_spatial, drop_axis=(1, 2), dtype=np.float64
+        )
+    )
+    return np.asarray(noise)
+
+
+def estimate_stokes_i_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
+    """Robust per-channel noise from a single Stokes I cube.
+
+    Same MAD-based per-channel estimator as `estimate_channel_noise_mad`, but
+    for one cube (no Q/U combination). Useful as the `stokes_i_error` fed to
+    `rm_lite.tools_3d.rmsynth.rmsynth_3d`'s per-pixel Stokes I fit when the I
+    cube carries no separate error cube.
+
+    Args:
+        stokes_i (da.Array): Stokes I dask array, shape (n_freq, ny, nx).
+
+    Returns:
+        NDArray[np.float64]: Per-channel noise estimate, shape (n_freq,). A
+        plain numpy array, not lazy.
+    """
+    logger.info(
+        "Rechunking Stokes I to one spatial block per channel for noise estimation."
+    )
+    tick = time.time()
+    noise = _channel_noise_single(stokes_i)
+    tock = time.time()
+    logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
+    return noise
+
+
 def estimate_channel_noise_mad(
     stokes_q: da.Array,
     stokes_u: da.Array,
