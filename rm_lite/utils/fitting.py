@@ -129,7 +129,7 @@ def fit_rmsf(
         start = int(i - sigma_rmsf_arr_pix / 2)
         end = int(i + sigma_rmsf_arr_pix / 2)
         mask[start : end + 2] = True
-    popt, pcov = optimize.curve_fit(
+    popt, _ = optimize.curve_fit(
         unit_centred_gaussian,
         phi_double_arr_radm2[mask],
         rmsf_to_fit_arr[mask],
@@ -275,15 +275,24 @@ def static_fit(
             bounds=bounds,
         )
     except (ValueError, RuntimeError) as e:
-        logger.error(e)
-        msg = "Failed to fit Stokes I model. Trying again without errors."
-        logger.warning(msg)
-        popt, pcov = optimize.curve_fit(
-            fit_func,
-            freq_arr_hz / ref_freq_hz,
-            stokes_i_arr,
-            p0=initial_guess,
-        )
+        logger.warning(f"Stokes I fit with errors failed ({e}); retrying unweighted.")
+        try:
+            popt, pcov = optimize.curve_fit(
+                fit_func,
+                freq_arr_hz / ref_freq_hz,
+                stokes_i_arr,
+                p0=initial_guess,
+            )
+        except (ValueError, RuntimeError) as e2:
+            # Fall back to a flat model at the mean. With only params[0] set,
+            # both power_law and polynomial give that constant, so the caller
+            # gets a usable model rather than an exception. pcov is zero.
+            logger.warning(
+                f"Stokes I fit failed ({e2}); falling back to a flat (mean) model."
+            )
+            popt = np.zeros(fit_order + 1)
+            popt[0] = mean_spectrum
+            pcov = np.zeros((fit_order + 1, fit_order + 1))
     stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
     ssr = float(np.sum((stokes_i_arr - stokes_i_model_arr) ** 2))
     with np.errstate(divide="ignore"):

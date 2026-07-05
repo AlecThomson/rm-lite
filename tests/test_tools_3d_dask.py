@@ -61,7 +61,7 @@ def synthetic_cube() -> SyntheticCube:
     # per-pixel processing derives lam_sq_0_m2/weight_arr from that pixel's
     # own flagging, while the 3D orchestration uses one global lam_sq_0_m2
     # and per-channel weight_arr shared across every pixel (matching classic
-    # RM-Tools 3D convention) -- a global flag would make the two legitimately
+    # RM-Tools 3D convention). A global flag would make the two legitimately
     # diverge, which isn't what this test is checking.
     stokes_q += RNG.normal(0, 0.01, stokes_q.shape)
     stokes_u += RNG.normal(0, 0.01, stokes_u.shape)

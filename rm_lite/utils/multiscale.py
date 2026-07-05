@@ -268,7 +268,7 @@ def multiscale_minor_loop(
             )
             break
 
-        activated_scale, scale_parameter = find_significant_scale(
+        activated_scale, _ = find_significant_scale(
             scales=scales,
             scale_bias=scale_bias,
             fdf_arr=np.abs(resid_fdf_spectrum),
@@ -554,7 +554,7 @@ def mutliscale_rmclean(
     )
     max_scale = rmsf_params.phi_max_scale / rmsf_params.rmsf_fwhm_meas
     logger.info(
-        f"Maximum Faraday scale {rmsf_params.phi_max_scale:0.2f} / (rad/m^2) -- {max_scale:0.2f} / RMSF FWHM."
+        f"Maximum Faraday scale {rmsf_params.phi_max_scale:0.2f} / (rad/m^2), {max_scale:0.2f} / RMSF FWHM."
     )
     if scales is None:
         scales = np.arange(0, max_scale, step=0.1)

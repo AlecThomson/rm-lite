@@ -352,7 +352,7 @@ def test_moments_debias_option():
 
 def test_moments_auto_threshold_dask_multichunk_guard():
     # calc_faraday_moments' auto-threshold noise estimate reduces over the
-    # Faraday depth axis, which dask cannot do across chunks -- must raise a
+    # Faraday depth axis, which dask cannot do across chunks, so it must raise a
     # clear error rather than an opaque dask failure (mirrors debias_fdf).
     phi_arr = make_phi_arr(200, 1)
     fdf = np.zeros((len(phi_arr), 4, 4), dtype=np.complex128)
@@ -384,7 +384,7 @@ def test_moments_auto_threshold_broad_source():
 
 def test_moments_debias_threshold_guard():
     # A positive threshold on the signed debiased amplitudes would clip the
-    # negative noise samples the debias relies on -- must be rejected.
+    # negative noise samples the debias relies on, so it must be rejected.
     phi_arr = make_phi_arr(50, 1)
     fdf = np.ones((len(phi_arr), 4, 4), dtype=np.complex128)
     with pytest.raises(ValueError, match="not supported"):

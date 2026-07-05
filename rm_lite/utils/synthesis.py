@@ -197,22 +197,19 @@ def calc_faraday_moments(
 ) -> FaradayMoments:
     """Compute the zeroth, first, and second moments of a Faraday depth spectrum.
 
-    The FDF amplitude is assumed to be in units per RMSF (the native scale of
-    RM-synthesis outputs). The zeroth moment is converted to integrated units
-    by dividing the Faraday-depth sum by the RMSF area (a Gaussian of FWHM
-    `fwhm_rmsf_radm2`), so an unresolved component of peak amplitude P yields
-    `mom0 = P`.
+    The FDF amplitude is in units per RMSF (the native RM-synthesis scale). mom0
+    is converted to integrated units by dividing the Faraday-depth sum by the
+    RMSF area (a Gaussian of FWHM `fwhm_rmsf_radm2`), so an unresolved component
+    of peak amplitude P gives `mom0 = P`.
 
-    Complex input is reduced with `np.abs`; real input is used as-is, so
-    signed debiased amplitudes (see `debias_fdf`) integrate without re-folding
-    their noise into a positive floor. With `debias=True` (requires
-    `lam_sq_0_m2` and at least one spatial axis) that debiasing is applied
-    internally, giving unbiased moments without an amplitude threshold.
+    Complex input is reduced with `np.abs`; real input is used as-is, so the
+    signed debiased amplitudes from `debias_fdf` integrate without folding noise
+    into a positive floor. `debias=True` applies that debiasing internally (needs
+    `lam_sq_0_m2` and a spatial axis), giving unbiased moments with no threshold.
 
-    Works on numpy or dask arrays of any dimensionality: the Faraday depth
-    axis is reduced away and all other axes are preserved. `auto_threshold_sigma`
-    and `debias=True` reduce over the Faraday depth axis, so for dask input that
-    axis must be a single chunk.
+    Works on numpy or dask arrays of any dimensionality: the Faraday depth axis
+    is reduced away, the rest preserved. `auto_threshold_sigma` and `debias=True`
+    reduce over the Faraday depth axis, so for dask that axis must be one chunk.
 
     Args:
         complex_fdf_arr (NDArray[np.complex128]): Complex (or real) FDF.
@@ -433,7 +430,7 @@ def debias_fdf(
     is projected onto the filtered-angle direction,
     `P* = U sin(theta_m) + Q cos(theta_m)`. Unlike `abs(fdf)`, the result is
     noise-like (zero-mean Gaussian) in signal-free regions, at the cost of
-    allowing negative values -- summed over Faraday depth (e.g. by
+    allowing negative values. Summed over Faraday depth (e.g. by
     `calc_faraday_moments`) the noise cancels instead of accumulating a
     positive floor.
 
@@ -442,8 +439,8 @@ def debias_fdf(
     `2 psi0 + 2 lam_sq_0 (RM - phi)`. That deterministic ramp is removed
     first, by derotating each spectrum with a per-pixel peak Faraday depth
     estimate (the amplitude-weighted centroid of the half-max region about
-    the peak), so only the intrinsic angle `2 psi0` -- assumed spatially
-    smooth -- is filtered.
+    the peak), so only the intrinsic angle `2 psi0`, assumed spatially
+    smooth, is filtered.
     Sightlines with multiple components at very different Faraday depths are
     only derotated for the dominant peak; secondary components lose
     `cos(2 lam_sq_0 dRM)` of amplitude in the projection.
@@ -843,9 +840,7 @@ def compute_rmsynth_params(
 
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
 
-    fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
-        lambda_sq_arr_m2
-    )
+    fwhm_rmsf_radm2, d_lambda_sq_max_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
 
     if fdf_options.d_phi_radm2 is None and fdf_options.n_samples is not None:
         d_phi_radm2 = fwhm_rmsf_radm2 / fdf_options.n_samples

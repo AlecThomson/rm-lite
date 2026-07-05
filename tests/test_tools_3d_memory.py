@@ -3,7 +3,7 @@
 Runs the pipeline in a fresh subprocess per configuration so
 `resource.getrusage(...).ru_maxrss` reports a clean per-run peak, and writes
 output via `write_zarr_group` rather than `.compute()`, since `.compute()`
-always assembles the full result in memory regardless of chunk size -- see
+always assembles the full result in memory regardless of chunk size. See
 `tests/_dask_memory_worker.py` for the worker itself.
 """
 
