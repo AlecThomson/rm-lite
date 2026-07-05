@@ -226,7 +226,14 @@ def _rmclean_nd(
     resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
 
     # Loop through the pixels containing a polarised signal
-    for pix_idx in tqdm(range(dirty_fdf_arr_2d.shape[1]), file=TQDM_OUT, leave=False):
+    for pix_idx in tqdm(
+        range(dirty_fdf_arr_2d.shape[1]),
+        file=TQDM_OUT,
+        leave=False,
+        # tqdm.auto uses the notebook widget in Jupyter, which ignores `file`
+        # and so escapes quiet_logs; gate on the logger level to actually mute it.
+        disable=not logger.isEnabledFor(logging.INFO),
+    ):
         clean_loop_results = minor_cycle(
             rm_synth_1d_arrays=RMSynthArrays(
                 dirty_fdf_arr=resid_fdf_arr_2d[:, pix_idx],
