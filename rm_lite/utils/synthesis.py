@@ -12,7 +12,7 @@ import polars as pl
 from astropy.constants import c as speed_of_light
 from astropy.stats import mad_std
 from numpy.typing import NDArray
-from scipy import ndimage, stats
+from scipy import ndimage
 from tqdm.auto import trange
 from uncertainties import unumpy
 
@@ -23,6 +23,7 @@ from rm_lite.utils.fitting import (
     fit_rmsf,
     fit_stokes_i_model,
     gaussian_integrand,
+    sample_model_error,
 )
 from rm_lite.utils.logging import logger
 
@@ -613,28 +614,14 @@ def create_fractional_spectra(
         fit_order=fit_order,
         fit_type=fit_function,
     )
+    if fit_result is None:
+        msg = "Too few finite Stokes I channels to fit; no fractional polarization."
+        logger.warning(msg)
+        return None
 
-    error_distribution = stats.multivariate_normal(
-        mean=np.asarray(fit_result.popt),
-        cov=np.asarray(fit_result.pcov),
-        allow_singular=True,
+    stokes_i_model_arr, stokes_i_model_error = sample_model_error(
+        fit_result, stokes_data.freq_arr_hz / ref_freq_hz, n_error_samples
     )
-    error_samples = np.array(error_distribution.rvs(n_error_samples))
-
-    model_samples = np.empty((n_error_samples, len(stokes_data.freq_arr_hz)))
-    for i, sample in enumerate(error_samples):
-        if np.isscalar(sample):
-            sample = np.full_like(fit_result.popt, sample)  # noqa: PLW2901
-        model_samples[i] = fit_result.stokes_i_model_func(
-            stokes_data.freq_arr_hz / ref_freq_hz, *sample
-        )
-
-    stokes_i_model_low, stokes_i_model_arr, stokes_i_model_high = np.nanpercentile(
-        model_samples, [16, 50, 84], axis=0
-    )
-    stokes_i_model_error = np.abs(stokes_i_model_high - stokes_i_model_low)
-    # Avoid numerical overflows
-    stokes_i_model_error[stokes_i_model_error > 1e99] = np.nan
     stokes_i_model_uarray = unumpy.uarray(
         stokes_i_model_arr,
         stokes_i_model_error,

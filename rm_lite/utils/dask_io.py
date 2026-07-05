@@ -215,20 +215,18 @@ def _channel_mad_std_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
     return mad_std(block.reshape(n_freq_block, -1), axis=1, ignore_nan=True)
 
 
-def _channel_noise_single(cube: da.Array) -> NDArray[np.float64]:
-    """Per-channel MAD std over every spatial pixel of a single cube.
+def _channel_mad_lazy(cube: da.Array) -> da.Array:
+    """Lazy per-channel MAD std over every spatial pixel of a cube.
 
     Rechunks the spatial axes to one block per channel (a robust median can't
     be combined incrementally across separate spatial chunks) and reduces each
-    channel plane to a scalar. Returns a computed numpy array, not lazy.
+    channel plane to a scalar. Not computed -- so several cubes can be reduced
+    in one `compute` call.
     """
     full_spatial = cube.rechunk({1: -1, 2: -1})
-    (noise,) = compute(
-        da.map_blocks(
-            _channel_mad_std_block, full_spatial, drop_axis=(1, 2), dtype=np.float64
-        )
+    return da.map_blocks(
+        _channel_mad_std_block, full_spatial, drop_axis=(1, 2), dtype=np.float64
     )
-    return np.asarray(noise)
 
 
 def estimate_stokes_i_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
@@ -250,10 +248,10 @@ def estimate_stokes_i_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
         "Rechunking Stokes I to one spatial block per channel for noise estimation."
     )
     tick = time.time()
-    noise = _channel_noise_single(stokes_i)
+    (noise,) = compute(_channel_mad_lazy(stokes_i))
     tock = time.time()
     logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
-    return noise
+    return np.asarray(noise)
 
 
 def estimate_channel_noise_mad(
@@ -296,18 +294,9 @@ def estimate_channel_noise_mad(
     logger.info(
         "Rechunking Stokes Q/U to one spatial block per channel for noise estimation."
     )
-    q_full_spatial = stokes_q.rechunk({1: -1, 2: -1})
-    u_full_spatial = stokes_u.rechunk({1: -1, 2: -1})
-
     tick = time.time()
-    q_noise, u_noise = compute(
-        da.map_blocks(
-            _channel_mad_std_block, q_full_spatial, drop_axis=(1, 2), dtype=np.float64
-        ),
-        da.map_blocks(
-            _channel_mad_std_block, u_full_spatial, drop_axis=(1, 2), dtype=np.float64
-        ),
-    )
+    # One compute so the Q and U reductions share scheduling.
+    q_noise, u_noise = compute(_channel_mad_lazy(stokes_q), _channel_mad_lazy(stokes_u))
     tock = time.time()
     logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
     return np.abs(q_noise + u_noise) / 2.0

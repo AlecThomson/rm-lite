@@ -467,6 +467,7 @@ def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
     fit = fit_stokes_i_model(
         freq_arr_hz, ref_freq_hz, stokes_i, err, fit_order=2, fit_type="log"
     )
+    assert fit is not None
     model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt))
     np.testing.assert_allclose(model, model[0], rtol=1e-10)  # flat
     np.testing.assert_allclose(model[0], np.mean(stokes_i), rtol=1e-6)
@@ -494,3 +495,89 @@ def test_stokes_i_fit_failure_is_graceful(monkeypatch):
     assert np.isfinite(model).all()
     # Flat fallback everywhere: constant across frequency per pixel.
     assert np.allclose(model, model[:1], rtol=1e-10)
+
+
+def test_stokes_i_descending_frequency_matches_ascending():
+    """A descending frequency axis (negative CDELT3) must give the same ref-flux
+    and alpha as the ascending storage of the same physical data. Guards the
+    np.interp/np.gradient ascending-axis assumption in ref_flux / alpha."""
+    # Curved (order-2) model so a bad interp can't be hidden by a constant slope.
+    cube = _make_cube(alpha=-1.0)
+    ref_freq_hz = float(np.median(cube.freq_arr_hz))
+    curve = 1.0 + 0.3 * np.log10(cube.freq_arr_hz / ref_freq_hz) ** 2
+    model = cube.stokes_i * curve[:, None, None]
+
+    def run(
+        freq: NDArray[np.float64],
+        q: NDArray[np.float64],
+        u: NDArray[np.float64],
+        m: NDArray[np.float64],
+    ) -> Any:
+        return rmsynth_3d(
+            _chunked(q),
+            _chunked(u),
+            freq,
+            stokes_i_model=_chunked(m),
+            d_phi_radm2=D_PHI_RADM2,
+            weight_type="uniform",
+        )
+
+    asc = run(cube.freq_arr_hz, cube.stokes_q, cube.stokes_u, model)
+    # Same physical cube, stored with the frequency axis reversed.
+    desc = run(
+        cube.freq_arr_hz[::-1],
+        cube.stokes_q[::-1],
+        cube.stokes_u[::-1],
+        model[::-1],
+    )
+    np.testing.assert_allclose(
+        _require(desc.stokes_i_ref_flux_map).compute(),
+        _require(asc.stokes_i_ref_flux_map).compute(),
+        rtol=1e-10,
+    )
+    np.testing.assert_allclose(
+        _require(desc.stokes_i_alpha_map).compute(),
+        _require(asc.stokes_i_alpha_map).compute(),
+        rtol=1e-10,
+    )
+
+
+def test_stokes_i_error_numpy_3d_cube():
+    """A per-pixel error passed as a plain NumPy 3D array (not dask) is accepted
+    and fits a finite model. Guards the ndim==3 -> .rechunk() crash path."""
+    cube = _make_cube(alpha=-1.0)
+    err = np.full_like(cube.stokes_i, 1e-3)  # numpy, not dask
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i=_chunked(cube.stokes_i),
+        stokes_i_error=err,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    assert np.isfinite(_require(result.stokes_i_model_cube).compute()).all()
+
+
+def test_stokes_i_model_error_fit_order_zero():
+    """compute_model_error with fit_order=0 (length-1 popt) yields a finite,
+    non-negative error cube. Guards the multivariate_normal.rvs orientation."""
+    cube = _make_cube(alpha=-1.0)
+    i_err = np.full_like(cube.stokes_i, 1e-3)
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i=_chunked(cube.stokes_i),
+        stokes_i_error=_chunked(i_err),
+        fit_order=0,
+        stokes_i_snr_cut=0.0,
+        compute_model_error=True,
+        n_error_samples=100,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    err_cube = _require(result.stokes_i_model_error_cube).compute()
+    assert err_cube.shape == cube.stokes_i.shape
+    assert np.isfinite(err_cube).all()
+    assert (err_cube >= 0).all()

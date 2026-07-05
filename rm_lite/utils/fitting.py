@@ -7,7 +7,7 @@ import sigfig as sf
 from astropy.modeling.models import Gaussian1D
 from astropy.stats import akaike_info_criterion_lsq
 from numpy.typing import ArrayLike, NDArray
-from scipy import optimize
+from scipy import optimize, stats
 
 from rm_lite.utils.logging import logger
 
@@ -348,6 +348,42 @@ def dynamic_fit(
     return fit_results[bestest_aic_idx]
 
 
+def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> float:
+    """Frequency-averaged Stokes I SNR: `mean(I) * sqrt(n) / rms(error)`.
+
+    Averaging `n` channels beats the noise down by `sqrt(n)`, hence the factor.
+    Returns inf when there is no usable noise (all-zero or non-finite error), so
+    an SNR cut becomes a no-op instead of rejecting everything.
+    """
+    n = e_spec.size
+    rms_err = float(np.sqrt(np.mean(e_spec**2))) if n else 0.0
+    if not np.isfinite(rms_err) or rms_err <= 0:
+        return np.inf
+    return float(np.mean(i_spec) * np.sqrt(n) / rms_err)
+
+
+def sample_model_error(
+    fit: FitResult,
+    x_arr: NDArray[np.float64],
+    n_error_samples: int,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Median model and 1-sigma (16th/84th-percentile) error via Monte-Carlo
+    over the fit covariance, evaluated at `x_arr = freq / ref_freq`."""
+    dist = stats.multivariate_normal(
+        mean=np.asarray(fit.popt),
+        cov=np.asarray(fit.pcov),
+        allow_singular=True,
+    )
+    # reshape (not atleast_2d): a length-1 popt gives rvs shape (n,), which must
+    # become (n, 1) rather than (1, n).
+    samples = np.asarray(dist.rvs(n_error_samples)).reshape(n_error_samples, -1)
+    model_samples = np.array([fit.stokes_i_model_func(x_arr, *s) for s in samples])
+    low, median, high = np.nanpercentile(model_samples, [16, 50, 84], axis=0)
+    error = np.abs(high - low)
+    error[error > 1e99] = np.nan  # guard numerical overflow
+    return median, error
+
+
 def fit_stokes_i_model(
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
@@ -355,22 +391,28 @@ def fit_stokes_i_model(
     stokes_i_error_arr: NDArray[np.float64],
     fit_order: int = 2,
     fit_type: Literal["log", "linear"] = "log",
-) -> FitResult:
-    if fit_order < 0:
-        return dynamic_fit(
-            freq_arr_hz,
-            ref_freq_hz,
-            stokes_i_arr,
-            stokes_i_error_arr,
-            abs(fit_order),
-            fit_type,
-        )
+    snr_cut: float | None = None,
+) -> FitResult | None:
+    """Fit a Stokes I spectrum, or return None when it should not be fitted.
 
-    return static_fit(
-        freq_arr_hz,
-        ref_freq_hz,
-        stokes_i_arr,
-        stokes_i_error_arr,
-        fit_order,
-        fit_type,
-    )
+    Masks non-finite channels first, then returns None if too few finite
+    channels remain (`< abs(fit_order) + 2`) or, when `snr_cut` is given, the
+    frequency-averaged SNR is below it -- letting the caller impose a flat model
+    for that spectrum. A fit that cannot converge does not raise: `static_fit`
+    falls back to a flat (mean) model.
+    """
+    good = np.isfinite(stokes_i_arr) & np.isfinite(stokes_i_error_arr)
+    if int(good.sum()) < abs(fit_order) + 2:
+        return None
+    if (
+        snr_cut is not None
+        and stokes_i_snr(stokes_i_arr[good], stokes_i_error_arr[good]) < snr_cut
+    ):
+        return None
+
+    freq_g = freq_arr_hz[good]
+    i_g = stokes_i_arr[good]
+    e_g = stokes_i_error_arr[good]
+    if fit_order < 0:
+        return dynamic_fit(freq_g, ref_freq_hz, i_g, e_g, abs(fit_order), fit_type)
+    return static_fit(freq_g, ref_freq_hz, i_g, e_g, fit_order, fit_type)
