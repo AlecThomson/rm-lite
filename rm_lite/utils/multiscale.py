@@ -584,7 +584,14 @@ def mutliscale_rmclean(
     resid_fdf_arr = dirty_fdf_arr.copy()
 
     # Loop through the pixels containing a polarised signal
-    for yi, xi in tqdm(pixels_to_clean):
+    for yi, xi in tqdm(
+        pixels_to_clean,
+        file=TQDM_OUT,
+        leave=False,
+        # tqdm.auto uses the notebook widget in Jupyter, which ignores `file`
+        # and so escapes quiet_logs; gate on the logger level to actually mute it.
+        disable=not logger.isEnabledFor(logging.INFO),
+    ):
         clean_loop_results = multiscale_cycle(
             scales=scales,
             scale_bias=scale_bias,
