@@ -56,6 +56,7 @@ dev = [
     "ipython",
     "pytest",
     "prek>=0.4.6",
+    "distributed",
 ]
 docs = [
     "sphinx>=7.0",
@@ -67,6 +68,7 @@ docs = [
     "nbsphinx",
     "jupyter",
     "matplotlib",
+    "distributed",
 ]
 
 [tool.hatch]

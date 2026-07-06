@@ -943,6 +943,7 @@ def rmsynth_nufft(
     weight_arr: NDArray[np.float64],
     lam_sq_0_m2: float,
     eps: float = 1e-6,
+    nthreads: int = 0,
 ) -> NDArray[np.complex128]:
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
 
@@ -953,6 +954,9 @@ def rmsynth_nufft(
         weight_arr (NDArray[np.float64]): Weight array
         lam_sq_0_m2 (Optional[float], optional): Reference wavelength^2 in m^2. Defaults to None.
         eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
+        nthreads (int, optional): finufft OpenMP threads. 0 uses finufft's default
+            (all cores). Set to 1 when parallelising across chunks with dask, to
+            avoid oversubscription. Defaults to 0.
 
     Raises:
         ValueError: If the weight and lambda^2 arrays are not the same shape.
@@ -1041,6 +1045,7 @@ def rmsynth_nufft(
             s=(phi_arr_radm2 * 2).astype(exponent.dtype),
             eps=eps,
             isign=-1,
+            nthreads=nthreads,
         )
         * scale_arr[..., None]
     ).T
@@ -1069,6 +1074,7 @@ def inverse_rmsynth_nufft(
     phi_arr_radm2: NDArray[np.float64],
     lam_sq_0_m2: float,
     eps: float = 1e-6,
+    nthreads: int = 0,
 ) -> NDArray[np.complex128]:
     """Inverse RM-synthesis - FDF to Stokes Q and U in wavelength^2 space.
 
@@ -1078,6 +1084,8 @@ def inverse_rmsynth_nufft(
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
         lam_sq_0_m2 (float): Reference wavelength^2 value
         eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
+        nthreads (int, optional): finufft OpenMP threads. 0 uses finufft's default
+            (all cores). Defaults to 0.
 
     Raises:
         ValueError: If the Stokes Q and U data arrays are not the same shape.
@@ -1113,6 +1121,7 @@ def inverse_rmsynth_nufft(
             s=exponent,
             eps=eps,
             isign=1,
+            nthreads=nthreads,
         )
     ).T
 
@@ -1133,6 +1142,7 @@ def get_rmsf_nufft(
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real: bool = False,
     eps: float = 1e-6,
+    nthreads: int = 0,
 ) -> RMSFResults:
     """Compute the RMSF for a given set of lambda^2 values.
 
@@ -1146,6 +1156,9 @@ def get_rmsf_nufft(
         do_fit_rmsf (bool, optional): Fit the RMSF with a Gaussian. Defaults to False.
         do_fit_rmsf_real (bool, optional): Fit the *real* part of the. Defaults to False.
         eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
+        nthreads (int, optional): finufft OpenMP threads. 0 uses finufft's default
+            (all cores). Set to 1 when parallelising across chunks with dask, to
+            avoid oversubscription. Defaults to 0.
 
     Raises:
         ValueError: If the wavelength^2 and weight arrays are not the same shape.
@@ -1214,6 +1227,7 @@ def get_rmsf_nufft(
             c=np.ascontiguousarray(weight_cube.T).astype(complex),
             s=(phi_double_arr_radm2[::-1] * 2).astype(exponent.dtype),
             eps=eps,
+            nthreads=nthreads,
         )
         * scale_factor_arr[..., None]
     ).T
