@@ -15,7 +15,6 @@ from astropy.stats import mad_std
 from numpy.typing import NDArray
 from scipy import ndimage
 from tqdm.auto import trange
-from uncertainties import unumpy
 
 from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
@@ -520,6 +519,24 @@ def get_mask_index(
     )
 
 
+def _fractional_with_error(
+    num: NDArray[np.float64],
+    num_err: NDArray[np.float64],
+    den: NDArray[np.float64],
+    den_err: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Elementwise num/den with independent-error propagation.
+
+    Same closed form `uncertainties` uses, but in numpy so a degenerate model
+    (near-zero denominator, huge covariance) overflows to inf/nan instead of
+    raising OverflowError the way python floats do.
+    """
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        frac = num / den
+        err = np.sqrt((num_err / den) ** 2 + (num * den_err / den**2) ** 2)
+    return frac, err
+
+
 def create_fractional_spectra(
     stokes_data: StokesData,
     ref_freq_hz: float,
@@ -532,15 +549,6 @@ def create_fractional_spectra(
         logger.warning(msg)
         return None
 
-    # Uncertainties doesn't support complex numbers, so we need to split the
-    # Stokes Q and U arrays into real and imaginary parts
-    stokes_q_uarray = unumpy.uarray(
-        stokes_data.complex_pol_arr.real, stokes_data.complex_pol_error.real
-    )
-    stokes_u_uarray = unumpy.uarray(
-        stokes_data.complex_pol_arr.imag, stokes_data.complex_pol_error.imag
-    )
-
     # If a model is provided, use that to calculate the fractional spectra
     if stokes_data.stokes_i_model_arr is not None:
         logger.info("Using provided Stokes I model to calculate fractional spectra.")
@@ -548,18 +556,18 @@ def create_fractional_spectra(
             msg = "If `stokes_i_model_arr` is provided, `stokes_i_model_error` must also be provided."
             raise ValueError(msg)
 
-        stokes_i_model_uarray = unumpy.uarray(
-            stokes_data.stokes_i_model_arr, stokes_data.stokes_i_model_error
+        stokes_q_frac_arr, stokes_q_frac_error_arr = _fractional_with_error(
+            stokes_data.complex_pol_arr.real,
+            stokes_data.complex_pol_error.real,
+            stokes_data.stokes_i_model_arr,
+            stokes_data.stokes_i_model_error,
         )
-
-        frac_q_uarray = stokes_q_uarray / stokes_i_model_uarray
-        frac_u_uarray = stokes_u_uarray / stokes_i_model_uarray
-
-        stokes_q_frac_arr = unumpy.nominal_values(frac_q_uarray)
-        stokes_u_frac_arr = unumpy.nominal_values(frac_u_uarray)
-
-        stokes_q_frac_error_arr = unumpy.std_devs(frac_q_uarray)
-        stokes_u_frac_error_arr = unumpy.std_devs(frac_u_uarray)
+        stokes_u_frac_arr, stokes_u_frac_error_arr = _fractional_with_error(
+            stokes_data.complex_pol_arr.imag,
+            stokes_data.complex_pol_error.imag,
+            stokes_data.stokes_i_model_arr,
+            stokes_data.stokes_i_model_error,
+        )
 
         stokes_qu_frac_arr = stokes_q_frac_arr + 1j * stokes_u_frac_arr
         stokes_qu_frac_error_arr = (
@@ -609,18 +617,18 @@ def create_fractional_spectra(
     stokes_i_model_arr, stokes_i_model_error = sample_model_error(
         fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples
     )
-    stokes_i_model_uarray = unumpy.uarray(
+    stokes_q_frac_arr, stokes_q_frac_error_arr = _fractional_with_error(
+        stokes_data.complex_pol_arr.real,
+        stokes_data.complex_pol_error.real,
         stokes_i_model_arr,
         stokes_i_model_error,
     )
-
-    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_uarray
-    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_uarray
-
-    stokes_q_frac_arr = np.array(unumpy.nominal_values(stokes_q_frac_uarray))
-    stokes_u_frac_arr = np.array(unumpy.nominal_values(stokes_u_frac_uarray))
-    stokes_q_frac_error_arr = np.array(unumpy.std_devs(stokes_q_frac_uarray))
-    stokes_u_frac_error_arr = np.array(unumpy.std_devs(stokes_u_frac_uarray))
+    stokes_u_frac_arr, stokes_u_frac_error_arr = _fractional_with_error(
+        stokes_data.complex_pol_arr.imag,
+        stokes_data.complex_pol_error.imag,
+        stokes_i_model_arr,
+        stokes_i_model_error,
+    )
 
     assert len(stokes_data.stokes_i_arr) == len(stokes_q_frac_arr)
     assert len(stokes_data.stokes_i_arr) == len(stokes_u_frac_arr)
