@@ -396,6 +396,7 @@ def rmsynth_3d(
     stokes_i_snr_cut: float | None = 5.0,
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
+    nufft_nthreads: int = 1,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis on chunked Stokes Q/U cubes.
@@ -439,6 +440,10 @@ def rmsynth_3d(
             Logs a warning about the compute coupling when enabled. Defaults to False.
         n_error_samples (int, optional): Monte-Carlo samples per pixel for
             `compute_model_error`. Defaults to 1000.
+        nufft_nthreads (int, optional): finufft OpenMP threads per chunk. Defaults
+            to 1 so dask parallelises across chunks without oversubscribing finufft's
+            own threads (the fast config on many chunks). Set to 0 (finufft default,
+            all cores) only when computing with few chunks on the synchronous scheduler.
         log_level (int, optional): `rm_lite` logger level while chunks run;
             defaults to WARNING to silence per-chunk noise.
 
@@ -550,6 +555,7 @@ def rmsynth_3d(
                 phi_arr_radm2=rmsynth_params.phi_arr_radm2,
                 weight_arr=rmsynth_params.weight_arr,
                 lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+                nthreads=nufft_nthreads,
             )
         # rmsynth_nufft squeezes size-1 spatial axes; restore the block shape.
         return fdf.reshape(n_phi, cy, cx)
@@ -575,6 +581,7 @@ def rmsynth_3d(
                 lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
                 mask_arr=~np.isfinite(block),
                 do_fit_rmsf=False,
+                nthreads=nufft_nthreads,
             )
         # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is
         # actually complex128 at runtime (built from a finufft complex output).
@@ -621,6 +628,7 @@ def rmsynth_3d_from_fits(
     stokes_i_snr_cut: float | None = 5.0,
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
+    nufft_nthreads: int = 1,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
@@ -657,6 +665,7 @@ def rmsynth_3d_from_fits(
         stokes_i_snr_cut (float | None, optional): See `rmsynth_3d`. Defaults to 5.0.
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
         n_error_samples (int, optional): See `rmsynth_3d`. Defaults to 1000.
+        nufft_nthreads (int, optional): See `rmsynth_3d`. Defaults to 1.
         target_chunk_mb (float, optional): Target per-chunk memory footprint
             in MB, see `read_fits_cube_dask`. Defaults to 256.
         log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
@@ -711,5 +720,6 @@ def rmsynth_3d_from_fits(
         stokes_i_snr_cut=stokes_i_snr_cut,
         compute_model_error=compute_model_error,
         n_error_samples=n_error_samples,
+        nufft_nthreads=nufft_nthreads,
         log_level=log_level,
     )

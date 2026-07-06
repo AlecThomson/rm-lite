@@ -50,12 +50,14 @@ dev = [
     "ruff",
     "pytest",
     "pytest-cov",
+    "pytest-xdist",
     "nox",
     "nbconvert",
     "jupyter",
     "ipython",
     "pytest",
     "prek>=0.4.6",
+    "distributed",
 ]
 docs = [
     "sphinx>=7.0",
@@ -67,6 +69,7 @@ docs = [
     "nbsphinx",
     "jupyter",
     "matplotlib",
+    "distributed",
 ]
 
 [tool.hatch]
@@ -178,7 +181,7 @@ skip = "uv.lock"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config"]
+addopts = ["-ra", "-n", "auto", "--showlocals", "--strict-markers", "--strict-config"]
 xfail_strict = true
 filterwarnings = [
     "error",
