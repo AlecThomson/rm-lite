@@ -83,19 +83,6 @@ class StokesData(NamedTuple):
     stokes_i_model_error: NDArray[np.float64] | None = None
     """ Stokes I model error array """
 
-    def with_options(self, **kwargs: Any) -> StokesData:
-        """Create a new StokesData instance with keywords updated
-
-        Returns:
-            StokesData: New StokesData instance with updated attributes
-        """
-        # TODO: Update the signature to have the actual attributes to
-        # help keep mypy and other linters happy
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return StokesData(**as_dict)
-
 
 class FractionalSpectra(NamedTuple):
     stokes_data: StokesData
@@ -112,19 +99,6 @@ class TheoreticalNoise(NamedTuple):
     """Theoretical noise of the real FDF"""
     fdf_u_noise: float
     """Theoretical noise of the imaginary FDF"""
-
-    def with_options(self, **kwargs: Any) -> TheoreticalNoise:
-        """Create a new TheoreticalNoise instance with keywords updated
-
-        Returns:
-            TheoreticalNoise: New TheoreticalNoise instance with updated attributes
-        """
-        # TODO: Update the signature to have the actual attributes to
-        # help keep mypy and other linters happy
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return TheoreticalNoise(**as_dict)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -592,7 +566,7 @@ def create_fractional_spectra(
             stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
         )
 
-        fractional_stokes_data = stokes_data.with_options(
+        fractional_stokes_data = stokes_data._replace(
             complex_pol_arr=stokes_qu_frac_arr.astype(np.complex128),
             complex_pol_error=stokes_qu_frac_error_arr.astype(np.complex128),
         )
@@ -656,7 +630,7 @@ def create_fractional_spectra(
     complex_pol_arr = stokes_q_frac_arr + 1j * stokes_u_frac_arr
     complex_pol_error = stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
 
-    fractional_stokes_data = stokes_data.with_options(
+    fractional_stokes_data = stokes_data._replace(
         complex_pol_arr=complex_pol_arr,
         complex_pol_error=complex_pol_error,
         stokes_i_model_arr=stokes_i_model_arr,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from dataclasses import dataclass
-from typing import Any, NamedTuple, TypeVar
+from typing import NamedTuple, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -35,12 +35,6 @@ class RMCleanResults(NamedTuple):
     """The number of iterations for each pixel"""
     resid_fdf_arr: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
-
-    def with_options(self, **kwargs: Any) -> RMCleanResults:
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return RMCleanResults(**as_dict)
 
 
 class CleanLoopResults(NamedTuple):
@@ -303,12 +297,6 @@ class MinorLoopArrays(NamedTuple):
     peak_find_arr: NDArray[np.float64] | None = None
     """Peak finding array"""
 
-    def with_options(self, **kwargs: Any) -> MinorLoopArrays:
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return MinorLoopArrays(**as_dict)
-
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class MinorLoopOptions:
@@ -493,7 +481,7 @@ def minor_cycle(
     logger.info("Initial loop complete. Starting deep clean...")
 
     deep_loop_results = minor_loop(
-        minor_loop_arrays=minor_loop_arrays.with_options(
+        minor_loop_arrays=minor_loop_arrays._replace(
             resid_fdf_spectrum_mask=resid_fdf_spectrum_mask
         ),
         minor_loop_options=dataclasses.replace(
