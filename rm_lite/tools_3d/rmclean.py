@@ -1,23 +1,4 @@
-"""RM-CLEAN on chunked 3D FDF/RMSF cubes via dask.
-
-`rm_lite.utils.clean.rmclean` runs a genuinely per-pixel, data-dependent
-Hogbom loop (`_rmclean_nd` loops in Python over every pixel in the block it is
-given) -- it cannot be vectorized into a single array op. The dask-level
-parallelism here comes from calling that per-pixel loop once per spatial
-chunk via `dask.array.map_blocks`.
-
-`rmclean` returns four outputs (clean FDF, model FDF, residual FDF, iteration
-count) from one Hogbom loop per block. A naive per-output `map_blocks` would
-rerun that loop four times per chunk. Instead, each block is run through
-`dask.delayed` exactly once; the four outputs are split out of the same
-delayed call with `dask.delayed` attribute access (each access is a distinct
-delayed node depending on the same shared computation, so the scheduler runs
-the block once and reuses the result for all four), then reassembled into
-full cubes with `dask.array.from_delayed` + `dask.array.block`. This also
-avoids the in-place-shared-array-mutation pattern that silently returns all
-zeros for the iteration-count map under multiprocessing -- every output here
-flows through the task graph instead of a mutated shared array.
-"""
+"""RM-CLEAN on chunked 3D FDF/RMSF cubes via dask."""
 
 from __future__ import annotations
 
@@ -30,7 +11,7 @@ from dask.delayed import delayed
 from numpy.typing import NDArray
 
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults
-from rm_lite.utils.clean import rmclean
+from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, _rmclean_nd
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import calc_faraday_moments
 
@@ -68,23 +49,19 @@ def _clean_block(
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
-    mask: float,
-    threshold: float,
-    max_iter: int,
-    gain: float,
+    clean_options: RMCleanOptions,
     log_level: int,
 ) -> _RMCleanBlockResult:
     with quiet_logs(log_level):
-        result = rmclean(
-            dirty_fdf_arr=dirty_fdf_block,
-            phi_arr_radm2=phi_arr_radm2,
-            rmsf_arr=rmsf_block,
-            phi_double_arr_radm2=phi_double_arr_radm2,
-            fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
-            mask=mask,
-            threshold=threshold,
-            max_iter=max_iter,
-            gain=gain,
+        result = _rmclean_nd(
+            RMSynthArrays(
+                dirty_fdf_arr=dirty_fdf_block,
+                phi_arr_radm2=phi_arr_radm2,
+                rmsf_arr=rmsf_block,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
+            ),
+            clean_options,
         )
     return _RMCleanBlockResult(
         clean_fdf=result.clean_fdf_arr,
@@ -121,8 +98,8 @@ def rmclean_3d(
             values in rad/m^2, for the RMSF.
         fwhm_rmsf_radm2 (float): RMSF FWHM, shared by every pixel (3D RM-CLEAN
             here does not support a per-pixel FWHM map).
-        mask (float): Masking threshold -- pixels below this value are not cleaned.
-        threshold (float): Cleaning threshold -- stop when all pixels are below this value.
+        mask (float): Masking threshold. Pixels below this value are not cleaned.
+        threshold (float): Cleaning threshold. Stop when all pixels are below this value.
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
         moment_threshold (float | None, optional): Amplitude cut (in FDF
@@ -132,7 +109,7 @@ def rmclean_3d(
         log_level (int, optional): Log level applied to `rm_lite`'s logger while
             each chunk runs. `rmclean`'s Hogbom loop logs at INFO and WARNING
             per pixel (e.g. "Starting minor loop...", "All channels masked...
-            performed N iterations") -- these are routine per-pixel loop
+            performed N iterations"). These are routine per-pixel loop
             termination conditions, not anomalies, and at cube scale they're
             just noise, so this defaults to ERROR (silencing both). Pass
             `logging.WARNING` or `logging.INFO` to restore progressively more
@@ -145,6 +122,13 @@ def rmclean_3d(
     if fdf_dirty_cube.chunks[1:] != rmsf_cube.chunks[1:]:
         msg = "fdf_dirty_cube and rmsf_cube must have identical spatial chunking."
         raise ValueError(msg)
+
+    clean_options = RMCleanOptions(
+        mask=mask,
+        threshold=threshold,
+        max_iter=max_iter,
+        gain=gain,
+    )
 
     n_phi = fdf_dirty_cube.shape[0]
     spatial_chunks = fdf_dirty_cube.chunks[1:]
@@ -169,10 +153,7 @@ def rmclean_3d(
             phi_arr_radm2,
             phi_double_arr_radm2,
             fwhm_rmsf_radm2,
-            mask,
-            threshold,
-            max_iter,
-            gain,
+            clean_options,
             log_level,
         )
 
@@ -220,13 +201,12 @@ def rmclean_3d_from_synth(
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
 
     Convenience wrapper that unpacks an `RMSynth3DResults` into `rmclean_3d`,
-    mirroring `rm_lite.tools_1d.rmclean.run_rmclean_from_synth`. `mask`/
+    mirroring `rm_lite.tools_1d.rmclean.run_rmclean_from_synth`. `mask` and
     `threshold` are scaled from `rm_synth_3d_results.theoretical_noise`, the
-    same way the 1D version scales from its per-pixel theoretical noise --
-    except 3D RM-synthesis only carries a per-channel (not per-pixel) noise
-    estimate (see `rm_lite.utils.dask_io.estimate_channel_noise_mad`), so the
-    resulting `mask`/`threshold` are uniform across the cube rather than
-    per-pixel.
+    same way the 1D version scales from its per-pixel theoretical noise. 3D
+    RM-synthesis only carries a per-channel (not per-pixel) noise estimate (see
+    `rm_lite.utils.dask_io.estimate_channel_noise_mad`), so the resulting `mask`
+    and `threshold` are uniform across the cube rather than per-pixel.
 
     Args:
         rm_synth_3d_results (RMSynth3DResults): Results from `rmsynth_3d`.

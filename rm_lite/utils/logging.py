@@ -98,8 +98,8 @@ def quiet_logs(level: int = logging.WARNING) -> Iterator[None]:
     """Temporarily raise the rm-lite logger's level to at least `level`.
 
     Reentrant and thread-safe: concurrent callers (e.g. dask workers running
-    one call per chunk, possibly requesting different levels -- `rmsynth_3d`
-    defaults to WARNING, `rmclean_3d` to ERROR) share a multiset of active
+    one call per chunk, possibly requesting different levels, e.g. `rmsynth_3d`
+    defaults to WARNING and `rmclean_3d` to ERROR) share a multiset of active
     requested levels. The logger's level is always the max (most restrictive)
     of whatever's currently active, recomputed on every entry/exit, and only
     restored to its original value once every caller has exited. Tracking a

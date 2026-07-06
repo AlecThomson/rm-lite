@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, TypeVar, cast
 
 import finufft
@@ -12,17 +13,18 @@ import polars as pl
 from astropy.constants import c as speed_of_light
 from astropy.stats import mad_std
 from numpy.typing import NDArray
-from scipy import ndimage, stats
+from scipy import ndimage
 from tqdm.auto import trange
-from uncertainties import unumpy
 
 from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
     FitResult,
+    StokesIFitOptions,
     fit_fdf,
     fit_rmsf,
     fit_stokes_i_model,
     gaussian_integrand,
+    sample_model_error,
 )
 from rm_lite.utils.logging import logger
 
@@ -80,19 +82,6 @@ class StokesData(NamedTuple):
     stokes_i_model_error: NDArray[np.float64] | None = None
     """ Stokes I model error array """
 
-    def with_options(self, **kwargs: Any) -> StokesData:
-        """Create a new StokesData instance with keywords updated
-
-        Returns:
-            StokesData: New StokesData instance with updated attributes
-        """
-        # TODO: Update the signature to have the actual attributes to
-        # help keep mypy and other linters happy
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return StokesData(**as_dict)
-
 
 class FractionalSpectra(NamedTuple):
     stokes_data: StokesData
@@ -110,22 +99,10 @@ class TheoreticalNoise(NamedTuple):
     fdf_u_noise: float
     """Theoretical noise of the imaginary FDF"""
 
-    def with_options(self, **kwargs: Any) -> TheoreticalNoise:
-        """Create a new TheoreticalNoise instance with keywords updated
 
-        Returns:
-            TheoreticalNoise: New TheoreticalNoise instance with updated attributes
-        """
-        # TODO: Update the signature to have the actual attributes to
-        # help keep mypy and other linters happy
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return TheoreticalNoise(**as_dict)
-
-
-class FDFOptions(NamedTuple):
-    """Options for RM-synthesis"""
+@dataclass(frozen=True, kw_only=True, slots=True)
+class FDFOptions:
+    """Options for RM-synthesis, shared by the 1D and 3D tools"""
 
     phi_max_radm2: float | None = None
     """ Maximum Faraday depth """
@@ -139,6 +116,19 @@ class FDFOptions(NamedTuple):
     """ Fit RMSF """
     do_fit_rmsf_real: bool = False
     """ Fit real part of the RMSF """
+
+    def __post_init__(self) -> None:
+        if self.weight_type not in ("variance", "uniform"):
+            msg = f"weight_type must be 'variance' or 'uniform', got {self.weight_type!r}."
+            raise ValueError(msg)
+        if self.d_phi_radm2 is None and self.n_samples is None:
+            msg = "Either d_phi_radm2 or n_samples must be provided."
+            raise ValueError(msg)
+        for name in ("phi_max_radm2", "d_phi_radm2", "n_samples"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                msg = f"{name} must be positive, got {value}."
+                raise ValueError(msg)
 
 
 def calc_mom2_fdf(
@@ -197,22 +187,19 @@ def calc_faraday_moments(
 ) -> FaradayMoments:
     """Compute the zeroth, first, and second moments of a Faraday depth spectrum.
 
-    The FDF amplitude is assumed to be in units per RMSF (the native scale of
-    RM-synthesis outputs). The zeroth moment is converted to integrated units
-    by dividing the Faraday-depth sum by the RMSF area (a Gaussian of FWHM
-    `fwhm_rmsf_radm2`), so an unresolved component of peak amplitude P yields
-    `mom0 = P`.
+    The FDF amplitude is in units per RMSF (the native RM-synthesis scale). mom0
+    is converted to integrated units by dividing the Faraday-depth sum by the
+    RMSF area (a Gaussian of FWHM `fwhm_rmsf_radm2`), so an unresolved component
+    of peak amplitude P gives `mom0 = P`.
 
-    Complex input is reduced with `np.abs`; real input is used as-is, so
-    signed debiased amplitudes (see `debias_fdf`) integrate without re-folding
-    their noise into a positive floor. With `debias=True` (requires
-    `lam_sq_0_m2` and at least one spatial axis) that debiasing is applied
-    internally, giving unbiased moments without an amplitude threshold.
+    Complex input is reduced with `np.abs`; real input is used as-is, so the
+    signed debiased amplitudes from `debias_fdf` integrate without folding noise
+    into a positive floor. `debias=True` applies that debiasing internally (needs
+    `lam_sq_0_m2` and a spatial axis), giving unbiased moments with no threshold.
 
-    Works on numpy or dask arrays of any dimensionality: the Faraday depth
-    axis is reduced away and all other axes are preserved. `auto_threshold_sigma`
-    and `debias=True` reduce over the Faraday depth axis, so for dask input that
-    axis must be a single chunk.
+    Works on numpy or dask arrays of any dimensionality: the Faraday depth axis
+    is reduced away, the rest preserved. `auto_threshold_sigma` and `debias=True`
+    reduce over the Faraday depth axis, so for dask that axis must be one chunk.
 
     Args:
         complex_fdf_arr (NDArray[np.complex128]): Complex (or real) FDF.
@@ -433,7 +420,7 @@ def debias_fdf(
     is projected onto the filtered-angle direction,
     `P* = U sin(theta_m) + Q cos(theta_m)`. Unlike `abs(fdf)`, the result is
     noise-like (zero-mean Gaussian) in signal-free regions, at the cost of
-    allowing negative values -- summed over Faraday depth (e.g. by
+    allowing negative values. Summed over Faraday depth (e.g. by
     `calc_faraday_moments`) the noise cancels instead of accumulating a
     positive floor.
 
@@ -442,8 +429,8 @@ def debias_fdf(
     `2 psi0 + 2 lam_sq_0 (RM - phi)`. That deterministic ramp is removed
     first, by derotating each spectrum with a per-pixel peak Faraday depth
     estimate (the amplitude-weighted centroid of the half-max region about
-    the peak), so only the intrinsic angle `2 psi0` -- assumed spatially
-    smooth -- is filtered.
+    the peak), so only the intrinsic angle `2 psi0`, assumed spatially
+    smooth, is filtered.
     Sightlines with multiple components at very different Faraday depths are
     only derotated for the dominant peak; secondary components lose
     `cos(2 lam_sq_0 dRM)` of amplitude in the projection.
@@ -532,12 +519,28 @@ def get_mask_index(
     )
 
 
+def _fractional_with_error(
+    num: NDArray[np.float64],
+    num_err: NDArray[np.float64],
+    den: NDArray[np.float64],
+    den_err: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Elementwise num/den with independent-error propagation.
+
+    Same closed form `uncertainties` uses, but in numpy so a degenerate model
+    (near-zero denominator, huge covariance) overflows to inf/nan instead of
+    raising OverflowError the way python floats do.
+    """
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        frac = num / den
+        err = np.sqrt((num_err / den) ** 2 + (num * den_err / den**2) ** 2)
+    return frac, err
+
+
 def create_fractional_spectra(
     stokes_data: StokesData,
     ref_freq_hz: float,
-    fit_order: int = 2,
-    fit_function: Literal["log", "linear"] = "log",
-    n_error_samples: int = 10_000,
+    fit_options: StokesIFitOptions,
 ) -> FractionalSpectra | None:
     no_nan_idx = get_mask_index(stokes_data)
 
@@ -546,15 +549,6 @@ def create_fractional_spectra(
         logger.warning(msg)
         return None
 
-    # Uncertainties doesn't support complex numbers, so we need to split the
-    # Stokes Q and U arrays into real and imaginary parts
-    stokes_q_uarray = unumpy.uarray(
-        stokes_data.complex_pol_arr.real, stokes_data.complex_pol_error.real
-    )
-    stokes_u_uarray = unumpy.uarray(
-        stokes_data.complex_pol_arr.imag, stokes_data.complex_pol_error.imag
-    )
-
     # If a model is provided, use that to calculate the fractional spectra
     if stokes_data.stokes_i_model_arr is not None:
         logger.info("Using provided Stokes I model to calculate fractional spectra.")
@@ -562,25 +556,25 @@ def create_fractional_spectra(
             msg = "If `stokes_i_model_arr` is provided, `stokes_i_model_error` must also be provided."
             raise ValueError(msg)
 
-        stokes_i_model_uarray = unumpy.uarray(
-            stokes_data.stokes_i_model_arr, stokes_data.stokes_i_model_error
+        stokes_q_frac_arr, stokes_q_frac_error_arr = _fractional_with_error(
+            stokes_data.complex_pol_arr.real,
+            stokes_data.complex_pol_error.real,
+            stokes_data.stokes_i_model_arr,
+            stokes_data.stokes_i_model_error,
         )
-
-        frac_q_uarray = stokes_q_uarray / stokes_i_model_uarray
-        frac_u_uarray = stokes_u_uarray / stokes_i_model_uarray
-
-        stokes_q_frac_arr = unumpy.nominal_values(frac_q_uarray)
-        stokes_u_frac_arr = unumpy.nominal_values(frac_u_uarray)
-
-        stokes_q_frac_error_arr = unumpy.std_devs(frac_q_uarray)
-        stokes_u_frac_error_arr = unumpy.std_devs(frac_u_uarray)
+        stokes_u_frac_arr, stokes_u_frac_error_arr = _fractional_with_error(
+            stokes_data.complex_pol_arr.imag,
+            stokes_data.complex_pol_error.imag,
+            stokes_data.stokes_i_model_arr,
+            stokes_data.stokes_i_model_error,
+        )
 
         stokes_qu_frac_arr = stokes_q_frac_arr + 1j * stokes_u_frac_arr
         stokes_qu_frac_error_arr = (
             stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
         )
 
-        fractional_stokes_data = stokes_data.with_options(
+        fractional_stokes_data = stokes_data._replace(
             complex_pol_arr=stokes_qu_frac_arr.astype(np.complex128),
             complex_pol_error=stokes_qu_frac_error_arr.astype(np.complex128),
         )
@@ -613,43 +607,28 @@ def create_fractional_spectra(
         ref_freq_hz=ref_freq_hz,
         stokes_i_arr=stokes_data.stokes_i_arr[no_nan_idx],
         stokes_i_error_arr=stokes_data.stokes_i_error_arr[no_nan_idx],
-        fit_order=fit_order,
-        fit_type=fit_function,
+        options=fit_options,
     )
+    if fit_result is None:
+        msg = "Too few finite Stokes I channels to fit; no fractional polarization."
+        logger.warning(msg)
+        return None
 
-    error_distribution = stats.multivariate_normal(
-        mean=np.asarray(fit_result.popt),
-        cov=np.asarray(fit_result.pcov),
-        allow_singular=True,
+    stokes_i_model_arr, stokes_i_model_error = sample_model_error(
+        fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples
     )
-    error_samples = np.array(error_distribution.rvs(n_error_samples))
-
-    model_samples = np.empty((n_error_samples, len(stokes_data.freq_arr_hz)))
-    for i, sample in enumerate(error_samples):
-        if np.isscalar(sample):
-            sample = np.full_like(fit_result.popt, sample)  # noqa: PLW2901
-        model_samples[i] = fit_result.stokes_i_model_func(
-            stokes_data.freq_arr_hz / ref_freq_hz, *sample
-        )
-
-    stokes_i_model_low, stokes_i_model_arr, stokes_i_model_high = np.nanpercentile(
-        model_samples, [16, 50, 84], axis=0
-    )
-    stokes_i_model_error = np.abs(stokes_i_model_high - stokes_i_model_low)
-    # Avoid numerical overflows
-    stokes_i_model_error[stokes_i_model_error > 1e99] = np.nan
-    stokes_i_model_uarray = unumpy.uarray(
+    stokes_q_frac_arr, stokes_q_frac_error_arr = _fractional_with_error(
+        stokes_data.complex_pol_arr.real,
+        stokes_data.complex_pol_error.real,
         stokes_i_model_arr,
         stokes_i_model_error,
     )
-
-    stokes_q_frac_uarray = stokes_q_uarray / stokes_i_model_uarray
-    stokes_u_frac_uarray = stokes_u_uarray / stokes_i_model_uarray
-
-    stokes_q_frac_arr = np.array(unumpy.nominal_values(stokes_q_frac_uarray))
-    stokes_u_frac_arr = np.array(unumpy.nominal_values(stokes_u_frac_uarray))
-    stokes_q_frac_error_arr = np.array(unumpy.std_devs(stokes_q_frac_uarray))
-    stokes_u_frac_error_arr = np.array(unumpy.std_devs(stokes_u_frac_uarray))
+    stokes_u_frac_arr, stokes_u_frac_error_arr = _fractional_with_error(
+        stokes_data.complex_pol_arr.imag,
+        stokes_data.complex_pol_error.imag,
+        stokes_i_model_arr,
+        stokes_i_model_error,
+    )
 
     assert len(stokes_data.stokes_i_arr) == len(stokes_q_frac_arr)
     assert len(stokes_data.stokes_i_arr) == len(stokes_u_frac_arr)
@@ -659,7 +638,7 @@ def create_fractional_spectra(
     complex_pol_arr = stokes_q_frac_arr + 1j * stokes_u_frac_arr
     complex_pol_error = stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
 
-    fractional_stokes_data = stokes_data.with_options(
+    fractional_stokes_data = stokes_data._replace(
         complex_pol_arr=complex_pol_arr,
         complex_pol_error=complex_pol_error,
         stokes_i_model_arr=stokes_i_model_arr,
@@ -843,9 +822,7 @@ def compute_rmsynth_params(
 
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
 
-    fwhm_rmsf_radm2, d_lambda_sq_max_m2, lambda_sq_range_m2 = get_fwhm_rmsf(
-        lambda_sq_arr_m2
-    )
+    fwhm_rmsf_radm2, d_lambda_sq_max_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
 
     if fdf_options.d_phi_radm2 is None and fdf_options.n_samples is not None:
         d_phi_radm2 = fwhm_rmsf_radm2 / fdf_options.n_samples

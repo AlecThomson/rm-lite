@@ -6,8 +6,8 @@ carrying over allocations from a previous configuration in the same process.
 
 Writes output via `write_zarr_group` (lazy, chunk-by-chunk) rather than
 `.compute()`, since `.compute()` always assembles the full result in memory
-regardless of chunk size -- the property under test is that *processing*
-memory (and the write path) is bounded by chunk size, not cube size.
+regardless of chunk size. The property under test is that *processing* memory
+(and the write path) is bounded by chunk size, not cube size.
 """
 
 from __future__ import annotations

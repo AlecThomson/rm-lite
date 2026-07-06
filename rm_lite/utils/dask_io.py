@@ -1,11 +1,4 @@
-"""Dask-backed I/O helpers for chunked 3D RM-synthesis/CLEAN.
-
-Chunking convention used throughout tools_3d: the spectral/Faraday-depth axis
-(axis 0) is always kept whole in a single chunk, since every per-pixel
-RM-synthesis/CLEAN call needs the full spectrum for that pixel. Only the two
-spatial axes are chunked, sized from a target per-chunk memory footprint so
-memory use is bounded by chunk size rather than cube size.
-"""
+"""Dask-backed I/O helpers for chunked 3D RM-synthesis/CLEAN."""
 
 from __future__ import annotations
 
@@ -74,7 +67,7 @@ def _read_fits_block(
     # Reopens the file per block rather than closing over one shared memmap:
     # dask.array.from_array unconditionally does `x = x.copy()` on anything
     # array-like (including a memmap-backed ndarray), and its default
-    # tokenizing hashes the full buffer -- both silently force a full-cube
+    # tokenizing hashes the full buffer. Both silently force a full-cube
     # read into memory. Passing only cheap primitives (path, int bounds) to
     # a `dask.delayed` call sidesteps both.
     y0, y1 = y_bounds
@@ -92,8 +85,8 @@ def read_fits_cube_dask(
 
     Each spatial block is read by its own `dask.delayed` task (reopening the
     file with `memmap=True` and slicing out just that block), assembled into
-    one dask array with `dask.array.from_delayed` + `dask.array.block` --
-    actual reads from disk are deferred until a block is computed.
+    one dask array with `dask.array.from_delayed` + `dask.array.block`. Actual
+    reads from disk are deferred until a block is computed.
 
     Degenerate length-1 axes (e.g. a dummy Stokes axis, common in ASKAP/EMU
     cutout cubes) are squeezed out first.
@@ -163,7 +156,7 @@ def freq_arr_hz_from_header(header: Header, n_freq: int) -> NDArray[np.float64]:
     # Uses the low-level WCS API (`pixel_to_world_values`) rather than the
     # high-level `pixel_to_world`: the latter builds a `SpectralCoord`, which
     # requires a known observer reference frame from `SPECSYS` and raises
-    # `NotImplementedError` if that header keyword is absent -- common in
+    # `NotImplementedError` if that header keyword is absent, common in
     # ASKAP/RACS cutouts. The plain pixel-to-frequency transform needed here
     # doesn't depend on an observer frame at all.
     freq_values = spectral_wcs.pixel_to_world_values(np.arange(n_freq))
@@ -222,6 +215,45 @@ def _channel_mad_std_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
     return mad_std(block.reshape(n_freq_block, -1), axis=1, ignore_nan=True)
 
 
+def _channel_mad_lazy(cube: da.Array) -> da.Array:
+    """Lazy per-channel MAD std over every spatial pixel of a cube.
+
+    Rechunks the spatial axes to one block per channel (a robust median can't
+    be combined incrementally across separate spatial chunks) and reduces each
+    channel plane to a scalar. Not computed -- so several cubes can be reduced
+    in one `compute` call.
+    """
+    full_spatial = cube.rechunk({1: -1, 2: -1})
+    return da.map_blocks(
+        _channel_mad_std_block, full_spatial, drop_axis=(1, 2), dtype=np.float64
+    )
+
+
+def estimate_stokes_i_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
+    """Robust per-channel noise from a single Stokes I cube.
+
+    Same MAD-based per-channel estimator as `estimate_channel_noise_mad`, but
+    for one cube (no Q/U combination). Useful as the `stokes_i_error` fed to
+    `rm_lite.tools_3d.rmsynth.rmsynth_3d`'s per-pixel Stokes I fit when the I
+    cube carries no separate error cube.
+
+    Args:
+        stokes_i (da.Array): Stokes I dask array, shape (n_freq, ny, nx).
+
+    Returns:
+        NDArray[np.float64]: Per-channel noise estimate, shape (n_freq,). A
+        plain numpy array, not lazy.
+    """
+    logger.info(
+        "Rechunking Stokes I to one spatial block per channel for noise estimation."
+    )
+    tick = time.time()
+    (noise,) = compute(_channel_mad_lazy(stokes_i))
+    tock = time.time()
+    logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
+    return np.asarray(noise)
+
+
 def estimate_channel_noise_mad(
     stokes_q: da.Array,
     stokes_u: da.Array,
@@ -237,8 +269,8 @@ def estimate_channel_noise_mad(
     axes to a single block per channel: a robust statistic like the median
     can't be combined incrementally across separate spatial chunks the way a
     sum or mean can, so each channel's full spatial plane has to be brought
-    together to compute it -- the same "per channel, one full image plane at a
-    time" access pattern classic per-channel RMS estimation uses.
+    together to compute it. This is the same "per channel, one full image plane
+    at a time" access pattern classic per-channel RMS estimation uses.
 
     The per-channel noise this returns can be turned into a weight array
     (`weight_arr = 1 / noise**2`) for `rm_lite.tools_3d.rmsynth.rmsynth_3d`,
@@ -253,7 +285,7 @@ def estimate_channel_noise_mad(
 
     Returns:
         NDArray[np.float64]: Per-channel noise estimate, shape (n_freq,). A
-        plain numpy array, not lazy -- computed once, explicitly, here.
+        plain numpy array, not lazy; computed once, explicitly, here.
     """
     if stokes_q.shape != stokes_u.shape:
         msg = f"Stokes Q and U must have the same shape. Got {stokes_q.shape} and {stokes_u.shape}."
@@ -262,18 +294,9 @@ def estimate_channel_noise_mad(
     logger.info(
         "Rechunking Stokes Q/U to one spatial block per channel for noise estimation."
     )
-    q_full_spatial = stokes_q.rechunk({1: -1, 2: -1})
-    u_full_spatial = stokes_u.rechunk({1: -1, 2: -1})
-
     tick = time.time()
-    q_noise, u_noise = compute(
-        da.map_blocks(
-            _channel_mad_std_block, q_full_spatial, drop_axis=(1, 2), dtype=np.float64
-        ),
-        da.map_blocks(
-            _channel_mad_std_block, u_full_spatial, drop_axis=(1, 2), dtype=np.float64
-        ),
-    )
+    # One compute so the Q and U reductions share scheduling.
+    q_noise, u_noise = compute(_channel_mad_lazy(stokes_q), _channel_mad_lazy(stokes_u))
     tock = time.time()
     logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
     return np.abs(q_noise + u_noise) / 2.0
