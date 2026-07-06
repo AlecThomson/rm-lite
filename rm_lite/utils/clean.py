@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
-from typing import Any, NamedTuple, TypeVar
+from dataclasses import dataclass
+from typing import NamedTuple, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -33,12 +35,6 @@ class RMCleanResults(NamedTuple):
     """The number of iterations for each pixel"""
     resid_fdf_arr: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
-
-    def with_options(self, **kwargs: Any) -> RMCleanResults:
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return RMCleanResults(**as_dict)
 
 
 class CleanLoopResults(NamedTuple):
@@ -103,8 +99,9 @@ class RMSynthArrays(NamedTuple):
     """Mask of pixels to clean"""
 
 
-class RMCleanOptions(NamedTuple):
-    """Options for RM-CLEAN"""
+@dataclass(frozen=True, kw_only=True, slots=True)
+class RMCleanOptions:
+    """Options for RM-CLEAN, shared by the 1D and 3D tools"""
 
     mask: float
     """Masking threshold - pixels below this value are not cleaned"""
@@ -114,6 +111,14 @@ class RMCleanOptions(NamedTuple):
     """Maximum clean iterations"""
     gain: float = 0.1
     """Clean loop gain"""
+
+    def __post_init__(self) -> None:
+        if self.max_iter < 1:
+            msg = f"max_iter must be >= 1, got {self.max_iter}."
+            raise ValueError(msg)
+        if not 0 < self.gain <= 1:
+            msg = f"gain must be in (0, 1], got {self.gain}."
+            raise ValueError(msg)
 
 
 def rmclean(
@@ -292,14 +297,9 @@ class MinorLoopArrays(NamedTuple):
     peak_find_arr: NDArray[np.float64] | None = None
     """Peak finding array"""
 
-    def with_options(self, **kwargs: Any) -> MinorLoopArrays:
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
 
-        return MinorLoopArrays(**as_dict)
-
-
-class MinorLoopOptions(NamedTuple):
+@dataclass(frozen=True, kw_only=True, slots=True)
+class MinorLoopOptions:
     """Options for the RM-CLEAN minor loop"""
 
     max_iter: int
@@ -314,12 +314,6 @@ class MinorLoopOptions(NamedTuple):
     """Starting iteration"""
     update_mask: bool = True
     """Update the mask after each iteration"""
-
-    def with_options(self, **kwargs: Any) -> MinorLoopOptions:
-        as_dict = self._asdict()
-        as_dict.update(kwargs)
-
-        return MinorLoopOptions(**as_dict)
 
 
 def minor_loop(
@@ -487,10 +481,11 @@ def minor_cycle(
     logger.info("Initial loop complete. Starting deep clean...")
 
     deep_loop_results = minor_loop(
-        minor_loop_arrays=minor_loop_arrays.with_options(
+        minor_loop_arrays=minor_loop_arrays._replace(
             resid_fdf_spectrum_mask=resid_fdf_spectrum_mask
         ),
-        minor_loop_options=minor_loop_options.with_options(
+        minor_loop_options=dataclasses.replace(
+            minor_loop_options,
             start_iter=initial_loop_results.iter_count,
             update_mask=False,
         ),

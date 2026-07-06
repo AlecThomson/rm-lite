@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.dask_io import estimate_stokes_i_channel_noise
-from rm_lite.utils.fitting import fit_stokes_i_model
+from rm_lite.utils.fitting import StokesIFitOptions, fit_stokes_i_model
 from rm_lite.utils.synthesis import freq_to_lambda2
 from scipy import optimize
 
@@ -324,7 +324,8 @@ def test_estimate_stokes_i_noise_runs():
 
 
 def test_stokes_i_model_error_cube_opt_in():
-    """compute_model_error yields a finite, non-negative error cube; off by default."""
+    """compute_model_error yields a finite, non-negative model-error cube and
+    alpha-error map from the same MC pass; both off (None) by default."""
     cube = _make_cube(alpha=-1.0)
     i_err = np.full_like(cube.stokes_i, 1e-3)
 
@@ -338,6 +339,7 @@ def test_stokes_i_model_error_cube_opt_in():
         weight_type="uniform",
     )
     assert off.stokes_i_model_error_cube is None
+    assert off.stokes_i_alpha_error_map is None
 
     on = rmsynth_3d(
         _chunked(cube.stokes_q),
@@ -354,6 +356,11 @@ def test_stokes_i_model_error_cube_opt_in():
     assert err_cube.shape == cube.stokes_i.shape
     assert np.isfinite(err_cube).all()
     assert (err_cube >= 0).all()
+
+    alpha_err = _require(on.stokes_i_alpha_error_map).compute()
+    assert alpha_err.shape == cube.stokes_i.shape[1:]
+    assert np.isfinite(alpha_err).all()
+    assert (alpha_err >= 0).all()
 
 
 def _cube_with_faint_pixels(faint: list[tuple[int, int]], noise: float = 1e-3):
@@ -417,6 +424,7 @@ def test_stokes_i_snr_cut_falls_back_to_flat_model():
 
     model = _require(result.stokes_i_model_cube).compute()
     alpha = _require(result.stokes_i_alpha_map).compute()
+    order = _require(result.stokes_i_model_order_map).compute()
     fdf = result.fdf_dirty_cube.compute()
     fdf_raw = raw.fdf_dirty_cube.compute()
 
@@ -429,9 +437,15 @@ def test_stokes_i_snr_cut_falls_back_to_flat_model():
         # No spectral correction -> FDF matches the uncorrected Q/U FDF.
         np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
 
-    # Masked (unfitted) pixels have NaN alpha; fitted pixels have finite alpha.
+    # Masked (unfitted) pixels have NaN alpha/order; fitted pixels are finite.
     assert np.isnan(alpha[faint_mask]).all()
     assert np.isfinite(alpha[~faint_mask]).all()
+    assert np.isnan(order[faint_mask]).all()
+    # Fitted-order map holds non-negative integer orders on fitted pixels.
+    fitted_order = order[~faint_mask]
+    assert np.isfinite(fitted_order).all()
+    assert (fitted_order >= 0).all()
+    np.testing.assert_array_equal(fitted_order, np.round(fitted_order))
     # The model cube is never blanked, even for masked pixels.
     assert np.isfinite(model).all()
 
@@ -465,7 +479,11 @@ def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
     err = np.full_like(stokes_i, 0.01)
 
     fit = fit_stokes_i_model(
-        freq_arr_hz, ref_freq_hz, stokes_i, err, fit_order=2, fit_type="log"
+        freq_arr_hz,
+        ref_freq_hz,
+        stokes_i,
+        err,
+        options=StokesIFitOptions(fit_order=2, fit_function="log"),
     )
     assert fit is not None
     model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt))
