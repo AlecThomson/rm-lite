@@ -50,6 +50,7 @@ dev = [
     "ruff",
     "pytest",
     "pytest-cov",
+    "pytest-xdist",
     "nox",
     "nbconvert",
     "jupyter",
@@ -180,7 +181,7 @@ skip = "uv.lock"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config"]
+addopts = ["-ra", "-n", "auto", "--showlocals", "--strict-markers", "--strict-config"]
 xfail_strict = true
 filterwarnings = [
     "error",
