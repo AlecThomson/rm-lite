@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import warnings
+from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, TypeVar, cast
 
 import finufft
@@ -19,6 +20,7 @@ from uncertainties import unumpy
 from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
     FitResult,
+    StokesIFitOptions,
     fit_fdf,
     fit_rmsf,
     fit_stokes_i_model,
@@ -125,8 +127,9 @@ class TheoreticalNoise(NamedTuple):
         return TheoreticalNoise(**as_dict)
 
 
-class FDFOptions(NamedTuple):
-    """Options for RM-synthesis"""
+@dataclass(frozen=True, kw_only=True, slots=True)
+class FDFOptions:
+    """Options for RM-synthesis, shared by the 1D and 3D tools"""
 
     phi_max_radm2: float | None = None
     """ Maximum Faraday depth """
@@ -140,6 +143,19 @@ class FDFOptions(NamedTuple):
     """ Fit RMSF """
     do_fit_rmsf_real: bool = False
     """ Fit real part of the RMSF """
+
+    def __post_init__(self) -> None:
+        if self.weight_type not in ("variance", "uniform"):
+            msg = f"weight_type must be 'variance' or 'uniform', got {self.weight_type!r}."
+            raise ValueError(msg)
+        if self.d_phi_radm2 is None and self.n_samples is None:
+            msg = "Either d_phi_radm2 or n_samples must be provided."
+            raise ValueError(msg)
+        for name in ("phi_max_radm2", "d_phi_radm2", "n_samples"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                msg = f"{name} must be positive, got {value}."
+                raise ValueError(msg)
 
 
 def calc_mom2_fdf(
@@ -533,9 +549,7 @@ def get_mask_index(
 def create_fractional_spectra(
     stokes_data: StokesData,
     ref_freq_hz: float,
-    fit_order: int = 2,
-    fit_function: Literal["log", "linear"] = "log",
-    n_error_samples: int = 10_000,
+    fit_options: StokesIFitOptions,
 ) -> FractionalSpectra | None:
     no_nan_idx = get_mask_index(stokes_data)
 
@@ -611,8 +625,7 @@ def create_fractional_spectra(
         ref_freq_hz=ref_freq_hz,
         stokes_i_arr=stokes_data.stokes_i_arr[no_nan_idx],
         stokes_i_error_arr=stokes_data.stokes_i_error_arr[no_nan_idx],
-        fit_order=fit_order,
-        fit_type=fit_function,
+        options=fit_options,
     )
     if fit_result is None:
         msg = "Too few finite Stokes I channels to fit; no fractional polarization."
@@ -620,7 +633,7 @@ def create_fractional_spectra(
         return None
 
     stokes_i_model_arr, stokes_i_model_error = sample_model_error(
-        fit_result, stokes_data.freq_arr_hz / ref_freq_hz, n_error_samples
+        fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples
     )
     stokes_i_model_uarray = unumpy.uarray(
         stokes_i_model_arr,

@@ -11,7 +11,7 @@ from dask.delayed import delayed
 from numpy.typing import NDArray
 
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults
-from rm_lite.utils.clean import rmclean
+from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, _rmclean_nd
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import calc_faraday_moments
 
@@ -49,23 +49,19 @@ def _clean_block(
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
-    mask: float,
-    threshold: float,
-    max_iter: int,
-    gain: float,
+    clean_options: RMCleanOptions,
     log_level: int,
 ) -> _RMCleanBlockResult:
     with quiet_logs(log_level):
-        result = rmclean(
-            dirty_fdf_arr=dirty_fdf_block,
-            phi_arr_radm2=phi_arr_radm2,
-            rmsf_arr=rmsf_block,
-            phi_double_arr_radm2=phi_double_arr_radm2,
-            fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
-            mask=mask,
-            threshold=threshold,
-            max_iter=max_iter,
-            gain=gain,
+        result = _rmclean_nd(
+            RMSynthArrays(
+                dirty_fdf_arr=dirty_fdf_block,
+                phi_arr_radm2=phi_arr_radm2,
+                rmsf_arr=rmsf_block,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
+            ),
+            clean_options,
         )
     return _RMCleanBlockResult(
         clean_fdf=result.clean_fdf_arr,
@@ -127,6 +123,13 @@ def rmclean_3d(
         msg = "fdf_dirty_cube and rmsf_cube must have identical spatial chunking."
         raise ValueError(msg)
 
+    clean_options = RMCleanOptions(
+        mask=mask,
+        threshold=threshold,
+        max_iter=max_iter,
+        gain=gain,
+    )
+
     n_phi = fdf_dirty_cube.shape[0]
     spatial_chunks = fdf_dirty_cube.chunks[1:]
     numblocks = fdf_dirty_cube.numblocks
@@ -150,10 +153,7 @@ def rmclean_3d(
             phi_arr_radm2,
             phi_double_arr_radm2,
             fwhm_rmsf_radm2,
-            mask,
-            threshold,
-            max_iter,
-            gain,
+            clean_options,
             log_level,
         )
 

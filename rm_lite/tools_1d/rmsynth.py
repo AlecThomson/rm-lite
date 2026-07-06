@@ -10,6 +10,7 @@ import polars as pl
 from numpy.typing import NDArray
 from scipy import interpolate
 
+from rm_lite.utils.fitting import StokesIFitOptions
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FDFOptions,
@@ -129,6 +130,14 @@ def run_rmsynth(
         do_fit_rmsf=do_fit_rmsf,
         do_fit_rmsf_real=do_fit_rmsf_real,
     )
+    # snr_cut=None: the 1D fractional fit has only one spectrum, so an SNR cut
+    # would just silently drop fractional polarisation rather than fall back to
+    # a flat per-pixel model as it does in 3D.
+    fit_options = StokesIFitOptions(
+        fit_order=fit_order,
+        fit_function=fit_function,
+        snr_cut=None,
+    )
 
     if (
         stokes_i_arr is None or stokes_i_error_arr is None
@@ -141,8 +150,7 @@ def run_rmsynth(
     return _run_rmsynth(
         stokes_data=stokes_data,
         fdf_options=fdf_options,
-        fit_function=fit_function,
-        fit_order=fit_order,
+        fit_options=fit_options,
         ignore_stokes_i=ignore_stokes_i,
         moment_threshold_snr=moment_threshold_snr,
     )
@@ -151,8 +159,7 @@ def run_rmsynth(
 def _run_rmsynth(
     stokes_data: StokesData,
     fdf_options: FDFOptions,
-    fit_function: Literal["log", "linear"] = "log",
-    fit_order: int = 2,
+    fit_options: StokesIFitOptions,
     ignore_stokes_i: bool = False,
     moment_threshold_snr: float = 5.0,
 ) -> RMSynth1DResults:
@@ -161,8 +168,9 @@ def _run_rmsynth(
     Args:
         stokes_data (StokesData): Frequency-dependent polarisation data
         fdf_options (FDFOptions): RM-synthesis options
-        fit_function ("log", "linear", optional): Type of function to fit. Defaults to "log".
-        fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
+        fit_options (StokesIFitOptions): Stokes I model fitting options
+        ignore_stokes_i (bool, optional): Skip the fractional-polarisation step. Defaults to False.
+        moment_threshold_snr (float, optional): SNR cut for the Faraday moments. Defaults to 5.0.
 
     Returns:
         RMSynth1DResults:
@@ -184,8 +192,7 @@ def _run_rmsynth(
         fractional_stokes_data = create_fractional_spectra(
             stokes_data=stokes_data,
             ref_freq_hz=lambda2_to_freq(rmsynth_params.lam_sq_0_m2),
-            fit_order=fit_order,
-            fit_function=fit_function,
+            fit_options=fit_options,
         )
         if fractional_stokes_data is not None:
             stokes_data = fractional_stokes_data.stokes_data
@@ -268,7 +275,7 @@ def _run_rmsynth(
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
         stokes_i_reference_flux=stokes_i_reference_flux,
         theoretical_noise=theoretical_noise,
-        fit_function=fit_function,
+        fit_function=fit_options.fit_function,
         moment_threshold_snr=moment_threshold_snr,
     )
     rmsyth_arrs = rmsyth_arrs_schema_df.vstack(
