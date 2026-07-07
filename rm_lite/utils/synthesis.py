@@ -818,23 +818,67 @@ def compute_rmsf_params(
     )
 
 
-def _lambda_sq_density(
+def _lambda_sq_spacing(
     lambda_sq_arr_m2: NDArray[np.float64],
+    natural_weight_arr: NDArray[np.float64],
     cell_m2: float,
 ) -> NDArray[np.float64]:
-    """Local lambda^2 sampling density per channel: the number of channels within
-    a gridding cell (+/- cell_m2/2) of each channel.
+    """Smooth local lambda^2 sampling interval per channel.
 
-    This is a grid-origin-independent gridded density (a sliding cell rather than
-    fixed bins). Dividing by it compensates the sampling like interferometric
-    gridded weighting, and unlike a raw nearest-neighbour spacing it does not
-    hand runaway weight to a channel bordering a large gap: that channel simply
-    has few neighbours in its own cell, not a cell that spans the empty gap.
+    Start from the nearest-neighbour interval (the smaller of a channel's two
+    neighbour gaps, capped at cell_m2), over the sampled channels only. Using the
+    smaller gap makes it gap-blind: a channel bordering a gap takes its in-band
+    spacing, not the empty span, so a gap never up-weights its edges, and there is
+    no fixed grid to alias against (the aliasing spikes of equal-width bins).
+    Then smooth the interval along lambda^2 with a Gaussian (bandwidth
+    2 * cell_m2, reflected at the band ends). The bandwidth is a few cells so the
+    weight is a smooth, continuous function of lambda^2 across sub-band gaps: each
+    sub-band does not restart at its own dense-edge spacing (a jump/rescale at
+    every gap), it follows the overall trend. It is not so wide as to flatten the
+    trend away.
     """
-    ordered = np.sort(lambda_sq_arr_m2)
-    lo = np.searchsorted(ordered, lambda_sq_arr_m2 - cell_m2 / 2.0, side="left")
-    hi = np.searchsorted(ordered, lambda_sq_arr_m2 + cell_m2 / 2.0, side="right")
-    return (hi - lo).astype(np.float64)
+    good = natural_weight_arr > 0
+    if lambda_sq_arr_m2.size < 2 or good.sum() < 2:
+        return np.full_like(lambda_sq_arr_m2, cell_m2)
+    pts = np.sort(lambda_sq_arr_m2[good])
+    d = np.diff(pts)
+    left = np.empty_like(pts)
+    right = np.empty_like(pts)
+    left[1:] = d
+    left[0] = d[0]
+    right[:-1] = d
+    right[-1] = d[-1]
+    spacing = np.minimum(np.minimum(left, right), cell_m2)
+    # Gaussian smoothing along lambda^2, reflected about both band ends
+    bandwidth = 2.0 * cell_m2
+    lo, hi = float(pts[0]), float(pts[-1])
+    src = np.concatenate([pts, 2.0 * lo - pts, 2.0 * hi - pts])
+    src_spacing = np.concatenate([spacing, spacing, spacing])
+    out = np.empty_like(lambda_sq_arr_m2)
+    # ponytail: O(n^2) pairwise in chunks; fine for channel counts, revisit past ~1e5
+    chunk = 2048
+    for start in range(0, lambda_sq_arr_m2.size, chunk):
+        block = lambda_sq_arr_m2[start : start + chunk]
+        w = np.exp(
+            -0.5 * ((block[:, np.newaxis] - src[np.newaxis, :]) / bandwidth) ** 2
+        )
+        out[start : start + chunk] = (w @ src_spacing) / w.sum(axis=1)
+    return out
+
+
+def _lambda_sq_density(
+    lambda_sq_arr_m2: NDArray[np.float64],
+    natural_weight_arr: NDArray[np.float64],
+    cell_m2: float,
+) -> NDArray[np.float64]:
+    """Local lambda^2 sampling density = natural weight over the smooth local
+    sampling interval (`_lambda_sq_spacing`). `uniform_lsq` divides it back out
+    (natural / density = the interval), weighting each channel by the lambda^2 it
+    samples, independent of per-channel noise; `briggs` blends it with the
+    natural weight via `robust`."""
+    return natural_weight_arr / _lambda_sq_spacing(
+        lambda_sq_arr_m2, natural_weight_arr, cell_m2
+    )
 
 
 def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -846,19 +890,24 @@ def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
 
 def uniform_lsq_weight(
     lambda_sq_arr_m2: NDArray[np.float64],
-    real_qu_error: NDArray[np.float64],
+    natural_weight_arr: NDArray[np.float64],
     cell_m2: float,
 ) -> NDArray[np.float64]:
-    """Uniform-in-lambda^2 weights: natural weights divided by the local lambda^2
-    sampling density (channels per `cell_m2`), so each populated lambda^2 cell
-    contributes equally. Narrows the RMSF main lobe (interferometric uniform
-    weighting) and stays robust across large gaps."""
-    return natural_weight(real_qu_error) / _lambda_sq_density(lambda_sq_arr_m2, cell_m2)
+    """Uniform-in-lambda^2 weights: natural weights divided by the local
+    natural-weighted lambda^2 sampling density, which reduces to weighting each
+    channel by the lambda^2 interval it samples (noise cancels), so equal
+    lambda^2 coverage contributes equally regardless of per-channel noise.
+    Narrows the RMSF main lobe (interferometric uniform weighting) and stays
+    robust across large gaps."""
+    density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
+    weight = np.zeros_like(natural_weight_arr)
+    np.divide(natural_weight_arr, density, out=weight, where=density > 0)
+    return weight
 
 
 def briggs_weight(
     lambda_sq_arr_m2: NDArray[np.float64],
-    real_qu_error: NDArray[np.float64],
+    natural_weight_arr: NDArray[np.float64],
     robust: float,
     cell_m2: float,
 ) -> NDArray[np.float64]:
@@ -866,11 +915,12 @@ def briggs_weight(
     uniform-in-lambda^2 (robust -> -inf). The `f^2` factor is normalised by the
     natural-weighted mean sampling density (CASA convention) so `robust` is
     comparable across datasets with different channel counts."""
-    nat_weight = natural_weight(real_qu_error)
-    density = _lambda_sq_density(lambda_sq_arr_m2, cell_m2)
-    mean_density = float(np.sum(nat_weight * density) / np.sum(nat_weight))
+    density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
+    mean_density = float(
+        np.sum(natural_weight_arr * density) / np.sum(natural_weight_arr)
+    )
     f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
-    weight: NDArray[np.float64] = nat_weight / (1.0 + density * f_sq)
+    weight: NDArray[np.float64] = natural_weight_arr / (1.0 + density * f_sq)
     return weight
 
 
@@ -928,22 +978,28 @@ def compute_rmsynth_params(
     cell_m2 = float(np.sqrt(3.0) / phi_max_radm2)
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
+    # Zero flagged channels before the density-based weights so they do not
+    # inflate their neighbours' sampling density.
+    mask = ~np.isfinite(complex_pol_arr)
+    natural_weight_arr = natural_weight(real_qu_error)
+    natural_weight_arr[mask] = 0.0
     match fdf_options.weight_type:
         case "variance" | "natural":
-            weight_arr = natural_weight(real_qu_error)
+            weight_arr = natural_weight_arr
         case "uniform":
             weight_arr = np.ones_like(freq_arr_hz)
         case "uniform_lsq":
-            weight_arr = uniform_lsq_weight(lambda_sq_arr_m2, real_qu_error, cell_m2)
+            weight_arr = uniform_lsq_weight(
+                lambda_sq_arr_m2, natural_weight_arr, cell_m2
+            )
         case "briggs":
             if fdf_options.robust is None:
                 msg = "Briggs weighting requires a `robust` parameter."
                 raise ValueError(msg)
             weight_arr = briggs_weight(
-                lambda_sq_arr_m2, real_qu_error, fdf_options.robust, cell_m2
+                lambda_sq_arr_m2, natural_weight_arr, fdf_options.robust, cell_m2
             )
 
-    mask = ~np.isfinite(complex_pol_arr)
     weight_arr[mask] = 0.0
 
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
