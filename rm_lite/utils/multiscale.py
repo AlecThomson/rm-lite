@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -24,7 +24,7 @@ from rm_lite.utils.synthesis import compute_rmsf_params
 
 TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
 
-KernelType = Literal["tapered_quad", "gaussian"]
+KernelType: TypeAlias = Literal["tapered_quad", "gaussian"]
 
 # Bail out of a spectrum's major loop if the residual peak exceeds this factor
 # times the best (lowest) peak seen: a runaway-divergence backstop.
