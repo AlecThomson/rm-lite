@@ -57,7 +57,9 @@ class MultiscaleOptions:
             msg = f"gain must be in (0, 1], got {self.gain}."
             raise ValueError(msg)
         if not 0 < self.sub_minor_fraction < 1:
-            msg = f"sub_minor_fraction must be in (0, 1), got {self.sub_minor_fraction}."
+            msg = (
+                f"sub_minor_fraction must be in (0, 1), got {self.sub_minor_fraction}."
+            )
             raise ValueError(msg)
         if self.max_iter < 1 or self.max_iter_sub_minor < 1:
             msg = "max_iter and max_iter_sub_minor must be >= 1."
@@ -176,9 +178,7 @@ def convolve_fdf_scale(
     d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
     n = len(fdf_arr)
     kernel_grid = (np.arange(n) - n // 2) * d_phi
-    kernel_arr = kernel_func(
-        kernel_grid, scale, fwhm, sum_normalised=sum_normalised
-    )
+    kernel_arr = kernel_func(kernel_grid, scale, fwhm, sum_normalised=sum_normalised)
 
     mode = "reflect"
     if np.iscomplexobj(fdf_arr):
@@ -217,7 +217,7 @@ def _reconvolve_model(
 class _ScaleKernels:
     """Precomputed per-scale kernels/couplings for one spectrum."""
 
-    __slots__ = ("gamma", "fwhm_ss", "p_s", "p_ss", "scales")
+    __slots__ = ("fwhm_ss", "gamma", "p_s", "p_ss", "scales")
 
     def __init__(
         self,
@@ -319,8 +319,12 @@ def multiscale_clean_spectrum(
             break
 
         scale_index = find_significant_scale(
-            resid_fdf_spectrum, kernels, options.scale_bias, rmsf_fwhm,
-            phi_double_arr_radm2, options.kernel,
+            resid_fdf_spectrum,
+            kernels,
+            options.scale_bias,
+            rmsf_fwhm,
+            phi_double_arr_radm2,
+            options.kernel,
         )
         scale = float(scales[scale_index])
         gamma = float(kernels.gamma[scale_index])
@@ -328,7 +332,10 @@ def multiscale_clean_spectrum(
         # Scale-convolved residual; sub-minor cleans in this space.
         resid_conv = np.asarray(
             convolve_fdf_scale(
-                scale, rmsf_fwhm, resid_fdf_spectrum, phi_double_arr_radm2,
+                scale,
+                rmsf_fwhm,
+                resid_fdf_spectrum,
+                phi_double_arr_radm2,
                 options.kernel,
             ),
             dtype=np.complex128,
