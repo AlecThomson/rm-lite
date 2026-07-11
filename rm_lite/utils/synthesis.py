@@ -818,67 +818,30 @@ def compute_rmsf_params(
     )
 
 
-def _lambda_sq_spacing(
-    lambda_sq_arr_m2: NDArray[np.float64],
-    natural_weight_arr: NDArray[np.float64],
-    cell_m2: float,
-) -> NDArray[np.float64]:
-    """Smooth local lambda^2 sampling interval per channel.
-
-    Start from the nearest-neighbour interval (the smaller of a channel's two
-    neighbour gaps, capped at cell_m2), over the sampled channels only. Using the
-    smaller gap makes it gap-blind: a channel bordering a gap takes its in-band
-    spacing, not the empty span, so a gap never up-weights its edges, and there is
-    no fixed grid to alias against (the aliasing spikes of equal-width bins).
-    Then smooth the interval along lambda^2 with a Gaussian (bandwidth
-    2 * cell_m2, reflected at the band ends). The bandwidth is a few cells so the
-    weight is a smooth, continuous function of lambda^2 across sub-band gaps: each
-    sub-band does not restart at its own dense-edge spacing (a jump/rescale at
-    every gap), it follows the overall trend. It is not so wide as to flatten the
-    trend away.
-    """
-    good = natural_weight_arr > 0
-    if lambda_sq_arr_m2.size < 2 or good.sum() < 2:
-        return np.full_like(lambda_sq_arr_m2, cell_m2)
-    pts = np.sort(lambda_sq_arr_m2[good])
-    d = np.diff(pts)
-    left = np.empty_like(pts)
-    right = np.empty_like(pts)
-    left[1:] = d
-    left[0] = d[0]
-    right[:-1] = d
-    right[-1] = d[-1]
-    spacing = np.minimum(np.minimum(left, right), cell_m2)
-    # Gaussian smoothing along lambda^2, reflected about both band ends
-    bandwidth = 2.0 * cell_m2
-    lo, hi = float(pts[0]), float(pts[-1])
-    src = np.concatenate([pts, 2.0 * lo - pts, 2.0 * hi - pts])
-    src_spacing = np.concatenate([spacing, spacing, spacing])
-    out = np.empty_like(lambda_sq_arr_m2)
-    # ponytail: O(n^2) pairwise in chunks; fine for channel counts, revisit past ~1e5
-    chunk = 2048
-    for start in range(0, lambda_sq_arr_m2.size, chunk):
-        block = lambda_sq_arr_m2[start : start + chunk]
-        w = np.exp(
-            -0.5 * ((block[:, np.newaxis] - src[np.newaxis, :]) / bandwidth) ** 2
-        )
-        out[start : start + chunk] = (w @ src_spacing) / w.sum(axis=1)
-    return out
-
-
 def _lambda_sq_density(
     lambda_sq_arr_m2: NDArray[np.float64],
     natural_weight_arr: NDArray[np.float64],
     cell_m2: float,
 ) -> NDArray[np.float64]:
-    """Local lambda^2 sampling density = natural weight over the smooth local
-    sampling interval (`_lambda_sq_spacing`). `uniform_lsq` divides it back out
-    (natural / density = the interval), weighting each channel by the lambda^2 it
-    samples, independent of per-channel noise; `briggs` blends it with the
-    natural weight via `robust`."""
-    return natural_weight_arr / _lambda_sq_spacing(
-        lambda_sq_arr_m2, natural_weight_arr, cell_m2
-    )
+    """Local lambda^2 sampling density on a virtual grid of cells width cell_m2:
+    the total natural weight in each channel's cell, over the cell width.
+    Channels sharing a cell share one density, so uniform_lsq (natural/density)
+    gives them equal weight and no single channel jumps within a cell; each
+    occupied cell then contributes equally (interferometric uniform weighting).
+    briggs blends it with the natural weight via robust. The density steps where
+    the true sampling density changes (gaps, channelisation changes); this is
+    correct inverse-density weighting, not aliasing. Flagged channels (zero
+    natural weight) get zero density."""
+    density = np.zeros_like(lambda_sq_arr_m2)
+    good = natural_weight_arr > 0
+    if not good.any():
+        return density
+    origin = float(lambda_sq_arr_m2[good].min())
+    cell_idx = np.floor((lambda_sq_arr_m2[good] - origin) / cell_m2).astype(np.int64)
+    occupancy = np.zeros(int(cell_idx.max()) + 1)
+    np.add.at(occupancy, cell_idx, natural_weight_arr[good])
+    density[good] = occupancy[cell_idx] / cell_m2
+    return density
 
 
 def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -893,12 +856,12 @@ def uniform_lsq_weight(
     natural_weight_arr: NDArray[np.float64],
     cell_m2: float,
 ) -> NDArray[np.float64]:
-    """Uniform-in-lambda^2 weights: natural weights divided by the local
-    natural-weighted lambda^2 sampling density, which reduces to weighting each
-    channel by the lambda^2 interval it samples (noise cancels), so equal
-    lambda^2 coverage contributes equally regardless of per-channel noise.
-    Narrows the RMSF main lobe (interferometric uniform weighting) and stays
-    robust across large gaps."""
+    """Uniform-in-lambda^2 weights: natural weights divided by the virtual-grid
+    lambda^2 sampling density, so each occupied cell contributes equally
+    regardless of how densely it is sampled, and channels sharing a cell get
+    equal weight. This is interferometric uniform weighting on the lambda^2 grid;
+    it narrows the RMSF main lobe. The density (and hence the weight) steps where
+    the true sampling density changes (gaps, channelisation)."""
     density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
     weight = np.zeros_like(natural_weight_arr)
     np.divide(natural_weight_arr, density, out=weight, where=density > 0)

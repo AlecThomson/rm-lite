@@ -1,5 +1,5 @@
-"""Interferometric weighting: natural/uniform_lsq/briggs from the local lambda^2
-sampling interval (smoothed nearest-neighbour spacing)."""
+"""Interferometric weighting: natural/uniform_lsq/briggs from per-cell occupancy
+on a virtual lambda^2 grid (inverse local density, no smoothing)."""
 
 from __future__ import annotations
 
@@ -82,43 +82,32 @@ def test_uniform_lsq_noise_independent() -> None:
     assert weight[:20].sum() == pytest.approx(weight[20:].sum(), rel=1e-6)
 
 
-def test_uniform_lsq_no_aliasing_spikes() -> None:
-    # Using the actual neighbour spacing (no fixed grid) means nothing to alias
-    # against, so on a filled band adjacent channels never jump -- unlike
-    # equal-width bins, which spike ~2x where a bin catches fewer channels than
-    # its neighbour (worst at the sparse end where spacing approaches the cell).
+def test_uniform_lsq_uniform_within_cell() -> None:
+    # Core grid guarantee: channels sharing a virtual cell get identical weight
+    # (for equal natural weight), so no single channel jumps within a cell. Jumps
+    # only happen between cells; that is genuine sampling density, not aliasing.
     lam2 = np.sort(freq_to_lambda2(np.linspace(700e6, 1800e6, 100)))
     weight = uniform_lsq_weight(lam2, np.ones_like(lam2), CELL_M2)
-    adjacent = np.maximum(weight[1:], weight[:-1]) / np.minimum(weight[1:], weight[:-1])
-    assert adjacent.max() < 1.1
+    cell_idx = np.floor((lam2 - lam2.min()) / CELL_M2).astype(int)
+    for c in np.unique(cell_idx):
+        in_cell = weight[cell_idx == c]
+        np.testing.assert_allclose(in_cell, in_cell[0], rtol=1e-12)
 
 
-def test_uniform_lsq_no_gap_rescale() -> None:
-    # Across a sub-band gap the weight must not reset/jump: the smoothing bandwidth
-    # (a few cells) bridges the gap so the weight is a continuous function of
-    # lambda^2, not a per-sub-band restart at each dense edge. Checked as: no
-    # adjacent jump anywhere, while a real overall trend (dynamic range) remains.
-    lam2 = np.sort(
-        freq_to_lambda2(
-            np.concatenate(
-                [
-                    np.linspace(800e6, 1088e6, 36),
-                    np.linspace(1296e6, 1440e6, 9),
-                    np.linspace(1512e6, 1800e6, 9),
-                ]
-            )
-        )
-    )
+def test_uniform_lsq_equal_per_cell() -> None:
+    # Defining property of uniform weighting: each occupied cell contributes equal
+    # total weight (flat noise), regardless of how many channels fall in it.
+    lam2 = np.sort(freq_to_lambda2(np.linspace(700e6, 1800e6, 200)))
     weight = uniform_lsq_weight(lam2, np.ones_like(lam2), CELL_M2)
-    adjacent = np.maximum(weight[1:], weight[:-1]) / np.minimum(weight[1:], weight[:-1])
-    assert adjacent.max() < 1.15  # continuous across gaps, no reset jump
-    assert weight.max() / weight.min() > 1.8  # overall trend retained
+    cell_idx = np.floor((lam2 - lam2.min()) / CELL_M2).astype(int)
+    totals = np.array([weight[cell_idx == c].sum() for c in np.unique(cell_idx)])
+    np.testing.assert_allclose(totals, totals[0], rtol=1e-12)
 
 
-def test_uniform_lsq_gap_no_new_spike() -> None:
-    # Punching an interior gap introduces no weight larger than the sparse
-    # band-end already has, and channels far from it are essentially unchanged
-    # (the smoothing bandwidth spreads the gap's influence only a couple of cells).
+def test_uniform_lsq_gap_bounded_and_local() -> None:
+    # Punching an interior gap only affects the cells at the gap edges (occupancy
+    # is per cell): a lone-channel cell is the weight ceiling (cell_m2 for flat
+    # noise), and channels far from the gap keep their cell weight unchanged.
     freq = np.linspace(700e6, 1800e6, 300)
     keep = ~((freq > 1000e6) & (freq < 1300e6))  # punch a wide interior gap
     lam2 = freq_to_lambda2(freq)
@@ -126,9 +115,9 @@ def test_uniform_lsq_gap_no_new_spike() -> None:
     weight_full = uniform_lsq_weight(lam2, np.ones_like(lam2), CELL_M2)
     weight_gap = uniform_lsq_weight(lam2[keep], np.ones_like(lam2[keep]), CELL_M2)
 
-    assert weight_gap.max() <= weight_full.max() * 1.05
+    assert weight_gap.max() <= CELL_M2  # lone-channel cell is the ceiling
     far = np.r_[np.arange(30), np.arange(len(weight_gap) - 30, len(weight_gap))]
-    np.testing.assert_allclose(weight_gap[far], weight_full[keep][far], rtol=3e-2)
+    np.testing.assert_allclose(weight_gap[far], weight_full[keep][far], rtol=1e-12)
 
 
 def test_uniform_lsq_robust_to_gaps() -> None:
@@ -145,9 +134,9 @@ def test_uniform_lsq_robust_to_gaps() -> None:
 
 
 def test_flagged_channels_zeroed_neighbours_not_spiked() -> None:
-    # NaN-flagged channels get zero weight and drop out of the spacing, so a
-    # channel bordering the flagged block takes its in-band spacing and is
-    # up-weighted only modestly, never a runaway spike.
+    # NaN-flagged channels get zero natural weight and drop out of the occupancy,
+    # so a channel bordering the flagged block is up-weighted only modestly
+    # (its cell just has fewer channels), never a runaway spike.
     pol = np.ones_like(FREQ_HZ, dtype=np.complex128)
     pol[100:200] = np.nan
     pol_error = (0.1 + 0.1j) * np.ones_like(FREQ_HZ, dtype=np.complex128)
