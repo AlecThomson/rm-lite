@@ -1,4 +1,4 @@
-"""Multiscale RM-CLEAN utils (Offringa-style scale-space CLEAN)."""
+"""Multiscale RM-CLEAN utils"""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class MultiscaleOptions:
     """Options for multiscale RM-CLEAN."""
 
     scale_bias: float = 0.6
-    """Offringa scale-bias (WSClean default); lower favours larger scales more"""
+    """Scale-bias. Lower favours larger scales more"""
     scales: NDArray[np.float64] | None = None
     """Explicit scales (RMSF FWHM units); None auto-selects WSClean-style"""
     n_scales: int | None = None
@@ -69,7 +69,7 @@ class MultiscaleOptions:
 
 @np.vectorize
 def _scale_bias_function(scale: float, scale_0: float, scale_bias: float) -> float:
-    """Offringa et al. (2017) scale-bias function."""
+    """Scale-bias function (Offringa et al. 2017)."""
     if scale == 0:
         return 1.0
     return scale_bias ** (-1 - np.log2(scale / scale_0))
@@ -79,7 +79,7 @@ def scale_bias_function(
     scales: NDArray[np.float64],
     scale_bias: float,
 ) -> NDArray[np.float64]:
-    """Offringa et al. (2017) scale-bias weighting per scale."""
+    """Scale-bias weighting per scale (Offringa et al. 2017)."""
     if len(scales) == 1:
         return np.ones_like(scales)
     first_nonzero = scales[scales > 0].min()
@@ -260,10 +260,7 @@ def find_significant_scale(
 ) -> int:
     """Index of the bias-weighted most-significant scale (Offringa 2017).
 
-    Selection is `max|resid (conv) k_s| * bias_s`. It does NOT divide by the
-    scale coupling `gamma_s`: `gamma_s` shrinks for broad scales, so dividing by
-    it would inflate large-scale scores without bound and diverge. `gamma_s` is
-    used only for amplitude recovery within the chosen scale.
+    Selection is `max|resid (conv) k_s| * bias_s`.
     """
     bias = scale_bias_function(scale_kernels.scales, scale_bias)
     scores = np.zeros_like(scale_kernels.scales)
