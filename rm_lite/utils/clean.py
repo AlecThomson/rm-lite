@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from dataclasses import dataclass
-from typing import NamedTuple, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -18,6 +18,9 @@ from rm_lite.utils.fitting import (
     unit_centred_gaussian,
 )
 from rm_lite.utils.logging import TqdmToLogger, logger
+
+if TYPE_CHECKING:
+    from rm_lite.utils.multiscale import MultiscaleOptions
 
 TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
 
@@ -65,6 +68,23 @@ class MinorLoopResults(NamedTuple):
     """ Model * RMSF """
     iter_count: int
     """The number of iterations"""
+
+
+def shift_rmsf(
+    rmsf_spectrum: NDArray[np.complex128],
+    fdf_index: int,
+    n_phi_pad: int,
+    max_rmsf_index: int,
+) -> NDArray[np.complex128]:
+    """Roll the double-length RMSF so its peak sits at FDF channel `fdf_index`,
+    then clip to FDF length. Shared shift-and-subtract primitive (Hogbom and
+    multiscale). Assumes integer shifts and a symmetric RMSF.
+    """
+    return np.asarray(
+        np.roll(rmsf_spectrum, fdf_index + n_phi_pad - max_rmsf_index)[
+            n_phi_pad:-n_phi_pad
+        ]
+    )
 
 
 def restore_fdf(
@@ -132,6 +152,8 @@ def rmclean(
     max_iter: int = 1000,
     gain: float = 0.1,
     mask_arr: NDArray[np.bool_] | None = None,
+    multiscale: bool = False,
+    multiscale_options: MultiscaleOptions | None = None,
 ) -> RMCleanResults:
     """Perform RM-CLEAN on a Faraday dispersion function array.
 
@@ -146,6 +168,8 @@ def rmclean(
         max_iter (int, optional): Maximum clean iterations. Defaults to 1000.
         gain (float, optional): Glean loop gain. Defaults to 0.1.
         mask_arr (NDArray[np.bool_] | None, optional): Additional mask of pixels to avoid. Defaults to None.
+        multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
+        multiscale_options (MultiscaleOptions | None, optional): Scale/kernel/sub-minor options for multiscale. Defaults to None.
 
     Returns:
         RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr
@@ -166,12 +190,19 @@ def rmclean(
         gain=gain,
     )
 
-    return _rmclean_nd(rm_synth_arrays, clean_options)
+    return _rmclean_nd(
+        rm_synth_arrays,
+        clean_options,
+        multiscale=multiscale,
+        multiscale_options=multiscale_options,
+    )
 
 
 def _rmclean_nd(
     rm_synth_arrays: RMSynthArrays,
     clean_options: RMCleanOptions,
+    multiscale: bool = False,
+    multiscale_options: MultiscaleOptions | None = None,
 ) -> RMCleanResults:
     # Sanity checks on array sizes
     checks: list[tuple[bool, str]] = [
@@ -230,6 +261,20 @@ def _rmclean_nd(
     model_fdf_spectrum_2d = np.zeros(dirty_fdf_arr_2d.shape, dtype=complex)
     resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
 
+    if multiscale:
+        # Local import breaks the multiscale <-> clean import cycle (multiscale
+        # needs minor_loop from here; here we need its per-spectrum cleaner).
+        from rm_lite.utils.multiscale import (  # noqa: PLC0415
+            MultiscaleOptions,
+            default_scales,
+            multiscale_clean_spectrum,
+        )
+
+        ms_options = multiscale_options or MultiscaleOptions()
+        rmsf_fwhm = float(np.nanmedian(np.real(fwhm_rmsf_arr_2d)))
+        scales = default_scales(rm_synth_arrays.phi_arr_radm2, rmsf_fwhm, ms_options)
+        logger.info(f"Multiscale scales (RMSF FWHM units): {scales}")
+
     # Loop through the pixels containing a polarised signal
     for pix_idx in tqdm(
         range(dirty_fdf_arr_2d.shape[1]),
@@ -239,6 +284,22 @@ def _rmclean_nd(
         # and so escapes quiet_logs; gate on the logger level to actually mute it.
         disable=not logger.isEnabledFor(logging.INFO),
     ):
+        if multiscale:
+            (clean_spec, resid_spec, model_spec, iters) = multiscale_clean_spectrum(
+                dirty_fdf_spectrum=resid_fdf_arr_2d[:, pix_idx],
+                phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
+                phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
+                rmsf_spectrum=rmsf_arr_2d[:, pix_idx],
+                rmsf_fwhm=rmsf_fwhm,
+                scales=scales,
+                clean_options=clean_options,
+                multiscale_options=ms_options,
+            )
+            clean_fdf_spectrum_2d[:, pix_idx] = clean_spec
+            resid_fdf_arr_2d[:, pix_idx] = resid_spec
+            model_fdf_spectrum_2d[:, pix_idx] = model_spec
+            iter_count_arr_2d[pix_idx] = iters
+            continue
         clean_loop_results = minor_cycle(
             rm_synth_1d_arrays=RMSynthArrays(
                 dirty_fdf_arr=resid_fdf_arr_2d[:, pix_idx],
@@ -380,13 +441,10 @@ def minor_loop(
         clean_component = minor_loop_options.gain * peak_fdf
         model_fdf_spectrum[peak_fdf_index] += clean_component
 
-        # At which channel is the clean_component located at in the RMSF?
-        peak_rmsf_index = peak_fdf_index + n_phi_pad
-
         # Shift the RMSF & clip so that its peak is centred above this clean_component
-        shifted_rmsf_spectrum = np.roll(
-            rmsf_spectrum, peak_rmsf_index - max_rmsf_index
-        )[n_phi_pad:-n_phi_pad]
+        shifted_rmsf_spectrum = shift_rmsf(
+            rmsf_spectrum, int(peak_fdf_index), n_phi_pad, int(max_rmsf_index)
+        )
         model_rmsf_spectrum += clean_component * shifted_rmsf_spectrum
 
         # Subtract the product of the clean_component shifted RMSF from the residual FDF

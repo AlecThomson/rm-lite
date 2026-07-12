@@ -3,20 +3,21 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmclean import run_rmclean_from_synth
 from rm_lite.tools_1d.rmsynth import run_rmsynth
-from rm_lite.utils.clean import RMCleanOptions
+from rm_lite.utils.clean import rmclean
 from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.multiscale import (
     MultiscaleOptions,
+    _reconvolve_model,
     _ScaleKernels,
     convolve_fdf_scale,
     make_scales,
-    multiscale_rmclean,
     scale_bias_function,
 )
 from rm_lite.utils.synthesis import (
@@ -38,11 +39,14 @@ def burn_slab(
     delta_rm_radm2: float,
 ) -> NDArray[np.complex128]:
     """Burn slab P(lambda^2): a Faraday-thick component (top-hat in phi)."""
-    return (
-        frac_pol
-        * np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lsq))
-        * np.sinc(delta_rm_radm2 * lsq / np.pi)
-    ).astype(np.complex128)
+    return cast(
+        "NDArray[np.complex128]",
+        (
+            frac_pol
+            * np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lsq))
+            * np.sinc(delta_rm_radm2 * lsq / np.pi)
+        ).astype(np.complex128),
+    )
 
 
 def _run_synth(complex_pol: NDArray[np.complex128], freq_hz: NDArray[np.float64]):
@@ -96,8 +100,6 @@ def test_coupling_identity() -> None:
     # Unit scale-si component -> its dirty footprint.
     deltas = np.zeros(phi.size, dtype=complex)
     deltas[phi.size // 2] = 1.0
-    from rm_lite.utils.multiscale import _reconvolve_model
-
     dirty = _reconvolve_model(deltas, kernels.p_s[si], phi, phi2)
     r_s = np.asarray(
         convolve_fdf_scale(scales[si], fwhm, dirty, phi2, "tapered_quad"), complex
@@ -133,14 +135,15 @@ def test_multiscale_recovers_thick_flux() -> None:
     rmsf = synth.rmsf_arrs["rmsf_complex_arr"].to_numpy().astype(complex)
 
     with quiet_logs(logging.ERROR):
-        result = multiscale_rmclean(
-            freq_arr_hz=freq_hz,
+        result = rmclean(
             dirty_fdf_arr=dirty,
             phi_arr_radm2=phi,
             rmsf_arr=rmsf,
             phi_double_arr_radm2=phi2,
             fwhm_rmsf_arr=np.array(fwhm),
-            clean_options=RMCleanOptions(mask=8 * noise, threshold=1 * noise),
+            mask=8 * noise,
+            threshold=1 * noise,
+            multiscale=True,
             multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
         )
     mom0 = calc_faraday_moments(np.abs(result.clean_fdf_arr), phi, fwhm).mom0
@@ -174,8 +177,10 @@ def test_multiscale_thin_matches_single_scale() -> None:
     single_fdf = single.fdf_arrs["fdf_clean_complex_arr"].to_numpy().astype(complex)
     multi_fdf = multi.fdf_arrs["fdf_clean_complex_arr"].to_numpy().astype(complex)
     # Peak Faraday depth agrees within one channel.
-    assert abs(phi[np.argmax(np.abs(single_fdf))] - phi[np.argmax(np.abs(multi_fdf))]) \
+    assert (
+        abs(phi[np.argmax(np.abs(single_fdf))] - phi[np.argmax(np.abs(multi_fdf))])
         <= abs(phi[1] - phi[0]) + 1e-6
+    )
     m0_single = calc_faraday_moments(np.abs(single_fdf), phi, fwhm).mom0
     m0_multi = calc_faraday_moments(np.abs(multi_fdf), phi, fwhm).mom0
     assert np.isclose(m0_single, m0_multi, rtol=0.3)
