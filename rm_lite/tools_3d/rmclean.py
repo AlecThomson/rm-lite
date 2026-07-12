@@ -16,7 +16,6 @@ from rm_lite.utils.clean import (
     RMCleanOptions,
     RMSynthArrays,
     _rmclean_nd,
-    multiscale_options_from_flat,
 )
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import calc_faraday_moments
@@ -96,12 +95,12 @@ def rmclean_3d(
     moment_threshold: float | None = None,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
-    scale_bias: float | None = None,
-    scales: NDArray[np.float64] | None = None,
-    n_scales: int | None = None,
-    kernel: Literal["tapered_quad", "gaussian"] | None = None,
-    max_iter_sub_minor: int | None = None,
-    sub_minor_fraction: float | None = None,
+    multiscale_scale_bias: float = 0.95,
+    multiscale_scales: NDArray[np.float64] | None = None,
+    multiscale_n_scales: int | None = None,
+    multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
+    multiscale_max_iter_sub_minor: int = 10_000,
+    multiscale_sub_minor_fraction: float = 0.5,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on chunked dirty FDF and RMSF cubes.
 
@@ -134,14 +133,14 @@ def rmclean_3d(
             Defaults to `logging.ERROR`.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
-        scale_bias (float | None, optional): Multiscale scale-bias in (0, 1];
-            lower favours larger scales more. None uses the default.
-        scales (NDArray[np.float64] | None, optional): Explicit multiscale scales
+        multiscale_scale_bias (float, optional): Scale-bias in (0, 1];
+            lower favours larger scales more. Defaults to 0.95.
+        multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales
             (RMSF FWHM units); None auto-selects.
-        n_scales (int | None, optional): Cap on the auto scale count.
-        kernel ("tapered_quad" | "gaussian" | None, optional): Scale kernel.
-        max_iter_sub_minor (int | None, optional): Max sub-minor iterations.
-        sub_minor_fraction (float | None, optional): Sub-minor re-selection fraction.
+        multiscale_n_scales (int | None, optional): Cap on the auto scale count.
+        multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
+        multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations. Defaults to 10_000.
+        multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -157,13 +156,13 @@ def rmclean_3d(
         gain=gain,
     )
     multiscale_options = (
-        multiscale_options_from_flat(
-            scale_bias=scale_bias,
-            scales=scales,
-            n_scales=n_scales,
-            kernel=kernel,
-            max_iter_sub_minor=max_iter_sub_minor,
-            sub_minor_fraction=sub_minor_fraction,
+        MultiscaleOptions(
+            scale_bias=multiscale_scale_bias,
+            scales=multiscale_scales,
+            n_scales=multiscale_n_scales,
+            kernel=multiscale_kernel,
+            max_iter_sub_minor=multiscale_max_iter_sub_minor,
+            sub_minor_fraction=multiscale_sub_minor_fraction,
         )
         if multiscale
         else None
@@ -239,12 +238,12 @@ def rmclean_3d_from_synth(
     moment_threshold_snr: float = 5.0,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
-    scale_bias: float | None = None,
-    scales: NDArray[np.float64] | None = None,
-    n_scales: int | None = None,
-    kernel: Literal["tapered_quad", "gaussian"] | None = None,
-    max_iter_sub_minor: int | None = None,
-    sub_minor_fraction: float | None = None,
+    multiscale_scale_bias: float = 0.95,
+    multiscale_scales: NDArray[np.float64] | None = None,
+    multiscale_n_scales: int | None = None,
+    multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
+    multiscale_max_iter_sub_minor: int = 10_000,
+    multiscale_sub_minor_fraction: float = 0.5,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
 
@@ -270,8 +269,8 @@ def rmclean_3d_from_synth(
         log_level (int, optional): See `rmclean_3d`. Defaults to `logging.ERROR`.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
-        multiscale_options (MultiscaleOptions | None, optional): See `rmclean_3d`.
-            Defaults to None.
+        scale_bias, scales, n_scales, kernel, max_iter_sub_minor,
+            sub_minor_fraction: Multiscale options, see `rmclean_3d`.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -299,10 +298,10 @@ def rmclean_3d_from_synth(
         moment_threshold=moment_threshold,
         log_level=log_level,
         multiscale=multiscale,
-        scale_bias=scale_bias,
-        scales=scales,
-        n_scales=n_scales,
-        kernel=kernel,
-        max_iter_sub_minor=max_iter_sub_minor,
-        sub_minor_fraction=sub_minor_fraction,
+        multiscale_scale_bias=multiscale_scale_bias,
+        multiscale_scales=multiscale_scales,
+        multiscale_n_scales=multiscale_n_scales,
+        multiscale_kernel=multiscale_kernel,
+        multiscale_max_iter_sub_minor=multiscale_max_iter_sub_minor,
+        multiscale_sub_minor_fraction=multiscale_sub_minor_fraction,
     )

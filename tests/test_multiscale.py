@@ -95,22 +95,22 @@ def test_coupling_identity() -> None:
     scales = np.array([0.0, 2.0, 4.0])
     kernels = compute_scale_kernels(scales, rmsf, fwhm, phi2, "tapered_quad")
     si = 2
-    gamma = kernels.gamma[si]
+    peak_response = kernels.peak_response[si]
 
     # Unit scale-si component -> its dirty footprint.
     deltas = np.zeros(phi.size, dtype=complex)
     deltas[phi.size // 2] = 1.0
-    dirty = _reconvolve_model(deltas, kernels.p_s[si], phi, phi2)
+    dirty = _reconvolve_model(deltas, kernels.rmsf_conv_scale[si], phi, phi2)
     r_s = np.asarray(
         convolve_fdf_scale(scales[si], fwhm, dirty, phi2, "tapered_quad"), complex
     )
     peak = int(np.argmax(np.abs(r_s)))
-    # Recovered amplitude R_s_peak / gamma == 1 for a unit component.
-    assert np.isclose(np.abs(r_s[peak]) / gamma, 1.0, atol=1e-3)
+    # Recovered amplitude R_s_peak / peak_response == 1 for a unit component.
+    assert np.isclose(np.abs(r_s[peak]) / peak_response, 1.0, atol=1e-3)
     # Subtracting the recovered footprint zeroes the residual.
     d2 = np.zeros(phi.size, dtype=complex)
-    d2[peak] = r_s[peak] / gamma
-    resid = dirty - _reconvolve_model(d2, kernels.p_s[si], phi, phi2)
+    d2[peak] = r_s[peak] / peak_response
+    resid = dirty - _reconvolve_model(d2, kernels.rmsf_conv_scale[si], phi, phi2)
     assert np.nanmax(np.abs(resid)) < 1e-6
 
 
@@ -144,7 +144,7 @@ def test_multiscale_recovers_thick_flux() -> None:
             mask=8 * noise,
             threshold=1 * noise,
             multiscale=True,
-            max_iter_sub_minor=2000,
+            multiscale_max_iter_sub_minor=2000,
         )
     mom0 = calc_faraday_moments(np.abs(result.clean_fdf_arr), phi, fwhm).mom0
     true_flux = 0.9
