@@ -1,32 +1,42 @@
-"""RM-clean utils"""
+"""RM-CLEAN utils"""
 
 from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, TypeVar
+from typing import Literal, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.ndimage import binary_dilation, convolve
 from tqdm.auto import tqdm
 
 from rm_lite.utils.arrays import nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
+    fit_rmsf,
+    fwhm_to_sigma,
     gaussian,
     gaussian_integrand,
     unit_centred_gaussian,
 )
 from rm_lite.utils.logging import TqdmToLogger, logger
 
-if TYPE_CHECKING:
-    from rm_lite.utils.multiscale import MultiscaleOptions
-
 TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
 
 DType = TypeVar("DType", bound=np.generic)
 
+KernelType: TypeAlias = Literal["tapered_quad", "gaussian"]
 
+# Bail out of a spectrum's major loop if the residual peak exceeds this factor
+# times the best (lowest) peak seen: a runaway-divergence backstop.
+DIVERGENCE_FACTOR = 2.0
+
+
+# ----------------------------------------------------------------------------
+# Shared core: results/options containers and the Hogbom minor loop.
+# ----------------------------------------------------------------------------
 class RMCleanResults(NamedTuple):
     """Results of the RM-CLEAN calculation"""
 
@@ -70,55 +80,6 @@ class MinorLoopResults(NamedTuple):
     """The number of iterations"""
 
 
-def shift_rmsf(
-    rmsf_spectrum: NDArray[np.complex128],
-    fdf_index: int,
-    n_phi_pad: int,
-    max_rmsf_index: int,
-) -> NDArray[np.complex128]:
-    """Roll the double-length RMSF so its peak sits at FDF channel `fdf_index`,
-    then clip to FDF length. Shared shift-and-subtract primitive (Hogbom and
-    multiscale). Assumes integer shifts and a symmetric RMSF.
-    """
-    return np.asarray(
-        np.roll(rmsf_spectrum, fdf_index + n_phi_pad - max_rmsf_index)[
-            n_phi_pad:-n_phi_pad
-        ]
-    )
-
-
-def restore_fdf(
-    model_fdf_spectrum: NDArray[np.complex128],
-    phi_double_arr_radm2: NDArray[np.float64],
-    fwhm_rmsf: float,
-) -> NDArray[np.complex128]:
-    clean_beam = unit_centred_gaussian(
-        x=phi_double_arr_radm2,
-        fwhm=fwhm_rmsf,
-    ) / gaussian_integrand(amplitude=1, fwhm=fwhm_rmsf)
-    restored_fdf = np.convolve(
-        model_fdf_spectrum.real, clean_beam, mode="valid"
-    ) + 1j * np.convolve(model_fdf_spectrum.imag, clean_beam, mode="valid")
-    return np.array(restored_fdf[1:-1])
-
-
-class RMSynthArrays(NamedTuple):
-    """Arrays for RM-synthesis"""
-
-    dirty_fdf_arr: NDArray[np.complex128]
-    """Dirty Faraday dispersion function array"""
-    phi_arr_radm2: NDArray[np.float64]
-    """Faraday depth array in rad/m^2"""
-    phi_double_arr_radm2: NDArray[np.float64]
-    """Double-length Faraday depth array in rad/m^2"""
-    rmsf_arr: NDArray[np.complex128]
-    """RMSF array"""
-    fwhm_rmsf_arr: NDArray[np.float64]
-    """FWHM of the RMSF array"""
-    fdf_mask_arr: NDArray[np.bool_] | None = None
-    """Mask of pixels to clean"""
-
-
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RMCleanOptions:
     """Options for RM-CLEAN, shared by the 1D and 3D tools"""
@@ -139,207 +100,6 @@ class RMCleanOptions:
         if not 0 < self.gain <= 1:
             msg = f"gain must be in (0, 1], got {self.gain}."
             raise ValueError(msg)
-
-
-def rmclean(
-    dirty_fdf_arr: NDArray[np.complex128],
-    phi_arr_radm2: NDArray[np.float64],
-    rmsf_arr: NDArray[np.complex128],
-    phi_double_arr_radm2: NDArray[np.float64],
-    fwhm_rmsf_arr: NDArray[np.float64],
-    mask: float,
-    threshold: float,
-    max_iter: int = 1000,
-    gain: float = 0.1,
-    mask_arr: NDArray[np.bool_] | None = None,
-    multiscale: bool = False,
-    multiscale_options: MultiscaleOptions | None = None,
-) -> RMCleanResults:
-    """Perform RM-CLEAN on a Faraday dispersion function array.
-
-    Args:
-        dirty_fdf_arr (NDArray[np.complex128]): Dirty Faraday dispersion function array
-        phi_arr_radm2 (NDArray[np.float64]): Faraday depth array in rad/m^2
-        rmsf_arr (NDArray[np.complex128]): RMSF array
-        phi_double_arr_radm2 (NDArray[np.float64]): Double-length Faraday depth array in rad/m^2
-        fwhm_rmsf_arr (NDArray[np.float64]): FWHM of the RMSF array
-        mask (float): Masking threshold - pixels below this value are not cleaned
-        threshold (float): Cleaning threshold - stop when all pixels are below this value
-        max_iter (int, optional): Maximum clean iterations. Defaults to 1000.
-        gain (float, optional): Glean loop gain. Defaults to 0.1.
-        mask_arr (NDArray[np.bool_] | None, optional): Additional mask of pixels to avoid. Defaults to None.
-        multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
-        multiscale_options (MultiscaleOptions | None, optional): Scale/kernel/sub-minor options for multiscale. Defaults to None.
-
-    Returns:
-        RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr
-    """
-
-    rm_synth_arrays = RMSynthArrays(
-        dirty_fdf_arr=dirty_fdf_arr,
-        phi_arr_radm2=phi_arr_radm2,
-        rmsf_arr=rmsf_arr,
-        phi_double_arr_radm2=phi_double_arr_radm2,
-        fwhm_rmsf_arr=fwhm_rmsf_arr,
-        fdf_mask_arr=mask_arr,
-    )
-    clean_options = RMCleanOptions(
-        mask=mask,
-        threshold=threshold,
-        max_iter=max_iter,
-        gain=gain,
-    )
-
-    return _rmclean_nd(
-        rm_synth_arrays,
-        clean_options,
-        multiscale=multiscale,
-        multiscale_options=multiscale_options,
-    )
-
-
-def _rmclean_nd(
-    rm_synth_arrays: RMSynthArrays,
-    clean_options: RMCleanOptions,
-    multiscale: bool = False,
-    multiscale_options: MultiscaleOptions | None = None,
-) -> RMCleanResults:
-    # Sanity checks on array sizes
-    checks: list[tuple[bool, str]] = [
-        (
-            rm_synth_arrays.phi_arr_radm2.shape[0]
-            == rm_synth_arrays.dirty_fdf_arr.shape[0],
-            f"'phi_arr_radm2' (size {rm_synth_arrays.phi_arr_radm2.shape[0]}) and 'dirty_fdf_arr' (size {rm_synth_arrays.dirty_fdf_arr.shape[0]}) are not the same length.",
-        ),
-        (
-            rm_synth_arrays.phi_double_arr_radm2.shape[0]
-            == rm_synth_arrays.rmsf_arr.shape[0],
-            f"Mismatch in 'phi_double_arr_radm2' (size {rm_synth_arrays.phi_double_arr_radm2.shape[0]}) and 'rmsf_arr' (size {rm_synth_arrays.rmsf_arr.shape[0]}) length.",
-        ),
-        (
-            len(rm_synth_arrays.phi_double_arr_radm2)
-            >= 2 * len(rm_synth_arrays.phi_arr_radm2),
-            f"The Faraday depth of the RMSF (size {len(rm_synth_arrays.phi_double_arr_radm2)}) must be at least twice the FDF (size {len(rm_synth_arrays.phi_arr_radm2)}).",
-        ),
-        (
-            rm_synth_arrays.dirty_fdf_arr.ndim <= 3,
-            f"FDF array dimensions ({rm_synth_arrays.dirty_fdf_arr.ndim}) must be <= 3.",
-        ),
-        (
-            rm_synth_arrays.dirty_fdf_arr.ndim == rm_synth_arrays.rmsf_arr.ndim,
-            f"The input RMSF (ndim {rm_synth_arrays.rmsf_arr.ndim}) and FDF (ndim {rm_synth_arrays.dirty_fdf_arr.ndim}) must have the same number of axes.",
-        ),
-        (
-            rm_synth_arrays.rmsf_arr.shape[1:]
-            == rm_synth_arrays.dirty_fdf_arr.shape[1:],
-            f"The xy dimensions of the RMSF {rm_synth_arrays.rmsf_arr.shape[1:]} and FDF {rm_synth_arrays.dirty_fdf_arr.shape[1:]} must match.",
-        ),
-    ]
-    if rm_synth_arrays.fdf_mask_arr is not None:
-        checks.append(
-            (
-                rm_synth_arrays.fdf_mask_arr.shape
-                == rm_synth_arrays.dirty_fdf_arr.shape,
-                f"Mask array dimensions {rm_synth_arrays.fdf_mask_arr.shape} must match the xy dimensions of the FDF cube {rm_synth_arrays.dirty_fdf_arr}.",
-            )
-        )
-
-    for condition, error_msg in checks:
-        if not condition:
-            raise ValueError(error_msg)
-
-    # Reshape the arrays to 2D i.e. [phi, x, y] -> [phi, x*y]
-    dirty_fdf_arr_2d = nd_to_two_d(rm_synth_arrays.dirty_fdf_arr)
-    rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.rmsf_arr)
-    iter_count_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
-    fwhm_rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.fwhm_rmsf_arr)
-
-    # Initialise arrays to hold the residual FDF, clean components, clean FDF
-    # Residual is initially copies of dirty FDF, so that pixels that are not
-    #  processed get correct values (but will be overridden when processed)
-    clean_fdf_spectrum_2d = np.zeros_like(dirty_fdf_arr_2d)
-    model_fdf_spectrum_2d = np.zeros(dirty_fdf_arr_2d.shape, dtype=complex)
-    resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
-
-    if multiscale:
-        # Local import breaks the multiscale <-> clean import cycle (multiscale
-        # needs minor_loop from here; here we need its per-spectrum cleaner).
-        from rm_lite.utils.multiscale import (  # noqa: PLC0415
-            MultiscaleOptions,
-            default_scales,
-            multiscale_clean_spectrum,
-        )
-
-        ms_options = multiscale_options or MultiscaleOptions()
-        rmsf_fwhm = float(np.nanmedian(np.real(fwhm_rmsf_arr_2d)))
-        scales = default_scales(rm_synth_arrays.phi_arr_radm2, rmsf_fwhm, ms_options)
-        logger.info(f"Multiscale scales (RMSF FWHM units): {scales}")
-
-    # Loop through the pixels containing a polarised signal
-    for pix_idx in tqdm(
-        range(dirty_fdf_arr_2d.shape[1]),
-        file=TQDM_OUT,
-        leave=False,
-        # tqdm.auto uses the notebook widget in Jupyter, which ignores `file`
-        # and so escapes quiet_logs; gate on the logger level to actually mute it.
-        disable=not logger.isEnabledFor(logging.INFO),
-    ):
-        if multiscale:
-            (clean_spec, resid_spec, model_spec, iters) = multiscale_clean_spectrum(
-                dirty_fdf_spectrum=resid_fdf_arr_2d[:, pix_idx],
-                phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
-                phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
-                rmsf_spectrum=rmsf_arr_2d[:, pix_idx],
-                rmsf_fwhm=rmsf_fwhm,
-                scales=scales,
-                clean_options=clean_options,
-                multiscale_options=ms_options,
-            )
-            clean_fdf_spectrum_2d[:, pix_idx] = clean_spec
-            resid_fdf_arr_2d[:, pix_idx] = resid_spec
-            model_fdf_spectrum_2d[:, pix_idx] = model_spec
-            iter_count_arr_2d[pix_idx] = iters
-            continue
-        clean_loop_results = minor_cycle(
-            rm_synth_1d_arrays=RMSynthArrays(
-                dirty_fdf_arr=resid_fdf_arr_2d[:, pix_idx],
-                phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
-                rmsf_arr=rmsf_arr_2d[:, pix_idx],
-                phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
-                fwhm_rmsf_arr=fwhm_rmsf_arr_2d,
-                fdf_mask_arr=nd_to_two_d(rm_synth_arrays.fdf_mask_arr)[:, pix_idx]
-                if rm_synth_arrays.fdf_mask_arr is not None
-                else None,
-            ),
-            clean_options=clean_options,
-        )
-        clean_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.clean_fdf_spectrum
-        resid_fdf_arr_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
-        model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.model_fdf_spectrum
-        iter_count_arr_2d[pix_idx] = clean_loop_results.iter_count
-
-    # Restore the residual to the cleaned FDF (moved outside of loop:
-    # will now work for pixels/spectra without clean components)
-    clean_fdf_spectrum_2d += resid_fdf_arr_2d
-
-    # Reshape the arrays back to their original shape
-    clean_fdf_spectrum = two_d_to_nd(
-        clean_fdf_spectrum_2d, rm_synth_arrays.dirty_fdf_arr.shape
-    )
-    model_fdf_spectrum = two_d_to_nd(
-        model_fdf_spectrum_2d, rm_synth_arrays.dirty_fdf_arr.shape
-    )
-    if rm_synth_arrays.dirty_fdf_arr.shape[1:] == ():
-        iter_count_arr = two_d_to_nd(iter_count_arr_2d, (1,))
-    else:
-        iter_count_arr = two_d_to_nd(
-            iter_count_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape[1:]
-        )
-    resid_fdf_arr = two_d_to_nd(resid_fdf_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape)
-
-    return RMCleanResults(
-        clean_fdf_spectrum, model_fdf_spectrum, iter_count_arr, resid_fdf_arr
-    )
 
 
 class MinorLoopArrays(NamedTuple):
@@ -375,6 +135,23 @@ class MinorLoopOptions:
     """Starting iteration"""
     update_mask: bool = True
     """Update the mask after each iteration"""
+
+
+def shift_rmsf(
+    rmsf_spectrum: NDArray[np.complex128],
+    fdf_index: int,
+    n_phi_pad: int,
+    max_rmsf_index: int,
+) -> NDArray[np.complex128]:
+    """Roll the double-length RMSF so its peak sits at FDF channel `fdf_index`,
+    then clip to FDF length. Shared shift-and-subtract primitive (Hogbom and
+    multiscale). Assumes integer shifts and a symmetric RMSF.
+    """
+    return np.asarray(
+        np.roll(rmsf_spectrum, fdf_index + n_phi_pad - max_rmsf_index)[
+            n_phi_pad:-n_phi_pad
+        ]
+    )
 
 
 def minor_loop(
@@ -478,6 +255,261 @@ def minor_loop(
     )
 
 
+def restore_fdf(
+    model_fdf_spectrum: NDArray[np.complex128],
+    phi_double_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf: float,
+) -> NDArray[np.complex128]:
+    clean_beam = unit_centred_gaussian(
+        x=phi_double_arr_radm2,
+        fwhm=fwhm_rmsf,
+    ) / gaussian_integrand(amplitude=1, fwhm=fwhm_rmsf)
+    restored_fdf = np.convolve(
+        model_fdf_spectrum.real, clean_beam, mode="valid"
+    ) + 1j * np.convolve(model_fdf_spectrum.imag, clean_beam, mode="valid")
+    return np.array(restored_fdf[1:-1])
+
+
+class RMSynthArrays(NamedTuple):
+    """Arrays for RM-synthesis"""
+
+    dirty_fdf_arr: NDArray[np.complex128]
+    """Dirty Faraday dispersion function array"""
+    phi_arr_radm2: NDArray[np.float64]
+    """Faraday depth array in rad/m^2"""
+    phi_double_arr_radm2: NDArray[np.float64]
+    """Double-length Faraday depth array in rad/m^2"""
+    rmsf_arr: NDArray[np.complex128]
+    """RMSF array"""
+    fwhm_rmsf_arr: NDArray[np.float64]
+    """FWHM of the RMSF array"""
+    fdf_mask_arr: NDArray[np.bool_] | None = None
+    """Mask of pixels to clean"""
+
+
+def rmclean(
+    dirty_fdf_arr: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    rmsf_arr: NDArray[np.complex128],
+    phi_double_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_arr: NDArray[np.float64],
+    mask: float,
+    threshold: float,
+    max_iter: int = 1000,
+    gain: float = 0.1,
+    mask_arr: NDArray[np.bool_] | None = None,
+    multiscale: bool = False,
+    scale_bias: float | None = None,
+    scales: NDArray[np.float64] | None = None,
+    n_scales: int | None = None,
+    kernel: KernelType | None = None,
+    max_iter_sub_minor: int | None = None,
+    sub_minor_fraction: float | None = None,
+    phi_max_scale_radm2: float | None = None,
+) -> RMCleanResults:
+    """Perform RM-CLEAN on a Faraday dispersion function array.
+
+    Args:
+        dirty_fdf_arr (NDArray[np.complex128]): Dirty Faraday dispersion function array
+        phi_arr_radm2 (NDArray[np.float64]): Faraday depth array in rad/m^2
+        rmsf_arr (NDArray[np.complex128]): RMSF array
+        phi_double_arr_radm2 (NDArray[np.float64]): Double-length Faraday depth array in rad/m^2
+        fwhm_rmsf_arr (NDArray[np.float64]): FWHM of the RMSF array
+        mask (float): Masking threshold - pixels below this value are not cleaned
+        threshold (float): Cleaning threshold - stop when all pixels are below this value
+        max_iter (int, optional): Maximum clean iterations. Defaults to 1000.
+        gain (float, optional): Glean loop gain. Defaults to 0.1.
+        mask_arr (NDArray[np.bool_] | None, optional): Additional mask of pixels to avoid. Defaults to None.
+        multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
+        scale_bias (float | None, optional): Multiscale scale-bias in (0, 1]; lower favours larger scales more. None uses the default.
+        scales (NDArray[np.float64] | None, optional): Explicit multiscale scales (RMSF FWHM units); None auto-selects.
+        n_scales (int | None, optional): Cap on the auto scale count.
+        kernel ("tapered_quad" | "gaussian" | None, optional): Multiscale scale kernel.
+        max_iter_sub_minor (int | None, optional): Max sub-minor iterations per scale.
+        sub_minor_fraction (float | None, optional): Sub-minor re-selection fraction.
+        phi_max_scale_radm2 (float | None, optional): Largest recoverable Faraday scale (pi / lambda_sq_min); sets the auto scale range. None falls back to the phi window.
+
+    Returns:
+        RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr
+    """
+    rm_synth_arrays = RMSynthArrays(
+        dirty_fdf_arr=dirty_fdf_arr,
+        phi_arr_radm2=phi_arr_radm2,
+        rmsf_arr=rmsf_arr,
+        phi_double_arr_radm2=phi_double_arr_radm2,
+        fwhm_rmsf_arr=fwhm_rmsf_arr,
+        fdf_mask_arr=mask_arr,
+    )
+    clean_options = RMCleanOptions(
+        mask=mask,
+        threshold=threshold,
+        max_iter=max_iter,
+        gain=gain,
+    )
+    multiscale_options = (
+        multiscale_options_from_flat(
+            scale_bias=scale_bias,
+            scales=scales,
+            n_scales=n_scales,
+            kernel=kernel,
+            max_iter_sub_minor=max_iter_sub_minor,
+            sub_minor_fraction=sub_minor_fraction,
+        )
+        if multiscale
+        else None
+    )
+
+    return _rmclean_nd(
+        rm_synth_arrays,
+        clean_options,
+        multiscale=multiscale,
+        multiscale_options=multiscale_options,
+        phi_max_scale_radm2=phi_max_scale_radm2,
+    )
+
+
+def _rmclean_nd(
+    rm_synth_arrays: RMSynthArrays,
+    clean_options: RMCleanOptions,
+    multiscale: bool = False,
+    multiscale_options: MultiscaleOptions | None = None,
+    phi_max_scale_radm2: float | None = None,
+) -> RMCleanResults:
+    # Sanity checks on array sizes
+    checks: list[tuple[bool, str]] = [
+        (
+            rm_synth_arrays.phi_arr_radm2.shape[0]
+            == rm_synth_arrays.dirty_fdf_arr.shape[0],
+            f"'phi_arr_radm2' (size {rm_synth_arrays.phi_arr_radm2.shape[0]}) and 'dirty_fdf_arr' (size {rm_synth_arrays.dirty_fdf_arr.shape[0]}) are not the same length.",
+        ),
+        (
+            rm_synth_arrays.phi_double_arr_radm2.shape[0]
+            == rm_synth_arrays.rmsf_arr.shape[0],
+            f"Mismatch in 'phi_double_arr_radm2' (size {rm_synth_arrays.phi_double_arr_radm2.shape[0]}) and 'rmsf_arr' (size {rm_synth_arrays.rmsf_arr.shape[0]}) length.",
+        ),
+        (
+            len(rm_synth_arrays.phi_double_arr_radm2)
+            >= 2 * len(rm_synth_arrays.phi_arr_radm2),
+            f"The Faraday depth of the RMSF (size {len(rm_synth_arrays.phi_double_arr_radm2)}) must be at least twice the FDF (size {len(rm_synth_arrays.phi_arr_radm2)}).",
+        ),
+        (
+            rm_synth_arrays.dirty_fdf_arr.ndim <= 3,
+            f"FDF array dimensions ({rm_synth_arrays.dirty_fdf_arr.ndim}) must be <= 3.",
+        ),
+        (
+            rm_synth_arrays.dirty_fdf_arr.ndim == rm_synth_arrays.rmsf_arr.ndim,
+            f"The input RMSF (ndim {rm_synth_arrays.rmsf_arr.ndim}) and FDF (ndim {rm_synth_arrays.dirty_fdf_arr.ndim}) must have the same number of axes.",
+        ),
+        (
+            rm_synth_arrays.rmsf_arr.shape[1:]
+            == rm_synth_arrays.dirty_fdf_arr.shape[1:],
+            f"The xy dimensions of the RMSF {rm_synth_arrays.rmsf_arr.shape[1:]} and FDF {rm_synth_arrays.dirty_fdf_arr.shape[1:]} must match.",
+        ),
+    ]
+    if rm_synth_arrays.fdf_mask_arr is not None:
+        checks.append(
+            (
+                rm_synth_arrays.fdf_mask_arr.shape
+                == rm_synth_arrays.dirty_fdf_arr.shape,
+                f"Mask array dimensions {rm_synth_arrays.fdf_mask_arr.shape} must match the xy dimensions of the FDF cube {rm_synth_arrays.dirty_fdf_arr}.",
+            )
+        )
+
+    for condition, error_msg in checks:
+        if not condition:
+            raise ValueError(error_msg)
+
+    # Reshape the arrays to 2D i.e. [phi, x, y] -> [phi, x*y]
+    dirty_fdf_arr_2d = nd_to_two_d(rm_synth_arrays.dirty_fdf_arr)
+    rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.rmsf_arr)
+    iter_count_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
+    fwhm_rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.fwhm_rmsf_arr)
+
+    # Initialise arrays to hold the residual FDF, clean components, clean FDF
+    # Residual is initially copies of dirty FDF, so that pixels that are not
+    #  processed get correct values (but will be overridden when processed)
+    clean_fdf_spectrum_2d = np.zeros_like(dirty_fdf_arr_2d)
+    model_fdf_spectrum_2d = np.zeros(dirty_fdf_arr_2d.shape, dtype=complex)
+    resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
+
+    if multiscale:
+        ms_options = multiscale_options or MultiscaleOptions()
+        rmsf_fwhm = float(np.nanmedian(np.real(fwhm_rmsf_arr_2d)))
+        scales = default_scales(
+            rm_synth_arrays.phi_arr_radm2,
+            rmsf_fwhm,
+            ms_options,
+            phi_max_scale_radm2=phi_max_scale_radm2,
+        )
+        logger.info(f"Multiscale scales (RMSF FWHM units): {scales}")
+
+    # Loop through the pixels containing a polarised signal
+    for pix_idx in tqdm(
+        range(dirty_fdf_arr_2d.shape[1]),
+        file=TQDM_OUT,
+        leave=False,
+        # tqdm.auto uses the notebook widget in Jupyter, which ignores `file`
+        # and so escapes quiet_logs; gate on the logger level to actually mute it.
+        disable=not logger.isEnabledFor(logging.INFO),
+    ):
+        if multiscale:
+            (clean_spec, resid_spec, model_spec, iters) = multiscale_clean_spectrum(
+                dirty_fdf_spectrum=resid_fdf_arr_2d[:, pix_idx],
+                phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
+                phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
+                rmsf_spectrum=rmsf_arr_2d[:, pix_idx],
+                rmsf_fwhm=rmsf_fwhm,
+                scales=scales,
+                clean_options=clean_options,
+                multiscale_options=ms_options,
+            )
+            clean_fdf_spectrum_2d[:, pix_idx] = clean_spec
+            resid_fdf_arr_2d[:, pix_idx] = resid_spec
+            model_fdf_spectrum_2d[:, pix_idx] = model_spec
+            iter_count_arr_2d[pix_idx] = iters
+            continue
+        clean_loop_results = minor_cycle(
+            rm_synth_1d_arrays=RMSynthArrays(
+                dirty_fdf_arr=resid_fdf_arr_2d[:, pix_idx],
+                phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
+                rmsf_arr=rmsf_arr_2d[:, pix_idx],
+                phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
+                fwhm_rmsf_arr=fwhm_rmsf_arr_2d,
+                fdf_mask_arr=nd_to_two_d(rm_synth_arrays.fdf_mask_arr)[:, pix_idx]
+                if rm_synth_arrays.fdf_mask_arr is not None
+                else None,
+            ),
+            clean_options=clean_options,
+        )
+        clean_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.clean_fdf_spectrum
+        resid_fdf_arr_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
+        model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.model_fdf_spectrum
+        iter_count_arr_2d[pix_idx] = clean_loop_results.iter_count
+
+    # Restore the residual to the cleaned FDF (moved outside of loop:
+    # will now work for pixels/spectra without clean components)
+    clean_fdf_spectrum_2d += resid_fdf_arr_2d
+
+    # Reshape the arrays back to their original shape
+    clean_fdf_spectrum = two_d_to_nd(
+        clean_fdf_spectrum_2d, rm_synth_arrays.dirty_fdf_arr.shape
+    )
+    model_fdf_spectrum = two_d_to_nd(
+        model_fdf_spectrum_2d, rm_synth_arrays.dirty_fdf_arr.shape
+    )
+    if rm_synth_arrays.dirty_fdf_arr.shape[1:] == ():
+        iter_count_arr = two_d_to_nd(iter_count_arr_2d, (1,))
+    else:
+        iter_count_arr = two_d_to_nd(
+            iter_count_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape[1:]
+        )
+    resid_fdf_arr = two_d_to_nd(resid_fdf_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape)
+
+    return RMCleanResults(
+        clean_fdf_spectrum, model_fdf_spectrum, iter_count_arr, resid_fdf_arr
+    )
+
+
 def minor_cycle(
     rm_synth_1d_arrays: RMSynthArrays,
     clean_options: RMCleanOptions,
@@ -562,4 +594,456 @@ def minor_cycle(
         resid_fdf_spectrum=resid_fdf_spectrum,
         model_fdf_spectrum=model_fdf_spectrum,
         iter_count=deep_loop_results.iter_count,
+    )
+
+
+# ----------------------------------------------------------------------------
+# Multiscale RM-CLEAN (Cornwell 2008; Offringa & Smirnov 2017).
+# ----------------------------------------------------------------------------
+@dataclass(frozen=True, kw_only=True, slots=True)
+class MultiscaleOptions:
+    """Options for multiscale RM-CLEAN."""
+
+    scale_bias: float = 0.8
+    """Scale-bias in (0, 1]. Lower favours larger scales more strongly; too low
+    over-extends unresolved sources. Default 0.8 keeps a point source on scale 0
+    (WSClean uses 0.6, but its image-domain PSF is far narrower than the RMSF is
+    here relative to the scale kernels)."""
+    scales: NDArray[np.float64] | None = None
+    """Explicit scales (RMSF FWHM units); None auto-selects WSClean-style"""
+    n_scales: int | None = None
+    """Cap on the auto-selected scale count (ignored if `scales` given)"""
+    kernel: KernelType = "tapered_quad"
+    """Scale kernel shape"""
+    max_iter_sub_minor: int = 10_000
+    """Maximum sub-minor (per-scale Hogbom) iterations"""
+    sub_minor_fraction: float = 0.5
+    """Re-select a scale once the activated scale's peak drops by this fraction"""
+
+    def __post_init__(self) -> None:
+        if not 0 < self.sub_minor_fraction < 1:
+            msg = (
+                f"sub_minor_fraction must be in (0, 1), got {self.sub_minor_fraction}."
+            )
+            raise ValueError(msg)
+        if self.max_iter_sub_minor < 1:
+            msg = "max_iter_sub_minor must be >= 1."
+            raise ValueError(msg)
+        if self.scales is not None and len(self.scales) == 0:
+            msg = "scales must be non-empty."
+            raise ValueError(msg)
+
+
+@np.vectorize
+def _scale_bias_function(scale: float, scale_0: float, scale_bias: float) -> float:
+    """Scale-bias function (Offringa et al. 2017)."""
+    if scale == 0:
+        return 1.0
+    return float(scale_bias ** (-1 - np.log2(scale / scale_0)))
+
+
+def scale_bias_function(
+    scales: NDArray[np.float64],
+    scale_bias: float,
+) -> NDArray[np.float64]:
+    """Scale-bias weighting per scale (Offringa et al. 2017)."""
+    if len(scales) == 1:
+        return np.ones_like(scales)
+    first_nonzero = scales[scales > 0].min()
+    return np.asarray(
+        _scale_bias_function(scales, scale_0=first_nonzero, scale_bias=scale_bias),
+        dtype=np.float64,
+    )
+
+
+def make_scales(
+    max_scale: float,
+    n_scales: int | None = None,
+    first_scale: float = 1.0,
+) -> NDArray[np.float64]:
+    """WSClean-style scale set: 0 then geometric doubling up to `max_scale`."""
+    scales = [0.0]
+    scale = first_scale
+    while scale < max_scale:
+        scales.append(scale)
+        scale *= 2
+    scale_arr = np.array(scales, dtype=np.float64)
+    if n_scales is not None:
+        scale_arr = scale_arr[:n_scales]
+    return scale_arr
+
+
+def hanning(x_arr: NDArray[np.float64], length: float) -> NDArray[np.float64]:
+    """Hanning window function."""
+    han = (1 / length) * np.cos(np.pi * x_arr / length) ** 2
+    return np.where(np.abs(x_arr) < length / 2, han, 0)
+
+
+def tapered_quad_kernel_function(
+    phi_double_arr_radm2: NDArray[np.float64],
+    scale: float,
+    rmsf_fwhm: float,
+    sum_normalised: bool = True,
+) -> NDArray[np.float64]:
+    """Tapered quadratic scale kernel."""
+    scale_radm2 = scale * rmsf_fwhm
+    kernel = hanning(phi_double_arr_radm2, scale_radm2) * (
+        1 - (np.abs(phi_double_arr_radm2) / scale_radm2) ** 2
+    )
+    if sum_normalised:
+        kernel /= kernel.sum()
+    else:
+        kernel /= kernel.max()
+    return kernel
+
+
+def gaussian_scale_kernel_function(
+    phi_double_arr_radm2: NDArray[np.float64],
+    scale: float,
+    rmsf_fwhm: float,
+    sum_normalised: bool = True,
+) -> NDArray[np.float64]:
+    """Gaussian scale kernel."""
+    rmsf_sigma = fwhm_to_sigma(rmsf_fwhm)
+    sigma = (3 / 16) * scale * rmsf_sigma
+    kernel = unit_centred_gaussian(x=phi_double_arr_radm2, stddev=sigma)
+    if sum_normalised:
+        kernel /= kernel.sum()
+    else:
+        kernel /= kernel.max()
+    return kernel
+
+
+KERNEL_FUNCS: dict[str, Callable[..., NDArray[np.float64]]] = {
+    "tapered_quad": tapered_quad_kernel_function,
+    "gaussian": gaussian_scale_kernel_function,
+}
+
+
+def convolve_fdf_scale(
+    scale: float,
+    fwhm: float,
+    fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    kernel: KernelType = "gaussian",
+    sum_normalised: bool = True,
+) -> NDArray[np.complex128] | NDArray[np.float64]:
+    """Convolve an FDF (complex or real) with a real scale kernel.
+
+    scipy.ndimage.convolve drops the imaginary part for complex input, so the
+    real and imaginary parts are convolved separately.
+    """
+    if scale == 0:
+        return fdf_arr
+    kernel_func = KERNEL_FUNCS.get(kernel, gaussian_scale_kernel_function)
+    # Sample the kernel on a zero-centred grid of the SAME length as the signal
+    # (same d_phi as phi_double). A kernel longer than the signal would produce
+    # boundary garbage under scipy's reflect mode; this keeps them matched for
+    # both FDF-length and RMSF-length inputs.
+    d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
+    n = len(fdf_arr)
+    kernel_grid = (np.arange(n) - n // 2) * d_phi
+    kernel_arr = kernel_func(kernel_grid, scale, fwhm, sum_normalised=sum_normalised)
+
+    if np.iscomplexobj(fdf_arr):
+        conv_spec = convolve(fdf_arr.real, kernel_arr, mode="reflect") + 1j * convolve(
+            fdf_arr.imag, kernel_arr, mode="reflect"
+        )
+    else:
+        conv_spec = convolve(fdf_arr, kernel_arr, mode="reflect")
+
+    assert len(conv_spec) == len(fdf_arr), "Convolved FDF has wrong length."
+    return np.asarray(conv_spec)
+
+
+def _restore_multiscale(
+    model_fdf_spectrum: NDArray[np.complex128],
+    phi_double_arr_radm2: NDArray[np.float64],
+    rmsf_fwhm: float,
+) -> NDArray[np.complex128]:
+    """Convolve the model with a unit-peak clean beam.
+
+    Matches single-scale `minor_loop`, so `calc_faraday_moments` mom0
+    normalisation recovers the component flux.
+    """
+    clean_beam = unit_centred_gaussian(x=phi_double_arr_radm2, fwhm=rmsf_fwhm)
+    return np.asarray(
+        convolve(model_fdf_spectrum.real, clean_beam, mode="reflect")
+        + 1j * convolve(model_fdf_spectrum.imag, clean_beam, mode="reflect"),
+        dtype=np.complex128,
+    )
+
+
+def _reconvolve_model(
+    model_fdf_spectrum: NDArray[np.complex128],
+    rmsf_spectrum: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+) -> NDArray[np.complex128]:
+    """Footprint of a sparse delta model in the dirty FDF: sum_i m_i * RMSF@i.
+
+    Same shift-and-add primitive as `minor_loop`, so the multiscale residual
+    update matches how single-scale CLEAN subtracts components.
+    """
+    out = np.zeros_like(model_fdf_spectrum)
+    max_rmsf_index = int(np.nanargmax(np.abs(rmsf_spectrum)))
+    n_phi_pad = int((len(phi_double_arr_radm2) - len(phi_arr_radm2)) / 2)
+    for idx in np.nonzero(model_fdf_spectrum)[0]:
+        shifted = shift_rmsf(rmsf_spectrum, int(idx), n_phi_pad, max_rmsf_index)
+        out += model_fdf_spectrum[idx] * shifted
+    return out
+
+
+class ScaleKernels(NamedTuple):
+    """Precomputed per-scale kernels/couplings for one spectrum."""
+
+    scales: NDArray[np.float64]
+    """Scales (RMSF FWHM units)"""
+    p_s: list[NDArray[np.complex128]]
+    """Scale-convolved RMSF per scale (RMSF conv k_s), on the double phi axis"""
+    p_ss: list[NDArray[np.complex128]]
+    """Twice scale-convolved RMSF per scale (RMSF conv k_s conv k_s)"""
+    gamma: NDArray[np.float64]
+    """Coupling max|p_ss| per scale: a scale-s amplitude appears in the
+    scale-convolved residual scaled by this"""
+    fwhm_ss: NDArray[np.float64]
+    """Fitted FWHM of |p_ss| per scale (sub-minor restore width)"""
+
+
+def compute_scale_kernels(
+    scales: NDArray[np.float64],
+    rmsf_spectrum: NDArray[np.complex128],
+    rmsf_fwhm: float,
+    phi_double_arr_radm2: NDArray[np.float64],
+    kernel: KernelType,
+) -> ScaleKernels:
+    """Precompute the per-scale kernels/couplings for one spectrum."""
+    p_s_list: list[NDArray[np.complex128]] = []
+    p_ss_list: list[NDArray[np.complex128]] = []
+    gamma = np.ones_like(scales)
+    fwhm_ss = np.full_like(scales, rmsf_fwhm)
+    for i, scale in enumerate(scales):
+        p_s = convolve_fdf_scale(
+            scale, rmsf_fwhm, rmsf_spectrum, phi_double_arr_radm2, kernel
+        )
+        p_ss = convolve_fdf_scale(scale, rmsf_fwhm, p_s, phi_double_arr_radm2, kernel)
+        p_s_list.append(np.asarray(p_s, dtype=np.complex128))
+        p_ss_list.append(np.asarray(p_ss, dtype=np.complex128))
+        gamma[i] = float(np.nanmax(np.abs(p_ss)))
+        if scale != 0:
+            fwhm_ss[i] = fit_rmsf(
+                np.abs(p_ss),
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                fwhm_rmsf_radm2=rmsf_fwhm * scale,
+            )
+    return ScaleKernels(scales, p_s_list, p_ss_list, gamma, fwhm_ss)
+
+
+def find_significant_scale(
+    resid_fdf_spectrum: NDArray[np.complex128],
+    scale_kernels: ScaleKernels,
+    scale_bias: float,
+    rmsf_fwhm: float,
+    phi_double_arr_radm2: NDArray[np.float64],
+    kernel: KernelType,
+) -> int:
+    """Index of the bias-weighted most-significant scale (Offringa 2017).
+
+    Selection is `max|resid (conv) k_s| * bias_s`. `bias_s` (< 1 for larger
+    scales unless `scale_bias` is lowered) keeps a point source on scale 0.
+    """
+    bias = scale_bias_function(scale_kernels.scales, scale_bias)
+    scores = np.zeros_like(scale_kernels.scales)
+    for i, scale in enumerate(scale_kernels.scales):
+        resid_conv = convolve_fdf_scale(
+            scale, rmsf_fwhm, resid_fdf_spectrum, phi_double_arr_radm2, kernel
+        )
+        scores[i] = np.nanmax(np.abs(resid_conv)) * bias[i]
+    return int(np.argmax(scores))
+
+
+def multiscale_clean_spectrum(
+    dirty_fdf_spectrum: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    rmsf_spectrum: NDArray[np.complex128],
+    rmsf_fwhm: float,
+    scales: NDArray[np.float64],
+    clean_options: RMCleanOptions,
+    multiscale_options: MultiscaleOptions,
+) -> tuple[NDArray[np.complex128], NDArray[np.complex128], NDArray[np.complex128], int]:
+    """Multiscale CLEAN one FDF spectrum. Returns (clean, resid, model, iters)."""
+    mask = clean_options.mask
+    threshold = clean_options.threshold
+    kernel = multiscale_options.kernel
+    resid_fdf_spectrum = dirty_fdf_spectrum.copy()
+    model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
+    kernels = compute_scale_kernels(
+        scales, rmsf_spectrum, rmsf_fwhm, phi_double_arr_radm2, kernel
+    )
+
+    # Clean within the mask-seeded support but down to `threshold` (single-scale
+    # RM-CLEAN reaches the same depth via its deep-clean phase). Dilate the
+    # support by ~1 RMSF FWHM so extended structure can spill past the >mask edge.
+    d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
+    support = np.abs(dirty_fdf_spectrum) > mask
+    support = binary_dilation(support, iterations=max(1, int(rmsf_fwhm / d_phi)))
+
+    iter_count = 0
+    if not support.any():
+        return (
+            _restore_multiscale(model_fdf_spectrum, phi_double_arr_radm2, rmsf_fwhm),
+            resid_fdf_spectrum,
+            model_fdf_spectrum,
+            iter_count,
+        )
+
+    # Divergence guard: keep the lowest-peak state seen and bail if the residual
+    # runs away (a poorly matched scale can over-subtract and blow up).
+    best_peak = np.inf
+    best_model = model_fdf_spectrum.copy()
+    best_resid = resid_fdf_spectrum.copy()
+
+    for iter_count in range(1, clean_options.max_iter + 1):
+        peak = float(np.nanmax(np.abs(resid_fdf_spectrum[support])))
+        if peak > best_peak * DIVERGENCE_FACTOR:
+            logger.warning(
+                f"Multiscale CLEAN diverging at iter {iter_count} "
+                f"(peak {peak:0.3g} > {DIVERGENCE_FACTOR}x best {best_peak:0.3g}); "
+                "reverting to best."
+            )
+            model_fdf_spectrum, resid_fdf_spectrum = best_model, best_resid
+            break
+        if peak < best_peak:
+            best_peak = peak
+            best_model = model_fdf_spectrum.copy()
+            best_resid = resid_fdf_spectrum.copy()
+        if peak < threshold:
+            break
+
+        scale_index = find_significant_scale(
+            resid_fdf_spectrum,
+            kernels,
+            multiscale_options.scale_bias,
+            rmsf_fwhm,
+            phi_double_arr_radm2,
+            kernel,
+        )
+        scale = float(scales[scale_index])
+        gamma = float(kernels.gamma[scale_index])
+
+        # Scale-convolved residual; sub-minor cleans in this space, restricted to
+        # the support and down to the clean threshold.
+        resid_conv = np.asarray(
+            convolve_fdf_scale(
+                scale,
+                rmsf_fwhm,
+                resid_fdf_spectrum,
+                phi_double_arr_radm2,
+                kernel,
+            ),
+            dtype=np.complex128,
+        )
+        mask_conv = (np.abs(resid_conv) > threshold * gamma) & support
+        if not mask_conv.any():
+            break
+        resid_conv_masked = np.ma.array(resid_conv, mask=~mask_conv)
+
+        # Sub-minor cleans this scale only until its peak drops by
+        # `sub_minor_fraction`, then re-select a scale. Stops one scale from
+        # deep-cleaning to the floor and over-fitting.
+        peak_conv = float(np.ma.max(np.ma.abs(resid_conv_masked)))
+        threshold_sub = max(
+            threshold * gamma, multiscale_options.sub_minor_fraction * peak_conv
+        )
+
+        sub_minor = minor_loop(
+            MinorLoopArrays(
+                resid_fdf_spectrum_mask=resid_conv_masked,
+                phi_arr_radm2=phi_arr_radm2,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                rmsf_spectrum=kernels.p_ss[scale_index] / gamma,
+                rmsf_fwhm=float(kernels.fwhm_ss[scale_index]),
+            ),
+            MinorLoopOptions(
+                max_iter=multiscale_options.max_iter_sub_minor,
+                gain=clean_options.gain,
+                mask=threshold * gamma,
+                threshold=threshold_sub,
+                update_mask=True,
+            ),
+        )
+
+        # Undo the R_s normalisation to recover true k_s-model amplitudes.
+        true_deltas = sub_minor.model_fdf_spectrum / gamma
+        if not np.any(true_deltas):
+            break
+
+        model_fdf_spectrum = model_fdf_spectrum + np.asarray(
+            convolve_fdf_scale(
+                scale, rmsf_fwhm, true_deltas, phi_double_arr_radm2, kernel
+            ),
+            dtype=np.complex128,
+        )
+        # Full-res residual update: dirty footprint = model (conv) RMSF.
+        resid_fdf_spectrum = resid_fdf_spectrum - _reconvolve_model(
+            true_deltas, kernels.p_s[scale_index], phi_arr_radm2, phi_double_arr_radm2
+        )
+
+    clean_fdf_spectrum = _restore_multiscale(
+        model_fdf_spectrum, phi_double_arr_radm2, rmsf_fwhm
+    )
+    return clean_fdf_spectrum, resid_fdf_spectrum, model_fdf_spectrum, iter_count
+
+
+def default_scales(
+    phi_arr_radm2: NDArray[np.float64],
+    rmsf_fwhm: float,
+    multiscale_options: MultiscaleOptions,
+    phi_max_scale_radm2: float | None = None,
+) -> NDArray[np.float64]:
+    """Scales (RMSF FWHM units): explicit if given, else WSClean-style auto.
+
+    The auto max scale uses the largest recoverable Faraday scale
+    `phi_max_scale_radm2` (pi / lambda_sq_min) when provided. If it is not (e.g.
+    calling on bare arrays without the frequency sampling), it falls back to the
+    FDF phi window. Either way the scale-bias weighting and divergence guard
+    handle over-large scales, and an explicit `scales` overrides it entirely.
+    """
+    if multiscale_options.scales is not None:
+        return multiscale_options.scales
+    if phi_max_scale_radm2 is not None:
+        max_scale = phi_max_scale_radm2 / rmsf_fwhm
+    else:
+        max_scale = float(phi_arr_radm2.max() - phi_arr_radm2.min()) / (2 * rmsf_fwhm)
+    return make_scales(max_scale, n_scales=multiscale_options.n_scales)
+
+
+def multiscale_options_from_flat(
+    scale_bias: float | None = None,
+    scales: NDArray[np.float64] | None = None,
+    n_scales: int | None = None,
+    kernel: KernelType | None = None,
+    max_iter_sub_minor: int | None = None,
+    sub_minor_fraction: float | None = None,
+) -> MultiscaleOptions:
+    """Build `MultiscaleOptions` from flat kwargs, keeping the class internal.
+
+    Only non-None values override the `MultiscaleOptions` defaults, so callers
+    expose plain keyword arguments rather than the options object.
+    """
+    provided = {
+        "scale_bias": scale_bias,
+        "scales": scales,
+        "n_scales": n_scales,
+        "kernel": kernel,
+        "max_iter_sub_minor": max_iter_sub_minor,
+        "sub_minor_fraction": sub_minor_fraction,
+    }
+    # dataclasses.replace overrides only the supplied fields, so unset kwargs
+    # keep the MultiscaleOptions defaults. mypy can't match the heterogeneous
+    # **dict to each field type (a known limitation of **kwargs unpacking).
+    return dataclasses.replace(
+        MultiscaleOptions(),
+        **{k: v for k, v in provided.items() if v is not None},  # type: ignore[arg-type]
     )

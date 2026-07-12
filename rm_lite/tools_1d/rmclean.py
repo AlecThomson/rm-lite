@@ -12,7 +12,6 @@ from scipy import interpolate
 from rm_lite.tools_1d.rmsynth import RMSynth1DResults
 from rm_lite.utils.clean import rmclean
 from rm_lite.utils.logging import logger
-from rm_lite.utils.multiscale import MultiscaleOptions
 from rm_lite.utils.synthesis import (
     TheoreticalNoise,
     get_fdf_parameters,
@@ -60,7 +59,12 @@ def run_rmclean_from_synth(
     mask_arr: NDArray[np.bool_] | None = None,
     moment_threshold_snr: float = 5.0,
     multiscale: bool = False,
-    multiscale_options: MultiscaleOptions | None = None,
+    scale_bias: float | None = None,
+    scales: NDArray[np.float64] | None = None,
+    n_scales: int | None = None,
+    kernel: Literal["tapered_quad", "gaussian"] | None = None,
+    max_iter_sub_minor: int | None = None,
+    sub_minor_fraction: float | None = None,
 ) -> RMClean1DResults:
     """Run RM-CLEAN on the results of RM-synth.
 
@@ -73,7 +77,12 @@ def run_rmclean_from_synth(
         mask_arr (NDArray[np.bool_] | None, optional): Optional mask array. Defaults to None.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to the clean FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
-        multiscale_options (MultiscaleOptions | None, optional): Scale/kernel/iteration options for multiscale. Its own `max_iter`/`gain` are used, not this function's. Defaults to None (MultiscaleOptions defaults).
+        scale_bias (float | None, optional): Multiscale scale-bias in (0, 1]; lower favours larger scales more. None uses the default.
+        scales (NDArray[np.float64] | None, optional): Explicit multiscale scales (RMSF FWHM units); None auto-selects from the RMSF max scale.
+        n_scales (int | None, optional): Cap on the auto scale count.
+        kernel ("tapered_quad" | "gaussian" | None, optional): Multiscale scale kernel.
+        max_iter_sub_minor (int | None, optional): Max sub-minor iterations per scale.
+        sub_minor_fraction (float | None, optional): Sub-minor re-selection fraction.
 
     Returns:
         RMClean1DResults: RM-CLEAN results: `fdf_parameters`, `fdf_arrs`, `clean_parameters`.
@@ -123,7 +132,13 @@ def run_rmclean_from_synth(
         gain=gain,
         mask_arr=mask_arr,
         multiscale=multiscale,
-        multiscale_options=multiscale_options,
+        scale_bias=scale_bias,
+        scales=scales,
+        n_scales=n_scales,
+        kernel=kernel,
+        max_iter_sub_minor=max_iter_sub_minor,
+        sub_minor_fraction=sub_minor_fraction,
+        phi_max_scale_radm2=float(fdf_parameters["phi_max_scale_radm2"][0]),
     )
     clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr = rm_clean_results
 

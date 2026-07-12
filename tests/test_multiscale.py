@@ -10,16 +10,16 @@ import pytest
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmclean import run_rmclean_from_synth
 from rm_lite.tools_1d.rmsynth import run_rmsynth
-from rm_lite.utils.clean import rmclean
-from rm_lite.utils.logging import quiet_logs
-from rm_lite.utils.multiscale import (
+from rm_lite.utils.clean import (
     MultiscaleOptions,
     _reconvolve_model,
     compute_scale_kernels,
     convolve_fdf_scale,
     make_scales,
+    rmclean,
     scale_bias_function,
 )
+from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.synthesis import (
     calc_faraday_moments,
     freq_to_lambda2,
@@ -144,7 +144,7 @@ def test_multiscale_recovers_thick_flux() -> None:
             mask=8 * noise,
             threshold=1 * noise,
             multiscale=True,
-            multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
+            max_iter_sub_minor=2000,
         )
     mom0 = calc_faraday_moments(np.abs(result.clean_fdf_arr), phi, fwhm).mom0
     true_flux = 0.9
