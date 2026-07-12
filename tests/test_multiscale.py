@@ -15,7 +15,7 @@ from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.multiscale import (
     MultiscaleOptions,
     _reconvolve_model,
-    _ScaleKernels,
+    compute_scale_kernels,
     convolve_fdf_scale,
     make_scales,
     scale_bias_function,
@@ -93,7 +93,7 @@ def test_coupling_identity() -> None:
     phi2 = rmsf_res.phi_double_arr_radm2
 
     scales = np.array([0.0, 2.0, 4.0])
-    kernels = _ScaleKernels(scales, rmsf, fwhm, phi2, "tapered_quad")
+    kernels = compute_scale_kernels(scales, rmsf, fwhm, phi2, "tapered_quad")
     si = 2
     gamma = kernels.gamma[si]
 

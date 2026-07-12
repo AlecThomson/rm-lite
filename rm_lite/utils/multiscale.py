@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
@@ -33,8 +33,11 @@ DIVERGENCE_FACTOR = 2.0
 class MultiscaleOptions:
     """Options for multiscale RM-CLEAN."""
 
-    scale_bias: float = 0.6
-    """Scale-bias. Lower favours larger scales more"""
+    scale_bias: float = 0.8
+    """Scale-bias in (0, 1]. Lower favours larger scales more strongly; too low
+    over-extends unresolved sources. Default 0.8 keeps a point source on scale 0
+    (WSClean uses 0.6, but its image-domain PSF is far narrower than the RMSF is
+    here relative to the scale kernels)."""
     scales: NDArray[np.float64] | None = None
     """Explicit scales (RMSF FWHM units); None auto-selects WSClean-style"""
     n_scales: int | None = None
@@ -221,45 +224,54 @@ def _reconvolve_model(
     return out
 
 
-class _ScaleKernels:
+class ScaleKernels(NamedTuple):
     """Precomputed per-scale kernels/couplings for one spectrum."""
 
-    __slots__ = ("fwhm_ss", "gamma", "p_s", "p_ss", "scales")
+    scales: NDArray[np.float64]
+    """Scales (RMSF FWHM units)"""
+    p_s: list[NDArray[np.complex128]]
+    """Scale-convolved RMSF per scale (RMSF conv k_s), on the double phi axis"""
+    p_ss: list[NDArray[np.complex128]]
+    """Twice scale-convolved RMSF per scale (RMSF conv k_s conv k_s)"""
+    gamma: NDArray[np.float64]
+    """Coupling max|p_ss| per scale: a scale-s amplitude appears in the
+    scale-convolved residual scaled by this"""
+    fwhm_ss: NDArray[np.float64]
+    """Fitted FWHM of |p_ss| per scale (sub-minor restore width)"""
 
-    def __init__(
-        self,
-        scales: NDArray[np.float64],
-        rmsf_spectrum: NDArray[np.complex128],
-        rmsf_fwhm: float,
-        phi_double_arr_radm2: NDArray[np.float64],
-        kernel: KernelType,
-    ) -> None:
-        self.scales = scales
-        self.p_s: list[NDArray[np.complex128]] = []
-        self.p_ss: list[NDArray[np.complex128]] = []
-        self.gamma = np.ones_like(scales)
-        self.fwhm_ss = np.full_like(scales, rmsf_fwhm)
-        for i, scale in enumerate(scales):
-            p_s = convolve_fdf_scale(
-                scale, rmsf_fwhm, rmsf_spectrum, phi_double_arr_radm2, kernel
+
+def compute_scale_kernels(
+    scales: NDArray[np.float64],
+    rmsf_spectrum: NDArray[np.complex128],
+    rmsf_fwhm: float,
+    phi_double_arr_radm2: NDArray[np.float64],
+    kernel: KernelType,
+) -> ScaleKernels:
+    """Precompute the per-scale kernels/couplings for one spectrum."""
+    p_s_list: list[NDArray[np.complex128]] = []
+    p_ss_list: list[NDArray[np.complex128]] = []
+    gamma = np.ones_like(scales)
+    fwhm_ss = np.full_like(scales, rmsf_fwhm)
+    for i, scale in enumerate(scales):
+        p_s = convolve_fdf_scale(
+            scale, rmsf_fwhm, rmsf_spectrum, phi_double_arr_radm2, kernel
+        )
+        p_ss = convolve_fdf_scale(scale, rmsf_fwhm, p_s, phi_double_arr_radm2, kernel)
+        p_s_list.append(np.asarray(p_s, dtype=np.complex128))
+        p_ss_list.append(np.asarray(p_ss, dtype=np.complex128))
+        gamma[i] = float(np.nanmax(np.abs(p_ss)))
+        if scale != 0:
+            fwhm_ss[i] = fit_rmsf(
+                np.abs(p_ss),
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                fwhm_rmsf_radm2=rmsf_fwhm * scale,
             )
-            p_ss = convolve_fdf_scale(
-                scale, rmsf_fwhm, p_s, phi_double_arr_radm2, kernel
-            )
-            self.p_s.append(np.asarray(p_s, dtype=np.complex128))
-            self.p_ss.append(np.asarray(p_ss, dtype=np.complex128))
-            self.gamma[i] = float(np.nanmax(np.abs(p_ss)))
-            if scale != 0:
-                self.fwhm_ss[i] = fit_rmsf(
-                    np.abs(p_ss),
-                    phi_double_arr_radm2=phi_double_arr_radm2,
-                    fwhm_rmsf_radm2=rmsf_fwhm * scale,
-                )
+    return ScaleKernels(scales, p_s_list, p_ss_list, gamma, fwhm_ss)
 
 
 def find_significant_scale(
     resid_fdf_spectrum: NDArray[np.complex128],
-    scale_kernels: _ScaleKernels,
+    scale_kernels: ScaleKernels,
     scale_bias: float,
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
@@ -267,7 +279,11 @@ def find_significant_scale(
 ) -> int:
     """Index of the bias-weighted most-significant scale (Offringa 2017).
 
-    Selection is `max|resid (conv) k_s| * bias_s`.
+    Selection is `max|resid (conv) k_s| / eta_s * bias_s`. Dividing by the
+    point-source response `eta_s = max|RMSF (conv) k_s|` makes an unresolved
+    (delta) source score equally across scales, so scale 0 wins for it and
+    multiscale does not over-extend a point source; only genuinely extended
+    structure beats scale 0.
     """
     bias = scale_bias_function(scale_kernels.scales, scale_bias)
     scores = np.zeros_like(scale_kernels.scales)
@@ -295,7 +311,7 @@ def multiscale_clean_spectrum(
     kernel = multiscale_options.kernel
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
-    kernels = _ScaleKernels(
+    kernels = compute_scale_kernels(
         scales, rmsf_spectrum, rmsf_fwhm, phi_double_arr_radm2, kernel
     )
 
