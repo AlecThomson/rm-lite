@@ -10,8 +10,9 @@ from numpy.typing import NDArray
 from scipy import interpolate
 
 from rm_lite.tools_1d.rmsynth import RMSynth1DResults
-from rm_lite.utils.clean import rmclean
+from rm_lite.utils.clean import RMCleanOptions, rmclean
 from rm_lite.utils.logging import logger
+from rm_lite.utils.multiscale import MultiscaleOptions, multiscale_rmclean
 from rm_lite.utils.synthesis import (
     TheoreticalNoise,
     get_fdf_parameters,
@@ -58,6 +59,8 @@ def run_rmclean_from_synth(
     gain: float = 0.1,
     mask_arr: NDArray[np.bool_] | None = None,
     moment_threshold_snr: float = 5.0,
+    multiscale: bool = False,
+    multiscale_options: MultiscaleOptions | None = None,
 ) -> RMClean1DResults:
     """Run RM-CLEAN on the results of RM-synth.
 
@@ -69,6 +72,8 @@ def run_rmclean_from_synth(
         gain (float, optional): CLEAN gain. Defaults to 0.1.
         mask_arr (NDArray[np.bool_] | None, optional): Optional mask array. Defaults to None.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to the clean FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
+        multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
+        multiscale_options (MultiscaleOptions | None, optional): Scale/kernel/iteration options for multiscale. Its own `max_iter`/`gain` are used, not this function's. Defaults to None (MultiscaleOptions defaults).
 
     Returns:
         RMClean1DResults: RM-CLEAN results: `fdf_parameters`, `fdf_arrs`, `clean_parameters`.
@@ -106,18 +111,37 @@ def run_rmclean_from_synth(
 
     fdf_dirty_arr = rmsyth_arrs_df["fdf_dirty_complex_arr"].to_numpy().astype(complex)
 
-    rm_clean_results = rmclean(
-        dirty_fdf_arr=fdf_dirty_arr,
-        phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
-        rmsf_arr=rmsf_arrs_df["rmsf_complex_arr"].to_numpy().astype(complex),
-        phi_double_arr_radm2=rmsf_arrs_df["phi2_arr_radm2"].to_numpy().astype(float),
-        fwhm_rmsf_arr=fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float),
-        mask=mask,
-        threshold=threshold,
-        max_iter=max_iter,
-        gain=gain,
-        mask_arr=mask_arr,
-    )
+    if multiscale:
+        rm_clean_results = multiscale_rmclean(
+            freq_arr_hz=stokes_i_arrs_df["freq_arr_hz"].to_numpy().astype(float),
+            dirty_fdf_arr=fdf_dirty_arr,
+            phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
+            rmsf_arr=rmsf_arrs_df["rmsf_complex_arr"].to_numpy().astype(complex),
+            phi_double_arr_radm2=rmsf_arrs_df["phi2_arr_radm2"]
+            .to_numpy()
+            .astype(float),
+            fwhm_rmsf_arr=fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float),
+            clean_options=RMCleanOptions(
+                mask=mask, threshold=threshold, max_iter=max_iter, gain=gain
+            ),
+            multiscale_options=multiscale_options,
+            mask_arr=mask_arr,
+        )
+    else:
+        rm_clean_results = rmclean(
+            dirty_fdf_arr=fdf_dirty_arr,
+            phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
+            rmsf_arr=rmsf_arrs_df["rmsf_complex_arr"].to_numpy().astype(complex),
+            phi_double_arr_radm2=rmsf_arrs_df["phi2_arr_radm2"]
+            .to_numpy()
+            .astype(float),
+            fwhm_rmsf_arr=fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float),
+            mask=mask,
+            threshold=threshold,
+            max_iter=max_iter,
+            gain=gain,
+            mask_arr=mask_arr,
+        )
     clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr = rm_clean_results
 
     fdf_parameters = get_fdf_parameters(

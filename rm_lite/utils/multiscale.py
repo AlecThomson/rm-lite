@@ -12,9 +12,11 @@ from numpy.typing import NDArray
 from scipy.ndimage import convolve
 from tqdm.auto import tqdm
 
+from rm_lite.utils.arrays import nd_to_two_d, two_d_to_nd
 from rm_lite.utils.clean import (
     MinorLoopArrays,
     MinorLoopOptions,
+    RMCleanOptions,
     RMCleanResults,
     minor_loop,
 )
@@ -43,26 +45,19 @@ class MultiscaleOptions:
     """Cap on the auto-selected scale count (ignored if `scales` given)"""
     kernel: KernelType = "tapered_quad"
     """Scale kernel shape"""
-    max_iter: int = 1000
-    """Maximum major cycles"""
     max_iter_sub_minor: int = 10_000
     """Maximum sub-minor (per-scale Hogbom) iterations"""
-    gain: float = 0.1
-    """Clean loop gain"""
     sub_minor_fraction: float = 0.5
     """Re-select a scale once the activated scale's peak drops by this fraction"""
 
     def __post_init__(self) -> None:
-        if not 0 < self.gain <= 1:
-            msg = f"gain must be in (0, 1], got {self.gain}."
-            raise ValueError(msg)
         if not 0 < self.sub_minor_fraction < 1:
             msg = (
                 f"sub_minor_fraction must be in (0, 1), got {self.sub_minor_fraction}."
             )
             raise ValueError(msg)
-        if self.max_iter < 1 or self.max_iter_sub_minor < 1:
-            msg = "max_iter and max_iter_sub_minor must be >= 1."
+        if self.max_iter_sub_minor < 1:
+            msg = "max_iter_sub_minor must be >= 1."
             raise ValueError(msg)
         if self.scales is not None and len(self.scales) == 0:
             msg = "scales must be non-empty."
@@ -279,15 +274,17 @@ def multiscale_clean_spectrum(
     rmsf_spectrum: NDArray[np.complex128],
     rmsf_fwhm: float,
     scales: NDArray[np.float64],
-    mask: float,
-    threshold: float,
-    options: MultiscaleOptions,
+    clean_options: RMCleanOptions,
+    multiscale_options: MultiscaleOptions,
 ) -> tuple[NDArray[np.complex128], NDArray[np.complex128], NDArray[np.complex128], int]:
     """Multiscale CLEAN one FDF spectrum. Returns (clean, resid, model, iters)."""
+    mask = clean_options.mask
+    threshold = clean_options.threshold
+    kernel = multiscale_options.kernel
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
     kernels = _ScaleKernels(
-        scales, rmsf_spectrum, rmsf_fwhm, phi_double_arr_radm2, options.kernel
+        scales, rmsf_spectrum, rmsf_fwhm, phi_double_arr_radm2, kernel
     )
 
     # Divergence guard: keep the lowest-peak state seen and bail if the residual
@@ -297,12 +294,13 @@ def multiscale_clean_spectrum(
     best_resid = resid_fdf_spectrum.copy()
 
     iter_count = 0
-    for iter_count in range(1, options.max_iter + 1):
+    for iter_count in range(1, clean_options.max_iter + 1):
         peak = float(np.nanmax(np.abs(resid_fdf_spectrum)))
         if peak > best_peak * DIVERGENCE_FACTOR:
             logger.warning(
-                f"Multiscale CLEAN diverging (peak {peak:0.3g} > "
-                f"{DIVERGENCE_FACTOR}x best {best_peak:0.3g}); reverting to best."
+                f"Multiscale CLEAN diverging at iter {iter_count} "
+                f"(peak {peak:0.3g} > {DIVERGENCE_FACTOR}x best {best_peak:0.3g}); "
+                "reverting to best."
             )
             model_fdf_spectrum, resid_fdf_spectrum = best_model, best_resid
             break
@@ -318,10 +316,10 @@ def multiscale_clean_spectrum(
         scale_index = find_significant_scale(
             resid_fdf_spectrum,
             kernels,
-            options.scale_bias,
+            multiscale_options.scale_bias,
             rmsf_fwhm,
             phi_double_arr_radm2,
-            options.kernel,
+            kernel,
         )
         scale = float(scales[scale_index])
         gamma = float(kernels.gamma[scale_index])
@@ -333,18 +331,23 @@ def multiscale_clean_spectrum(
                 rmsf_fwhm,
                 resid_fdf_spectrum,
                 phi_double_arr_radm2,
-                options.kernel,
+                kernel,
             ),
             dtype=np.complex128,
         )
         mask_conv = np.abs(resid_conv) > mask * gamma
+        if not mask_conv.any():
+            # Even the most-significant scale has nothing above its mask; done.
+            break
         resid_conv_masked = np.ma.array(resid_conv, mask=~mask_conv)
 
         # Sub-minor cleans this scale only until its peak drops by
         # `sub_minor_fraction`, then re-select a scale. Stops one scale from
         # deep-cleaning to the floor and over-fitting.
         peak_conv = float(np.ma.max(np.ma.abs(resid_conv_masked)))
-        threshold_sub = max(threshold * gamma, options.sub_minor_fraction * peak_conv)
+        threshold_sub = max(
+            threshold * gamma, multiscale_options.sub_minor_fraction * peak_conv
+        )
 
         sub_minor = minor_loop(
             MinorLoopArrays(
@@ -355,8 +358,8 @@ def multiscale_clean_spectrum(
                 rmsf_fwhm=float(kernels.fwhm_ss[scale_index]),
             ),
             MinorLoopOptions(
-                max_iter=options.max_iter_sub_minor,
-                gain=options.gain,
+                max_iter=multiscale_options.max_iter_sub_minor,
+                gain=clean_options.gain,
                 mask=mask * gamma,
                 threshold=threshold_sub,
                 update_mask=True,
@@ -370,7 +373,7 @@ def multiscale_clean_spectrum(
 
         model_fdf_spectrum = model_fdf_spectrum + np.asarray(
             convolve_fdf_scale(
-                scale, rmsf_fwhm, true_deltas, phi_double_arr_radm2, options.kernel
+                scale, rmsf_fwhm, true_deltas, phi_double_arr_radm2, kernel
             ),
             dtype=np.complex128,
         )
@@ -397,8 +400,7 @@ def multiscale_rmclean(
     rmsf_arr: NDArray[np.complex128],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_arr: NDArray[np.float64],
-    mask: float,
-    threshold: float,
+    clean_options: RMCleanOptions,
     multiscale_options: MultiscaleOptions | None = None,
     mask_arr: NDArray[np.bool_] | None = None,
 ) -> RMCleanResults:
@@ -411,15 +413,15 @@ def multiscale_rmclean(
         rmsf_arr: RMSF, double-length phi on axis 0.
         phi_double_arr_radm2: Double-length Faraday depth array (rad/m^2).
         fwhm_rmsf_arr: Per-pixel RMSF FWHM.
-        mask: Masking threshold (FDF amplitude units).
-        threshold: Cleaning threshold (FDF amplitude units).
-        multiscale_options: Scale/kernel/iteration options.
+        clean_options: Shared clean options (mask, threshold, max_iter, gain).
+        multiscale_options: Scale/kernel/sub-minor options.
         mask_arr: Optional spatial mask of pixels to clean.
 
     Returns:
         RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr.
     """
     options = multiscale_options or MultiscaleOptions()
+    mask = clean_options.mask
     _bad_result = RMCleanResults(
         clean_fdf_arr=dirty_fdf_arr,
         model_fdf_arr=np.zeros_like(dirty_fdf_arr),
@@ -447,12 +449,14 @@ def multiscale_rmclean(
         logger.error("the xy dimensions of the RMSF and FDF must match.")
         return _bad_result
 
-    # Reshape everything to (phi, npix) so one loop covers 1D/2D/3D.
-    dirty_2d = dirty_fdf_arr.reshape(n_phi, -1)
-    rmsf_2d = rmsf_arr.reshape(rmsf_arr.shape[0], -1)
+    # Reshape phi-axis cubes to (phi, npix) so one loop covers 1D/2D/3D
+    # (same helpers as single-scale `_rmclean_nd`).
+    orig_shape = dirty_fdf_arr.shape
+    spatial_shape = orig_shape[1:]
+    dirty_2d = nd_to_two_d(dirty_fdf_arr)
+    rmsf_2d = nd_to_two_d(rmsf_arr)
     fwhm_1d = np.asarray(fwhm_rmsf_arr, dtype=np.float64).reshape(-1)
     n_pixels = dirty_2d.shape[1]
-    spatial_shape = dirty_fdf_arr.shape[1:]
     if mask_arr is None:
         pixel_mask = np.ones(n_pixels, dtype=bool)
     else:
@@ -506,9 +510,8 @@ def multiscale_rmclean(
             rmsf_spectrum=rmsf_2d[:, pix],
             rmsf_fwhm=float(fwhm_1d[pix]),
             scales=scales,
-            mask=mask,
-            threshold=threshold,
-            options=options,
+            clean_options=clean_options,
+            multiscale_options=options,
         )
         clean_2d[:, pix] = clean
         resid_2d[:, pix] = resid
@@ -518,9 +521,10 @@ def multiscale_rmclean(
     # Restore residual into the clean FDF (also covers un-cleaned pixels).
     clean_2d += resid_2d
 
+    clean_iter_arr = iter_2d.reshape(spatial_shape) if spatial_shape != () else iter_2d
     return RMCleanResults(
-        clean_fdf_arr=clean_2d.reshape(dirty_fdf_arr.shape),
-        model_fdf_arr=model_2d.reshape(dirty_fdf_arr.shape),
-        clean_iter_arr=iter_2d.reshape(spatial_shape),
-        resid_fdf_arr=resid_2d.reshape(dirty_fdf_arr.shape),
+        clean_fdf_arr=two_d_to_nd(clean_2d, orig_shape),
+        model_fdf_arr=two_d_to_nd(model_2d, orig_shape),
+        clean_iter_arr=clean_iter_arr,
+        resid_fdf_arr=two_d_to_nd(resid_2d, orig_shape),
     )

@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, _rmclean_nd
 from rm_lite.utils.logging import logger, quiet_logs
+from rm_lite.utils.multiscale import MultiscaleOptions, multiscale_rmclean
 from rm_lite.utils.synthesis import calc_faraday_moments
 
 
@@ -51,24 +52,41 @@ def _clean_block(
     fwhm_rmsf_radm2: float,
     clean_options: RMCleanOptions,
     log_level: int,
+    multiscale: bool = False,
+    multiscale_options: MultiscaleOptions | None = None,
+    freq_arr_hz: NDArray[np.float64] | None = None,
 ) -> _RMCleanBlockResult:
     with quiet_logs(log_level):
-        result = _rmclean_nd(
-            RMSynthArrays(
+        if multiscale:
+            assert freq_arr_hz is not None, "multiscale requires freq_arr_hz"
+            ny, nx = dirty_fdf_block.shape[1:]
+            result = multiscale_rmclean(
+                freq_arr_hz=freq_arr_hz,
                 dirty_fdf_arr=dirty_fdf_block,
                 phi_arr_radm2=phi_arr_radm2,
                 rmsf_arr=rmsf_block,
                 phi_double_arr_radm2=phi_double_arr_radm2,
-                fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
-            ),
-            clean_options,
-        )
+                fwhm_rmsf_arr=np.full((ny, nx), fwhm_rmsf_radm2),
+                clean_options=clean_options,
+                multiscale_options=multiscale_options,
+            )
+        else:
+            result = _rmclean_nd(
+                RMSynthArrays(
+                    dirty_fdf_arr=dirty_fdf_block,
+                    phi_arr_radm2=phi_arr_radm2,
+                    rmsf_arr=rmsf_block,
+                    phi_double_arr_radm2=phi_double_arr_radm2,
+                    fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
+                ),
+                clean_options,
+            )
     return _RMCleanBlockResult(
         clean_fdf=result.clean_fdf_arr,
         model_fdf=result.model_fdf_arr,
         resid_fdf=result.resid_fdf_arr,
         # RMCleanResults.clean_iter_arr is annotated NDArray[np.int16] but is
-        # actually built with dtype=int (int64) in _rmclean_nd.
+        # actually built with dtype=int (int64) here.
         iter_count=result.clean_iter_arr,  # type: ignore[arg-type]
     )
 
@@ -85,6 +103,9 @@ def rmclean_3d(
     gain: float = 0.1,
     moment_threshold: float | None = None,
     log_level: int = logging.ERROR,
+    multiscale: bool = False,
+    multiscale_options: MultiscaleOptions | None = None,
+    freq_arr_hz: NDArray[np.float64] | None = None,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on chunked dirty FDF and RMSF cubes.
 
@@ -115,12 +136,22 @@ def rmclean_3d(
             `logging.WARNING` or `logging.INFO` to restore progressively more
             per-pixel verbosity, e.g. while debugging a specific chunk.
             Defaults to `logging.ERROR`.
+        multiscale (bool, optional): Use multiscale RM-CLEAN. Requires
+            `freq_arr_hz`. Defaults to False.
+        multiscale_options (MultiscaleOptions | None, optional): Scale/kernel/
+            sub-minor options for multiscale. Defaults to None.
+        freq_arr_hz (NDArray[np.float64] | None, optional): Frequencies (Hz),
+            required when `multiscale=True` (sets the max recoverable scale).
+            Defaults to None.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
     """
     if fdf_dirty_cube.chunks[1:] != rmsf_cube.chunks[1:]:
         msg = "fdf_dirty_cube and rmsf_cube must have identical spatial chunking."
+        raise ValueError(msg)
+    if multiscale and freq_arr_hz is None:
+        msg = "multiscale=True requires freq_arr_hz."
         raise ValueError(msg)
 
     clean_options = RMCleanOptions(
@@ -155,6 +186,9 @@ def rmclean_3d(
             fwhm_rmsf_radm2,
             clean_options,
             log_level,
+            multiscale,
+            multiscale_options,
+            freq_arr_hz,
         )
 
         clean_blocks[idx] = da.from_delayed(
@@ -197,6 +231,9 @@ def rmclean_3d_from_synth(
     gain: float = 0.1,
     moment_threshold_snr: float = 5.0,
     log_level: int = logging.ERROR,
+    multiscale: bool = False,
+    multiscale_options: MultiscaleOptions | None = None,
+    freq_arr_hz: NDArray[np.float64] | None = None,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
 
@@ -220,6 +257,12 @@ def rmclean_3d_from_synth(
             FDF noise) applied to the clean FDF before computing the Faraday
             moment maps. Defaults to 5.0.
         log_level (int, optional): See `rmclean_3d`. Defaults to `logging.ERROR`.
+        multiscale (bool, optional): Use multiscale RM-CLEAN. Requires
+            `freq_arr_hz` (not carried on `RMSynth3DResults`). Defaults to False.
+        multiscale_options (MultiscaleOptions | None, optional): See `rmclean_3d`.
+            Defaults to None.
+        freq_arr_hz (NDArray[np.float64] | None, optional): Frequencies (Hz),
+            required when `multiscale=True`. Defaults to None.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -246,4 +289,7 @@ def rmclean_3d_from_synth(
         gain=gain,
         moment_threshold=moment_threshold,
         log_level=log_level,
+        multiscale=multiscale,
+        multiscale_options=multiscale_options,
+        freq_arr_hz=freq_arr_hz,
     )
