@@ -165,3 +165,4 @@ rm_lite/Untitled-1.ipynb
 2d.ipynb
 *.fits
 .claude/settings.json
+_probe/*
