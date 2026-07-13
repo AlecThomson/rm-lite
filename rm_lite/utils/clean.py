@@ -29,9 +29,18 @@ DType = TypeVar("DType", bound=np.generic)
 
 KernelType: TypeAlias = Literal["tapered_quad", "gaussian"]
 
-# Bail out of a spectrum's major loop if the residual peak exceeds this factor
-# times the best (lowest) peak seen: a runaway-divergence backstop.
+# Bail out of a spectrum's minor-cycle (scale-selection) loop if the residual
+# peak exceeds this factor times the best (lowest) peak seen: a runaway backstop.
 DIVERGENCE_FACTOR = 2.0
+
+# Stall backstop: if the residual peak fails to improve by this relative fraction
+# for STALL_PATIENCE consecutive minor cycles, the loop has plateaued above the
+# threshold (e.g. grinding scale-0 components into the noise floor) and stops at
+# the best state rather than running to max_iter. A converging minor cycle drops
+# the peak by roughly the sub-minor fraction (~50%), far above this 1%, so real
+# cleaning never trips it; slow noise-grinding (sub-1% ratcheting) does.
+STALL_REL_IMPROVEMENT = 1e-2
+STALL_PATIENCE = 5
 
 
 class RMCleanResults(NamedTuple):
@@ -42,9 +51,15 @@ class RMCleanResults(NamedTuple):
     model_fdf_arr: NDArray[np.complex128]
     """The clean components cube"""
     clean_iter_arr: NDArray[np.int16]
-    """The number of iterations for each pixel"""
+    """CLEAN iterations per pixel. Single-scale: minor iterations (one component
+    each). Multiscale: minor cycles (scale re-selections); see
+    `sub_minor_iter_arr` for the comparable component count."""
     resid_fdf_arr: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
+    sub_minor_iter_arr: NDArray[np.int16]
+    """Total component-placement steps per pixel: single-scale equals
+    `clean_iter_arr`; multiscale sums the sub-minor (per-scale Hogbom) iterations
+    over all minor cycles. This is the count comparable to single-scale."""
 
 
 class CleanLoopResults(NamedTuple):
@@ -296,7 +311,7 @@ def rmclean(
     gain: float = 0.1,
     mask_arr: NDArray[np.bool_] | None = None,
     multiscale: bool = False,
-    multiscale_scale_bias: float = 0.95,
+    multiscale_scale_bias: float = 0.8,
     multiscale_scales: NDArray[np.float64] | None = None,
     multiscale_n_scales: int | None = None,
     multiscale_kernel: KernelType = "tapered_quad",
@@ -318,7 +333,7 @@ def rmclean(
         gain (float, optional): Glean loop gain. Defaults to 0.1.
         mask_arr (NDArray[np.bool_] | None, optional): Additional mask of pixels to avoid. Defaults to None.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
-        multiscale_scale_bias (float, optional): Scale-bias in (0, 1]; lower favours larger scales more. Defaults to 0.95.
+        multiscale_scale_bias (float, optional): Scale-bias in (0, 1]; lower favours larger scales more. Defaults to 0.8.
         multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales (RMSF FWHM units); None auto-selects.
         multiscale_n_scales (int | None, optional): Cap on the auto scale count.
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
@@ -327,7 +342,7 @@ def rmclean(
         phi_max_scale_radm2 (float | None, optional): Largest recoverable Faraday scale (pi / lambda_sq_min); sets the auto scale range. None falls back to the phi window.
 
     Returns:
-        RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr
+        RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr, sub_minor_iter_arr
     """
     rm_synth_arrays = RMSynthArrays(
         dirty_fdf_arr=dirty_fdf_arr,
@@ -420,6 +435,7 @@ def _rmclean_nd(
     dirty_fdf_arr_2d = nd_to_two_d(rm_synth_arrays.dirty_fdf_arr)
     rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.rmsf_arr)
     iter_count_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
+    sub_minor_iter_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
     fwhm_rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.fwhm_rmsf_arr)
 
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
@@ -450,20 +466,23 @@ def _rmclean_nd(
         disable=not logger.isEnabledFor(logging.INFO),
     ):
         if multiscale:
-            (clean_spec, resid_spec, model_spec, iters) = multiscale_clean_spectrum(
-                dirty_fdf_spectrum=resid_fdf_arr_2d[:, pix_idx],
-                phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
-                phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
-                rmsf_spectrum=rmsf_arr_2d[:, pix_idx],
-                rmsf_fwhm=rmsf_fwhm,
-                scales=scales,
-                clean_options=clean_options,
-                multiscale_options=ms_options,
+            (clean_spec, resid_spec, model_spec, iters, sub_minor_iters) = (
+                multiscale_clean_spectrum(
+                    dirty_fdf_spectrum=resid_fdf_arr_2d[:, pix_idx],
+                    phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
+                    phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
+                    rmsf_spectrum=rmsf_arr_2d[:, pix_idx],
+                    rmsf_fwhm=rmsf_fwhm,
+                    scales=scales,
+                    clean_options=clean_options,
+                    multiscale_options=ms_options,
+                )
             )
             clean_fdf_spectrum_2d[:, pix_idx] = clean_spec
             resid_fdf_arr_2d[:, pix_idx] = resid_spec
             model_fdf_spectrum_2d[:, pix_idx] = model_spec
             iter_count_arr_2d[pix_idx] = iters
+            sub_minor_iter_arr_2d[pix_idx] = sub_minor_iters
             continue
         clean_loop_results = minor_cycle(
             rm_synth_1d_arrays=RMSynthArrays(
@@ -482,6 +501,9 @@ def _rmclean_nd(
         resid_fdf_arr_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
         model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.model_fdf_spectrum
         iter_count_arr_2d[pix_idx] = clean_loop_results.iter_count
+        # Single-scale: each minor iteration places one component, so the
+        # component count equals the minor-iteration count.
+        sub_minor_iter_arr_2d[pix_idx] = clean_loop_results.iter_count
 
     # Restore the residual to the cleaned FDF (moved outside of loop:
     # will now work for pixels/spectra without clean components)
@@ -496,14 +518,22 @@ def _rmclean_nd(
     )
     if rm_synth_arrays.dirty_fdf_arr.shape[1:] == ():
         iter_count_arr = two_d_to_nd(iter_count_arr_2d, (1,))
+        sub_minor_iter_arr = two_d_to_nd(sub_minor_iter_arr_2d, (1,))
     else:
         iter_count_arr = two_d_to_nd(
             iter_count_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape[1:]
         )
+        sub_minor_iter_arr = two_d_to_nd(
+            sub_minor_iter_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape[1:]
+        )
     resid_fdf_arr = two_d_to_nd(resid_fdf_arr_2d, rm_synth_arrays.dirty_fdf_arr.shape)
 
     return RMCleanResults(
-        clean_fdf_spectrum, model_fdf_spectrum, iter_count_arr, resid_fdf_arr
+        clean_fdf_spectrum,
+        model_fdf_spectrum,
+        iter_count_arr,
+        resid_fdf_arr,
+        sub_minor_iter_arr,
     )
 
 
@@ -598,15 +628,17 @@ def minor_cycle(
 class MultiscaleOptions:
     """Options for multiscale RM-CLEAN."""
 
-    scale_bias: float = 0.95
+    scale_bias: float = 0.8
     """Scale-bias in (0, 1] (Offringa & Smirnov 2017, eq. 3). Sets how strongly
     scale selection prefers larger scales: 1 behaves like single-scale CLEAN,
     lower values favour larger scales (and too low over-extends unresolved
     sources). The RMSF is broad relative to the scale kernels, so the per-scale
-    peaks are close together and selection is very sensitive to the bias; the
-    default 0.95 is near single-scale so a Faraday-thin source stays a delta,
-    while still recovering thick structure. WSClean's image-domain default (0.6)
-    over-extends here because its PSF is far narrower than the RMSF."""
+    peaks are close together and selection is very sensitive to the bias. The
+    default 0.8 engages the extended scales on a resolved source while keeping a
+    Faraday-thin source compact; near 1 (e.g. 0.95) scale 0 almost always wins,
+    reducing multiscale to single-scale, and below ~0.6 even a thin source
+    over-extends (WSClean's image-domain default of 0.6 assumes a PSF far narrower
+    than the RMSF)."""
     scales: NDArray[np.float64] | None = None
     """Explicit scales (RMSF FWHM units); None auto-selects WSClean-style"""
     n_scales: int | None = None
@@ -894,8 +926,19 @@ def multiscale_clean_spectrum(
     scales: NDArray[np.float64],
     clean_options: RMCleanOptions,
     multiscale_options: MultiscaleOptions,
-) -> tuple[NDArray[np.complex128], NDArray[np.complex128], NDArray[np.complex128], int]:
-    """Multiscale CLEAN one FDF spectrum. Returns (clean, resid, model, iters)."""
+) -> tuple[
+    NDArray[np.complex128], NDArray[np.complex128], NDArray[np.complex128], int, int
+]:
+    """Multiscale CLEAN one FDF spectrum.
+
+    Returns (clean, resid, model, minor_iters, sub_minor_iters): `minor_iters` is
+    the number of minor cycles (scale re-selections), `sub_minor_iters` the total
+    per-scale Hogbom component-placement steps (comparable to single-scale's
+    iteration count). The mask confines cleaning to significant channels, so a
+    deep threshold (well below the noise) is safe. Give it a generous phi window,
+    since scale kernels wider than the window pick up reflect-mode boundary
+    artefacts.
+    """
     mask = clean_options.mask
     threshold = clean_options.threshold
     kernel = multiscale_options.kernel
@@ -928,22 +971,32 @@ def multiscale_clean_spectrum(
     support = np.logical_or.reduce(scale_supports)
 
     iter_count = 0
+    sub_minor_total = 0
     if not support.any():
         return (
             _restore_multiscale(model_fdf_spectrum, phi_double_arr_radm2, rmsf_fwhm),
             resid_fdf_spectrum,
             model_fdf_spectrum,
             iter_count,
+            sub_minor_total,
         )
 
     # Divergence guard: keep the lowest-peak state seen and bail if the residual
-    # runs away (a poorly matched scale can over-subtract and blow up).
+    # runs away (a poorly matched scale can over-subtract and blow up). The peak
+    # is measured over the WHOLE array, not just `support`: an over-large scale
+    # can grow a spurious feature outside the clean region (one kernel-width from
+    # the source), which a support-only peak never sees. The threshold stop stays
+    # on `support`, since only that region is cleaned.
+    # `iter_count` counts minor cycles (scale re-selections); there is no major
+    # cycle here (no invert-and-subtract against the data).
     best_peak = np.inf
     best_model = model_fdf_spectrum.copy()
     best_resid = resid_fdf_spectrum.copy()
+    stall_count = 0
 
     for iter_count in range(1, clean_options.max_iter + 1):
-        peak = float(np.nanmax(np.abs(resid_fdf_spectrum[support])))
+        peak = float(np.nanmax(np.abs(resid_fdf_spectrum)))
+        support_peak = float(np.nanmax(np.abs(resid_fdf_spectrum[support])))
         if peak > best_peak * DIVERGENCE_FACTOR:
             logger.warning(
                 f"Multiscale CLEAN diverging at iter {iter_count} "
@@ -953,10 +1006,25 @@ def multiscale_clean_spectrum(
             model_fdf_spectrum, resid_fdf_spectrum = best_model, best_resid
             break
         if peak < best_peak:
+            stall_count = (
+                0
+                if peak < best_peak * (1 - STALL_REL_IMPROVEMENT)
+                else (stall_count + 1)
+            )
             best_peak = peak
             best_model = model_fdf_spectrum.copy()
             best_resid = resid_fdf_spectrum.copy()
-        if peak < threshold:
+        else:
+            stall_count += 1
+        if support_peak < threshold:
+            break
+        if stall_count >= STALL_PATIENCE:
+            logger.warning(
+                f"Multiscale CLEAN stalled at iter {iter_count} "
+                f"(peak {peak:0.3g} not improving, threshold {threshold:0.3g}); "
+                "stopping at best."
+            )
+            model_fdf_spectrum, resid_fdf_spectrum = best_model, best_resid
             break
 
         scale_index = find_significant_scale(
@@ -1016,6 +1084,8 @@ def multiscale_clean_spectrum(
             ),
         )
 
+        sub_minor_total += int(sub_minor.iter_count)
+
         # Undo the peak-response normalisation to recover true k_s amplitudes.
         true_deltas = sub_minor.model_fdf_spectrum / peak_response
         if not np.any(true_deltas):
@@ -1038,7 +1108,13 @@ def multiscale_clean_spectrum(
     clean_fdf_spectrum = _restore_multiscale(
         model_fdf_spectrum, phi_double_arr_radm2, rmsf_fwhm
     )
-    return clean_fdf_spectrum, resid_fdf_spectrum, model_fdf_spectrum, iter_count
+    return (
+        clean_fdf_spectrum,
+        resid_fdf_spectrum,
+        model_fdf_spectrum,
+        iter_count,
+        sub_minor_total,
+    )
 
 
 def default_scales(
@@ -1050,15 +1126,19 @@ def default_scales(
     """Scales (RMSF FWHM units): explicit if given, else WSClean-style auto.
 
     The auto max scale uses the largest recoverable Faraday scale
-    `phi_max_scale_radm2` (pi / lambda_sq_min) when provided. If it is not (e.g.
-    calling on bare arrays without the frequency sampling), it falls back to the
-    FDF phi window. Either way the scale-bias weighting and divergence guard
-    handle over-large scales, and an explicit `scales` overrides it entirely.
+    `phi_max_scale_radm2` (pi / lambda_sq_min) when provided, but is always capped
+    at the FDF phi window: a scale kernel wider than the window is meaningless (its
+    response flattens and its normalisation blows up), so `phi_max_scale_radm2` far
+    above the window (e.g. very high frequency coverage) does not inflate the scale
+    set. An explicit `scales` overrides all of this.
     """
     if multiscale_options.scales is not None:
         return multiscale_options.scales
+    window_max_scale = float(phi_arr_radm2.max() - phi_arr_radm2.min()) / (
+        2 * rmsf_fwhm
+    )
     if phi_max_scale_radm2 is not None:
-        max_scale = phi_max_scale_radm2 / rmsf_fwhm
+        max_scale = min(phi_max_scale_radm2 / rmsf_fwhm, window_max_scale)
     else:
-        max_scale = float(phi_arr_radm2.max() - phi_arr_radm2.min()) / (2 * rmsf_fwhm)
+        max_scale = window_max_scale
     return make_scales(max_scale, n_scales=multiscale_options.n_scales)

@@ -34,6 +34,7 @@ rmclean_scalar_schema = pl.Schema(
         "mask": pl.Float64,
         "threshold": pl.Float64,
         "n_iter": pl.Int64,
+        "n_sub_minor_iter": pl.Int64,
     }
 )
 rmclean_scalar_schema_df = rmclean_scalar_schema.to_frame(eager=True)
@@ -59,7 +60,7 @@ def run_rmclean_from_synth(
     mask_arr: NDArray[np.bool_] | None = None,
     moment_threshold_snr: float = 5.0,
     multiscale: bool = False,
-    multiscale_scale_bias: float = 0.95,
+    multiscale_scale_bias: float = 0.8,
     multiscale_scales: NDArray[np.float64] | None = None,
     multiscale_n_scales: int | None = None,
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
@@ -77,7 +78,7 @@ def run_rmclean_from_synth(
         mask_arr (NDArray[np.bool_] | None, optional): Optional mask array. Defaults to None.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to the clean FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
-        multiscale_scale_bias (float, optional): Scale-bias in (0, 1]; lower favours larger scales more. Defaults to 0.95.
+        multiscale_scale_bias (float, optional): Scale-bias in (0, 1]; lower favours larger scales more. Defaults to 0.8.
         multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales (RMSF FWHM units); None auto-selects from the RMSF max scale.
         multiscale_n_scales (int | None, optional): Cap on the auto scale count.
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
@@ -140,7 +141,13 @@ def run_rmclean_from_synth(
         multiscale_sub_minor_fraction=multiscale_sub_minor_fraction,
         phi_max_scale_radm2=float(fdf_parameters["phi_max_scale_radm2"][0]),
     )
-    clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr = rm_clean_results
+    (
+        clean_fdf_arr,
+        model_fdf_arr,
+        clean_iter_arr,
+        resid_fdf_arr,
+        sub_minor_iter_arr,
+    ) = rm_clean_results
 
     fdf_parameters = get_fdf_parameters(
         fdf_arr=rm_clean_results.clean_fdf_arr,
@@ -186,6 +193,7 @@ def run_rmclean_from_synth(
                 "mask": mask,
                 "threshold": threshold,
                 "n_iter": clean_iter_arr,
+                "n_sub_minor_iter": sub_minor_iter_arr,
             }
         )
     )

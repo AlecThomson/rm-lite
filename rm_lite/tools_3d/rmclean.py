@@ -95,7 +95,7 @@ def rmclean_3d(
     moment_threshold: float | None = None,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
-    multiscale_scale_bias: float = 0.95,
+    multiscale_scale_bias: float = 0.8,
     multiscale_scales: NDArray[np.float64] | None = None,
     multiscale_n_scales: int | None = None,
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
@@ -134,7 +134,7 @@ def rmclean_3d(
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
         multiscale_scale_bias (float, optional): Scale-bias in (0, 1];
-            lower favours larger scales more. Defaults to 0.95.
+            lower favours larger scales more. Defaults to 0.8.
         multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales
             (RMSF FWHM units); None auto-selects.
         multiscale_n_scales (int | None, optional): Cap on the auto scale count.
@@ -238,7 +238,7 @@ def rmclean_3d_from_synth(
     moment_threshold_snr: float = 5.0,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
-    multiscale_scale_bias: float = 0.95,
+    multiscale_scale_bias: float = 0.8,
     multiscale_scales: NDArray[np.float64] | None = None,
     multiscale_n_scales: int | None = None,
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
