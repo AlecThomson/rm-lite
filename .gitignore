@@ -164,4 +164,5 @@ rm_lite/multiscale.ipynb
 rm_lite/Untitled-1.ipynb
 2d.ipynb
 *.fits
-.claude/settings.json
+.claude/
+_probe/
