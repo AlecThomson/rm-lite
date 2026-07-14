@@ -30,6 +30,7 @@ from rm_lite.utils.synthesis import (
     FDFOptions,
     RMSynthParams,
     TheoreticalNoise,
+    WeightType,
     compute_rmsynth_params,
     compute_theoretical_noise,
     get_fwhm_rmsf,
@@ -386,7 +387,8 @@ def rmsynth_3d(
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
-    weight_type: Literal["variance", "uniform"] = "variance",
+    weight_type: WeightType = "variance",
+    robust: float | None = None,
     stokes_i: da.Array | None = None,
     stokes_i_error: NDArray[np.float64] | da.Array | None = None,
     stokes_i_model: da.Array | None = None,
@@ -414,7 +416,8 @@ def rmsynth_3d(
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Samples across the RMSF. Defaults to 10.0.
-        weight_type ("variance", "uniform", optional): Weighting. Defaults to "variance".
+        weight_type (WeightType, optional): 'variance'/'natural' (1/sigma^2), 'uniform' (equal per channel), 'uniform_lsq' (equal per lambda^2, narrows the RMSF), 'briggs' (robust). Defaults to "variance".
+        robust (float | None, optional): Briggs robust parameter, required for weight_type='briggs'. Defaults to None.
         stokes_i (da.Array | None, optional): Stokes I cube to fit per pixel for
             the fractional correction. Ignored if `stokes_i_model` is given.
             Defaults to None (FDF stays in Q/U flux).
@@ -467,6 +470,7 @@ def rmsynth_3d(
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
         weight_type=weight_type,
+        robust=robust,
     )
     fit_options = StokesIFitOptions(
         fit_order=fit_order,
@@ -618,7 +622,8 @@ def rmsynth_3d_from_fits(
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
-    weight_type: Literal["variance", "uniform"] = "variance",
+    weight_type: WeightType = "variance",
+    robust: float | None = None,
     stokes_i_file: str | Path | None = None,
     stokes_i_error_file: str | Path | None = None,
     stokes_i_model_file: str | Path | None = None,
@@ -650,7 +655,8 @@ def rmsynth_3d_from_fits(
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
-        weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
+        weight_type (WeightType, optional): See `rmsynth_3d`. Defaults to "variance".
+        robust (float | None, optional): Briggs robust parameter, required for weight_type='briggs'. Defaults to None.
         stokes_i_file (str | Path | None, optional): Path to a Stokes I FITS cube
             (measurements) to fit per pixel for fractional-polarization
             correction. See `rmsynth_3d`. Defaults to None.
@@ -682,7 +688,14 @@ def rmsynth_3d_from_fits(
 
     freq_arr_hz = freq_arr_hz_from_header(header_q, n_freq=int(stokes_q.shape[0]))
 
-    if weight_arr is None and weight_type == "variance":
+    # Noise-based types use 1/sigma^2 as their base (uniform_lsq/briggs then apply
+    # the geometric lambda^2 factor); per-channel `uniform` deliberately ignores noise.
+    if weight_arr is None and weight_type in (
+        "variance",
+        "natural",
+        "uniform_lsq",
+        "briggs",
+    ):
         noise_arr = estimate_channel_noise_mad(stokes_q, stokes_u)
         weight_arr = 1.0 / noise_arr**2
 
@@ -711,6 +724,7 @@ def rmsynth_3d_from_fits(
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
         weight_type=weight_type,
+        robust=robust,
         stokes_i=stokes_i,
         stokes_i_error=stokes_i_error,
         stokes_i_model=stokes_i_model,

@@ -15,6 +15,7 @@ from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FDFOptions,
     StokesData,
+    WeightType,
     compute_rmsynth_params,
     compute_theoretical_noise,
     create_fractional_spectra,
@@ -78,7 +79,8 @@ def run_rmsynth(
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
-    weight_type: Literal["variance", "uniform"] = "variance",
+    weight_type: WeightType = "variance",
+    robust: float | None = None,
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real: bool = False,
     fit_function: Literal["log", "linear"] = "log",
@@ -99,7 +101,8 @@ def run_rmsynth(
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Spacing in Faraday depth. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
-        weight_type ("variance", "uniform", optional): Type of weighting. Defaults to "variance".
+        weight_type (WeightType, optional): Weighting: 'variance' (1/sigma^2), 'uniform' (equal per channel), 'uniform_lsq' (equal per lambda^2 interval, narrows the RMSF), 'briggs' (robust). Defaults to "variance".
+        robust (float | None, optional): Briggs robust parameter, required for weight_type='briggs'. Defaults to None.
         do_fit_rmsf (bool, optional): Fit the RMSF main lobe. Defaults to False.
         do_fit_rmsf_real (bool, optional): The the real part of the RMSF. Defaults to False.
         fit_function ("log" | "linear", optional): _description_. Defaults to "log".
@@ -127,6 +130,7 @@ def run_rmsynth(
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,
         weight_type=weight_type,
+        robust=robust,
         do_fit_rmsf=do_fit_rmsf,
         do_fit_rmsf_real=do_fit_rmsf_real,
     )

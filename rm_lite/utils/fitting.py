@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, Protocol
 
@@ -185,12 +186,16 @@ def fit_fdf(
     mean_guess = float(phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])])
     stddev_guess = float(fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2))))
     if mask.sum() > 1:
-        popt, _ = optimize.curve_fit(
-            gaussian,
-            phi_arr_radm2[mask],
-            fdf_to_fit_arr[mask],
-            p0=[amplitude_guess, mean_guess, stddev_guess],
-        )
+        # pcov is discarded, so a "covariance could not be estimated" warning on a
+        # near-flat (depolarised) peak is irrelevant here; the params still fit.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", optimize.OptimizeWarning)
+            popt, _ = optimize.curve_fit(
+                gaussian,
+                phi_arr_radm2[mask],
+                fdf_to_fit_arr[mask],
+                p0=[amplitude_guess, mean_guess, stddev_guess],
+            )
         logger.debug(f"Fit results: {popt}")
         amplitude_fit, mean_fit, stddev_fit = popt
     else:
