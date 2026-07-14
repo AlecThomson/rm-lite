@@ -68,10 +68,13 @@ def test_scale_bias_function() -> None:
 
 
 def test_make_scales() -> None:
-    scales = make_scales(10.0)
+    # Default first_scale=4 (WSClean's rule): 0 then geometric doubling.
+    scales = make_scales(40.0)
     assert scales[0] == 0.0
-    assert np.allclose(scales, [0, 1, 2, 4, 8])
-    assert len(make_scales(10.0, n_scales=3)) == 3
+    assert np.allclose(scales, [0, 4, 8, 16, 32])
+    assert len(make_scales(40.0, n_scales=3)) == 3
+    # An explicit first_scale still drives a finer grid.
+    assert np.allclose(make_scales(10.0, first_scale=1.0), [0, 1, 2, 4, 8])
 
 
 def test_default_scales_capped_to_phi_window() -> None:

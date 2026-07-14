@@ -686,7 +686,12 @@ def make_scales(
     n_scales: int | None = None,
     first_scale: float = 4.0,
 ) -> NDArray[np.float64]:
-    """WSClean-style scale set: 0 then geometric doubling up to `max_scale`."""
+    """WSClean-style scale set: 0 then geometric doubling up to `max_scale`.
+
+    `first_scale` defaults to 4 (RMSF FWHM units): WSClean's rule of a window 4x
+    the beam FWHM (shape FWHM ~1.8x), so the first extended scale is well wider
+    than the RMSF and point sources stay on the delta scale.
+    """
     scales = [0.0]
     scale = first_scale
     while scale < max_scale:
@@ -1242,11 +1247,7 @@ def default_scales(
         max_scale = min(phi_max_scale_radm2 / rmsf_fwhm, window_max_scale)
     else:
         max_scale = window_max_scale
-    # first_scale=4: WSClean's rule (window 4x the beam FWHM, shape FWHM ~1.8x),
-    # so the first extended scale is well wider than the RMSF and point sources
-    # stay on the delta scale. Override the whole grid with `multiscale_scales`.
-    return make_scales(
-        max_scale,
-        n_scales=multiscale_options.n_scales,
-        first_scale=4.0,
-    )
+    # make_scales starts the grid at first_scale=4 (WSClean's rule; see there),
+    # which keeps point sources on the delta scale. Override the whole grid with
+    # `multiscale_scales`.
+    return make_scales(max_scale, n_scales=multiscale_options.n_scales)
