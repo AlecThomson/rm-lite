@@ -17,7 +17,6 @@ from rm_lite.utils.arrays import nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
     fit_rmsf,
     gaussian,
-    gaussian_integrand,
     unit_centred_gaussian,
 )
 from rm_lite.utils.logging import TqdmToLogger, logger
@@ -126,8 +125,6 @@ class MinorLoopArrays(NamedTuple):
     """RMSF spectrum"""
     rmsf_fwhm: float
     """FWHM of the RMSF"""
-    peak_find_arr: NDArray[np.float64] | None = None
-    """Peak finding array"""
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -181,14 +178,6 @@ def minor_loop(
     mask_arr_original = mask_arr.copy()
     iter_count = int(minor_loop_options.start_iter)
 
-    if minor_loop_arrays.peak_find_arr is not None:
-        peak_find_arr = minor_loop_arrays.peak_find_arr.copy()
-        peak_find_arr_mask = np.ma.array(
-            minor_loop_arrays.peak_find_arr.copy(), mask=~mask_arr
-        )
-    else:
-        peak_find_arr_mask = None
-
     # Find the index of the peak of the RMSF
     max_rmsf_index = np.nanargmax(np.abs(rmsf_spectrum))
 
@@ -218,10 +207,7 @@ def minor_loop(
             )
             break
         # Get the absolute peak channel, values and Faraday depth
-        if peak_find_arr_mask is not None:
-            peak_fdf_index = np.ma.argmax(np.abs(peak_find_arr_mask))
-        else:
-            peak_fdf_index = np.ma.argmax(np.abs(resid_fdf_spectrum_mask))
+        peak_fdf_index = np.ma.argmax(np.abs(resid_fdf_spectrum_mask))
         peak_fdf = resid_fdf_spectrum_mask[peak_fdf_index]
         peak_rm = phi_arr_radm2[peak_fdf_index]
 
@@ -237,8 +223,6 @@ def minor_loop(
 
         # Subtract the product of the clean_component shifted RMSF from the residual FDF
         resid_fdf_spectrum -= clean_component * shifted_rmsf_spectrum
-        if minor_loop_arrays.peak_find_arr is not None:
-            peak_find_arr -= np.abs(clean_component * shifted_rmsf_spectrum)
 
         # Restore the clean_component * a Gaussian to the cleaned FDF
         clean_fdf_spectrum += gaussian(
@@ -253,8 +237,6 @@ def minor_loop(
             # Mask anything that was previously masked
             mask_arr = mask_arr & mask_arr_original
         resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
-        if peak_find_arr_mask is not None:
-            peak_find_arr_mask = np.ma.array(peak_find_arr, mask=~mask_arr)
 
     return MinorLoopResults(
         clean_fdf_spectrum=clean_fdf_spectrum,
@@ -264,21 +246,6 @@ def minor_loop(
         model_rmsf_spectrum=model_rmsf_spectrum,
         iter_count=iter_count,
     )
-
-
-def restore_fdf(
-    model_fdf_spectrum: NDArray[np.complex128],
-    phi_double_arr_radm2: NDArray[np.float64],
-    fwhm_rmsf: float,
-) -> NDArray[np.complex128]:
-    clean_beam = unit_centred_gaussian(
-        x=phi_double_arr_radm2,
-        fwhm=fwhm_rmsf,
-    ) / gaussian_integrand(amplitude=1, fwhm=fwhm_rmsf)
-    restored_fdf = np.convolve(
-        model_fdf_spectrum.real, clean_beam, mode="valid"
-    ) + 1j * np.convolve(model_fdf_spectrum.imag, clean_beam, mode="valid")
-    return np.array(restored_fdf[1:-1])
 
 
 class RMSynthArrays(NamedTuple):
@@ -296,6 +263,9 @@ class RMSynthArrays(NamedTuple):
     """FWHM of the RMSF array"""
     fdf_mask_arr: NDArray[np.bool_] | None = None
     """Mask of pixels to clean"""
+    noise_rmsf_arr: NDArray[np.complex128] | None = None
+    """w^2-RMSF noise covariance on the double-phi axis; None -> use rmsf_arr
+    (exact for uniform weights). Only used by multiscale selection="snr"."""
 
 
 def rmclean(
@@ -316,7 +286,9 @@ def rmclean(
     multiscale_kernel: KernelType = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
+    multiscale_selection: Literal["bias", "snr"] = "bias",
     phi_max_scale_radm2: float | None = None,
+    noise_rmsf_arr: NDArray[np.complex128] | None = None,
 ) -> RMCleanResults:
     """Perform RM-CLEAN on a Faraday dispersion function array.
 
@@ -338,7 +310,9 @@ def rmclean(
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
         multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations per scale. Defaults to 10_000.
         multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
+        multiscale_selection ("bias" | "snr", optional): Scale-selection mode. "bias" = Offringa eq-3 scale-bias (default); "snr" = matched-filter max|R conv K_s| / sigma_s (uses a finer scale grid). Defaults to "bias".
         phi_max_scale_radm2 (float | None, optional): Largest recoverable Faraday scale (pi / lambda_sq_min); sets the auto scale range. None falls back to the phi window.
+        noise_rmsf_arr (NDArray[np.complex128] | None, optional): w^2-RMSF noise covariance (double-phi axis, same shape as rmsf_arr) for the selection="snr" sigma_s. None uses rmsf_arr (exact for uniform weights). Defaults to None.
 
     Returns:
         RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr, sub_minor_iter_arr
@@ -350,6 +324,7 @@ def rmclean(
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_arr=fwhm_rmsf_arr,
         fdf_mask_arr=mask_arr,
+        noise_rmsf_arr=noise_rmsf_arr,
     )
     clean_options = RMCleanOptions(
         mask=mask,
@@ -365,6 +340,7 @@ def rmclean(
             kernel=multiscale_kernel,
             max_iter_sub_minor=multiscale_max_iter_sub_minor,
             sub_minor_fraction=multiscale_sub_minor_fraction,
+            selection=multiscale_selection,
         )
         if multiscale
         else None
@@ -433,6 +409,11 @@ def _rmclean_nd(
     # Reshape the arrays to 2D i.e. [phi, x, y] -> [phi, x*y]
     dirty_fdf_arr_2d = nd_to_two_d(rm_synth_arrays.dirty_fdf_arr)
     rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.rmsf_arr)
+    noise_rmsf_arr_2d = (
+        nd_to_two_d(rm_synth_arrays.noise_rmsf_arr)
+        if rm_synth_arrays.noise_rmsf_arr is not None
+        else None
+    )
     iter_count_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
     sub_minor_iter_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
     fwhm_rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.fwhm_rmsf_arr)
@@ -475,6 +456,9 @@ def _rmclean_nd(
                     scales=scales,
                     clean_options=clean_options,
                     multiscale_options=ms_options,
+                    noise_rmsf_spectrum=noise_rmsf_arr_2d[:, pix_idx]
+                    if noise_rmsf_arr_2d is not None
+                    else None,
                 )
             )
             clean_fdf_spectrum_2d[:, pix_idx] = clean_spec
@@ -644,6 +628,10 @@ class MultiscaleOptions:
     """Maximum sub-minor (per-scale Hogbom) iterations"""
     sub_minor_fraction: float = 0.5
     """Re-select a scale once the activated scale's peak drops by this fraction"""
+    selection: Literal["bias", "snr"] = "bias"
+    """Scale-selection mode. "bias" = Offringa eq-3 scale-bias selection
+    (default); "snr" = matched-filter selection score max|R conv K_s| / sigma_s,
+    no eq-3 bias, self-protecting so it uses a finer scale grid."""
 
     def __post_init__(self) -> None:
         if not 0 < self.sub_minor_fraction < 1:
@@ -694,6 +682,33 @@ def make_scales(
     """
     scales = [0.0]
     scale = first_scale
+    while scale < max_scale:
+        scales.append(scale)
+        scale *= 2
+    scale_arr = np.array(scales, dtype=np.float64)
+    if n_scales is not None:
+        scale_arr = scale_arr[:n_scales]
+    return scale_arr
+
+
+def make_fine_scales(
+    max_scale: float,
+    n_scales: int | None = None,
+) -> NDArray[np.float64]:
+    """Fine scale set for the SNR selector: 0, 1.5, 3, then geometric doubling
+    from 6, up to `max_scale`.
+
+    The coarse `make_scales` grid (first extended scale at 4x the RMSF FWHM)
+    exists only to keep point sources off the extended scales for the BIASED
+    selector, which has no noise model to protect them. The SNR selector is
+    self-protecting via sigma_s (a point source scores highest on scale 0), so it
+    can afford the finer anchors at 1.5 and 3 for better thin/thick discrimination.
+    """
+    scales = [0.0]
+    for anchor in (1.5, 3.0):
+        if anchor < max_scale:
+            scales.append(anchor)
+    scale = 6.0
     while scale < max_scale:
         scales.append(scale)
         scale *= 2
@@ -854,6 +869,10 @@ class ScaleKernels(NamedTuple):
     fwhm_conv_scale_twice: NDArray[np.float64]
     """Fitted FWHM of `|RMSF conv K_s conv K_s|` per scale (sub-minor restore
     width)."""
+    sigma_s: NDArray[np.float64]
+    """Per-scale FDF noise std relative to scale 0 under correlated FDF noise,
+    for the matched-filter (SNR) selector: sqrt((K_s conv K_s conv C)(0) / C(0))
+    with C the noise-covariance RMSF. sigma_s[0] == 1."""
 
 
 def compute_scale_kernels(
@@ -862,15 +881,25 @@ def compute_scale_kernels(
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
     kernel: KernelType,
+    noise_rmsf_spectrum: NDArray[np.complex128] | None = None,
 ) -> ScaleKernels:
     """Precompute the per-scale RMSF responses for one spectrum.
 
     See `ScaleKernels`; follows Offringa & Smirnov (2017), Section 2.2.
+    `noise_rmsf_spectrum` is the w^2-RMSF noise covariance (None -> use
+    `rmsf_spectrum`, exact for uniform weights) used only for `sigma_s`.
     """
     rmsf_conv_scale: list[NDArray[np.complex128]] = []
     rmsf_conv_scale_twice: list[NDArray[np.complex128]] = []
     peak_response = np.ones_like(scales)
     fwhm_conv_scale_twice = np.full_like(scales, rmsf_fwhm)
+    # sigma_s = sqrt((K_s conv K_s conv C)(0) / C(0)): the zero-lag value of the
+    # noise covariance C twice-convolved with the scale kernel. C is the w^2-RMSF
+    # when supplied, else the ordinary RMSF (exact for uniform weights). "Zero
+    # lag" is the RMSF peak channel; the twice-conv response peaks there too.
+    cov = rmsf_spectrum if noise_rmsf_spectrum is None else noise_rmsf_spectrum
+    cov_peak_index = int(np.nanargmax(np.abs(cov)))
+    qform = np.ones_like(scales)
     for i, scale in enumerate(scales):
         conv_once = convolve_fdf_scale(
             scale, rmsf_fwhm, rmsf_spectrum, phi_double_arr_radm2, kernel
@@ -887,12 +916,25 @@ def compute_scale_kernels(
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 fwhm_rmsf_radm2=rmsf_fwhm * scale,
             )
+        if noise_rmsf_spectrum is None:
+            # C == RMSF, so the twice-conv of C is exactly conv_twice; reuse it.
+            qform[i] = float(np.real(conv_twice[cov_peak_index]))
+        else:
+            noise_conv_once = convolve_fdf_scale(
+                scale, rmsf_fwhm, cov, phi_double_arr_radm2, kernel
+            )
+            noise_conv_twice = convolve_fdf_scale(
+                scale, rmsf_fwhm, noise_conv_once, phi_double_arr_radm2, kernel
+            )
+            qform[i] = float(np.real(noise_conv_twice[cov_peak_index]))
+    sigma_s = np.sqrt(qform / qform[0])
     return ScaleKernels(
         scales,
         rmsf_conv_scale,
         rmsf_conv_scale_twice,
         peak_response,
         fwhm_conv_scale_twice,
+        sigma_s,
     )
 
 
@@ -904,15 +946,18 @@ def find_significant_scale(
     phi_double_arr_radm2: NDArray[np.float64],
     kernel: KernelType,
     active: NDArray[np.bool_] | None = None,
+    selection: Literal["bias", "snr"] = "bias",
 ) -> int:
-    """Index of the bias-weighted most-significant scale (Offringa 2017).
+    """Index of the most-significant scale (Offringa 2017).
 
-    Selection is `max|resid (conv) k_s| * bias_s`. For `scale_bias` < 1 `bias_s`
-    is > 1 for larger scales (and grows as `scale_bias` drops), so a lower
-    `scale_bias` favours larger scales; `scale_bias` near 1 makes `bias_s` ~ 1
-    for all scales, keeping a point source on scale 0. `active` (if given) masks
-    out scales that have exhausted their allowed region, so they are not
-    reselected forever.
+    selection="bias": `max|resid (conv) k_s| * bias_s`. For `scale_bias` < 1
+    `bias_s` is > 1 for larger scales (and grows as `scale_bias` drops), so a
+    lower `scale_bias` favours larger scales; `scale_bias` near 1 makes `bias_s`
+    ~ 1 for all scales, keeping a point source on scale 0.
+    selection="snr": matched filter `max|resid (conv) k_s| / sigma_s`, no eq-3
+    bias; a point source scores highest on scale 0 without any bias tuning.
+    `active` (if given) masks out scales that have exhausted their allowed region,
+    so they are not reselected forever.
     """
     bias = scale_bias_function(scale_kernels.scales, scale_bias)
     scores = np.full_like(scale_kernels.scales, -np.inf)
@@ -922,7 +967,11 @@ def find_significant_scale(
         resid_conv = convolve_fdf_scale(
             scale, rmsf_fwhm, resid_fdf_spectrum, phi_double_arr_radm2, kernel
         )
-        scores[i] = np.nanmax(np.abs(resid_conv)) * bias[i]
+        peak = float(np.nanmax(np.abs(resid_conv)))
+        if selection == "snr":
+            scores[i] = peak / scale_kernels.sigma_s[i]
+        else:
+            scores[i] = peak * bias[i]
     return int(np.argmax(scores))
 
 
@@ -954,6 +1003,7 @@ def _multiscale_minor_cycles(
     max_iter_sub_minor = multiscale_options.max_iter_sub_minor
     sub_minor_fraction = multiscale_options.sub_minor_fraction
     scale_bias = multiscale_options.scale_bias
+    selection = multiscale_options.selection
     active = np.array([bool(s.any()) for s in allowed_supports])
     support = np.logical_or.reduce(allowed_supports)
     n_iter = 0
@@ -1010,9 +1060,29 @@ def _multiscale_minor_cycles(
             phi_double_arr_radm2,
             kernel,
             active=active,
+            selection=selection,
         )
         scale = float(scales[scale_index])
         peak_response = float(kernels.peak_response[scale_index])
+        sigma_s_i = float(kernels.sigma_s[scale_index])
+
+        # `peak_response` plays two distinct roles in the once-convolved residual
+        # space and they must not be conflated:
+        #  (A) AMPLITUDE recovery / flux calibration: a scale-s component of true
+        #      amplitude a peaks at a*peak_response in the once-convolved residual,
+        #      so dividing by peak_response recovers a. This is ALWAYS
+        #      peak_response, in both selection modes (see the sub-minor rmsf and
+        #      true_deltas below).
+        #  (B) DETECTION threshold / mask in the once-convolved space: this is
+        #      where the noise model enters. The NOISE std in the once-convolved
+        #      residual scales by sigma_s (= sqrt(peak_response) for uniform
+        #      weights) relative to sigma_0, so for a fixed N-sigma detection the
+        #      threshold must scale by sigma_s, not peak_response.
+        # "bias" mode keeps the historical peak_response threshold; "snr" mode
+        # uses sigma_s. Since peak_response = sigma_s^2 these genuinely differ (the
+        # bias threshold over-suppresses wide scales as a noise threshold, which is
+        # fine as an amplitude-stopping rule but wrong for matched-filter cleaning).
+        thresh_scale = peak_response if selection == "bias" else sigma_s_i
 
         # Scale-convolved residual; sub-minor cleans in this space, restricted to
         # the scale's allowed region and down to the stop threshold.
@@ -1022,7 +1092,7 @@ def _multiscale_minor_cycles(
             ),
             dtype=np.complex128,
         )
-        mask_conv = (np.abs(resid_conv) > stop_threshold * peak_response) & (
+        mask_conv = (np.abs(resid_conv) > stop_threshold * thresh_scale) & (
             allowed_supports[scale_index]
         )
         if not mask_conv.any():
@@ -1042,8 +1112,10 @@ def _multiscale_minor_cycles(
         # Sub-minor cleans this scale only until its peak drops by
         # `sub_minor_fraction`, then re-select a scale.
         peak_conv = float(np.ma.max(np.ma.abs(resid_conv_masked)))
+        # Detection sites use thresh_scale (role B); the sub-minor rmsf keeps
+        # peak_response (role A, flux calibration).
         threshold_sub = max(
-            stop_threshold * peak_response,
+            stop_threshold * thresh_scale,
             sub_minor_fraction * peak_conv,
         )
 
@@ -1059,7 +1131,7 @@ def _multiscale_minor_cycles(
             MinorLoopOptions(
                 max_iter=max_iter_sub_minor,
                 gain=gain,
-                mask=stop_threshold * peak_response,
+                mask=stop_threshold * thresh_scale,
                 threshold=threshold_sub,
                 update_mask=True,
             ),
@@ -1070,7 +1142,17 @@ def _multiscale_minor_cycles(
         # Undo the peak-response normalisation to recover true k_s amplitudes.
         true_deltas = sub_minor.model_fdf_spectrum / peak_response
         if not np.any(true_deltas):
-            break
+            # Sub-minor placed nothing for this scale; retire it (as the empty-mask
+            # branch above) so a single stuck scale does not kill the whole phase.
+            active[scale_index] = False
+            if not active.any():
+                break
+            support = np.logical_or.reduce(
+                [s for s, a in zip(allowed_supports, active, strict=True) if a]
+            )
+            if not support.any():
+                break
+            continue
         if record is not None:
             record[scale_index].extend(np.nonzero(true_deltas)[0].tolist())
 
@@ -1123,6 +1205,7 @@ def multiscale_clean_spectrum(
     scales: NDArray[np.float64],
     clean_options: RMCleanOptions,
     multiscale_options: MultiscaleOptions,
+    noise_rmsf_spectrum: NDArray[np.complex128] | None = None,
 ) -> tuple[
     NDArray[np.complex128], NDArray[np.complex128], NDArray[np.complex128], int, int
 ]:
@@ -1147,7 +1230,12 @@ def multiscale_clean_spectrum(
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
     kernels = compute_scale_kernels(
-        scales, rmsf_spectrum, rmsf_fwhm, phi_double_arr_radm2, kernel
+        scales,
+        rmsf_spectrum,
+        rmsf_fwhm,
+        phi_double_arr_radm2,
+        kernel,
+        noise_rmsf_spectrum=noise_rmsf_spectrum,
     )
 
     # Phase-1 detection support: each scale may clean where its scale-convolved
@@ -1237,6 +1325,11 @@ def default_scales(
     response flattens and its normalisation blows up), so `phi_max_scale_radm2` far
     above the window (e.g. very high frequency coverage) does not inflate the scale
     set. An explicit `scales` overrides all of this.
+
+    selection="bias" uses the coarse `make_scales` grid (first extended scale at
+    4x the RMSF FWHM), whose only job is to protect point sources from the biased
+    selector. selection="snr" uses the finer `make_fine_scales` grid, since the
+    SNR selector protects point sources itself via sigma_s.
     """
     if multiscale_options.scales is not None:
         return multiscale_options.scales
@@ -1247,7 +1340,20 @@ def default_scales(
         max_scale = min(phi_max_scale_radm2 / rmsf_fwhm, window_max_scale)
     else:
         max_scale = window_max_scale
-    # make_scales starts the grid at first_scale=4 (WSClean's rule; see there),
-    # which keeps point sources on the delta scale. Override the whole grid with
-    # `multiscale_scales`.
-    return make_scales(max_scale, n_scales=multiscale_options.n_scales)
+    # Coarse grid (first_scale=4) protects point sources for the biased selector;
+    # the SNR selector is self-protecting so it takes the fine grid. Override the
+    # whole grid with `multiscale_scales`.
+    if multiscale_options.selection == "snr":
+        scales = make_fine_scales(max_scale, n_scales=multiscale_options.n_scales)
+        first_scale = 1.5
+    else:
+        scales = make_scales(max_scale, n_scales=multiscale_options.n_scales)
+        first_scale = 4.0
+    if len(scales) == 1:
+        logger.warning(
+            "Multiscale auto grid degenerated to [0.0]: the phi window is narrower "
+            f"than 2*first_scale*RMSF FWHM ({2 * first_scale * rmsf_fwhm:0.3g} rad/m^2), "
+            "so no extended scale fits and multiscale CLEAN reduces to single-scale. "
+            "Pass explicit `multiscale_scales` to force an extended grid."
+        )
+    return scales

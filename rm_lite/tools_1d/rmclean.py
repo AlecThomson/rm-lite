@@ -66,6 +66,7 @@ def run_rmclean_from_synth(
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
+    multiscale_selection: Literal["bias", "snr"] = "bias",
 ) -> RMClean1DResults:
     """Run RM-CLEAN on the results of RM-synth.
 
@@ -84,6 +85,7 @@ def run_rmclean_from_synth(
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
         multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations per scale. Defaults to 10_000.
         multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
+        multiscale_selection ("bias" | "snr", optional): Scale-selection mode. "bias" = Offringa eq-3 scale-bias (default); "snr" = matched-filter selection (uses a finer scale grid). The exact "snr" sigma_s needs the w^2-RMSF, which is not stored in RMSynth1DResults (only the RMSF is), so the ordinary RMSF is used here (exact for uniform weights). Defaults to "bias".
 
     Returns:
         RMClean1DResults: RM-CLEAN results: `fdf_parameters`, `fdf_arrs`, `clean_parameters`.
@@ -139,7 +141,12 @@ def run_rmclean_from_synth(
         multiscale_kernel=multiscale_kernel,
         multiscale_max_iter_sub_minor=multiscale_max_iter_sub_minor,
         multiscale_sub_minor_fraction=multiscale_sub_minor_fraction,
+        multiscale_selection=multiscale_selection,
         phi_max_scale_radm2=float(fdf_parameters["phi_max_scale_radm2"][0]),
+        # RMSynth1DResults does not store the channel weights (only the RMSF), so
+        # the exact w^2-RMSF cannot be built here; None falls back to the ordinary
+        # RMSF, exact for uniform weights. See owner note.
+        noise_rmsf_arr=None,
     )
     (
         clean_fdf_arr,

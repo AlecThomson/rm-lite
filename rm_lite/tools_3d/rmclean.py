@@ -101,6 +101,7 @@ def rmclean_3d(
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
+    multiscale_selection: Literal["bias", "snr"] = "bias",
 ) -> RMClean3DResults:
     """Run RM-CLEAN on chunked dirty FDF and RMSF cubes.
 
@@ -141,6 +142,7 @@ def rmclean_3d(
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
         multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations. Defaults to 10_000.
         multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
+        multiscale_selection ("bias" | "snr", optional): Scale-selection mode. "bias" = Offringa eq-3 scale-bias (default); "snr" = matched-filter selection (uses a finer scale grid). 3D does not build a w^2-RMSF cube, so "snr" uses the ordinary RMSF (exact for uniform weights). Defaults to "bias".
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -163,6 +165,7 @@ def rmclean_3d(
             kernel=multiscale_kernel,
             max_iter_sub_minor=multiscale_max_iter_sub_minor,
             sub_minor_fraction=multiscale_sub_minor_fraction,
+            selection=multiscale_selection,
         )
         if multiscale
         else None
@@ -244,6 +247,7 @@ def rmclean_3d_from_synth(
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
+    multiscale_selection: Literal["bias", "snr"] = "bias",
 ) -> RMClean3DResults:
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
 
@@ -270,7 +274,7 @@ def rmclean_3d_from_synth(
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
         scale_bias, scales, n_scales, kernel, max_iter_sub_minor,
-            sub_minor_fraction: Multiscale options, see `rmclean_3d`.
+            sub_minor_fraction, selection: Multiscale options, see `rmclean_3d`.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -304,4 +308,5 @@ def rmclean_3d_from_synth(
         multiscale_kernel=multiscale_kernel,
         multiscale_max_iter_sub_minor=multiscale_max_iter_sub_minor,
         multiscale_sub_minor_fraction=multiscale_sub_minor_fraction,
+        multiscale_selection=multiscale_selection,
     )

@@ -32,6 +32,36 @@ from rm_lite.utils.synthesis import (
 RNG = np.random.default_rng(1234)
 
 
+def _coverage_grid(
+    freq_lo_hz: float,
+    freq_hi_hz: float,
+    phi_max_radm2: float = 250.0,
+    quiet: bool = True,
+) -> NDArray[np.float64]:
+    """Auto multiscale grid for a contiguous band, from the band's own RMSF.
+
+    Mirrors how rmclean derives the grid: phi axis at fwhm/10 sampling, phi
+    window >= 2*phi_max_scale so the window never caps the wideband bands, and
+    phi_max_scale_radm2 = pi / lambda_sq_min. `quiet=False` lets the degeneration
+    warning through for caplog.
+    """
+    freq = np.linspace(freq_lo_hz, freq_hi_hz, 200)
+    lsq = freq_to_lambda2(freq)
+    fwhm = float(get_fwhm_rmsf(lsq).fwhm_rmsf_radm2)
+    phi = make_phi_arr(phi_max_radm2=phi_max_radm2, d_phi_radm2=fwhm / 10)
+    phi_max_scale = float(np.pi / lsq.min())
+
+    def _call() -> NDArray[np.float64]:
+        return default_scales(
+            phi, fwhm, MultiscaleOptions(), phi_max_scale_radm2=phi_max_scale
+        )
+
+    if quiet:
+        with quiet_logs(logging.ERROR):
+            return _call()
+    return _call()
+
+
 def burn_slab(
     lsq: NDArray[np.float64],
     frac_pol: float,
@@ -312,3 +342,162 @@ def test_multiscale_thin_matches_single_scale() -> None:
     m0_single = calc_faraday_moments(np.abs(single_fdf), phi, fwhm).mom0
     m0_multi = calc_faraday_moments(np.abs(multi_fdf), phi, fwhm).mom0
     assert np.isclose(m0_single, m0_multi, rtol=0.3)
+
+
+# Contiguous survey bands (MHz -> Hz) and their auto-grid outcome. The four
+# narrowband bands have RMSF FWHM so wide that no extended scale (>= 4*FWHM)
+# fits the recoverable Faraday range, so the grid degenerates to single-scale
+# [0.0]. Only genuinely wide fractional bandwidth (racs_all, gmims) yields an
+# extended grid. Values verified against the package synthesis utils.
+_DEGENERATE = "degenerate"
+_RACS_ALL = "racs_all"
+_GMIMS = "gmims"
+COVERAGES: list[tuple[str, float, float, str]] = [
+    ("racs_low", 744e6, 1032e6, _DEGENERATE),
+    ("possum_b1", 800e6, 1088e6, _DEGENERATE),
+    ("meerkat_l", 886e6, 1682e6, _DEGENERATE),
+    ("lofar", 120e6, 168e6, _DEGENERATE),
+    ("racs_all", 744e6, 1800e6, _RACS_ALL),
+    ("gmims_wide", 300e6, 1800e6, _GMIMS),
+]
+
+
+@pytest.mark.parametrize(
+    ("lo", "hi", "kind"),
+    [(lo, hi, kind) for _, lo, hi, kind in COVERAGES],
+    ids=[name for name, *_ in COVERAGES],
+)
+def test_default_scales_coverage_matrix(lo: float, hi: float, kind: str) -> None:
+    """Auto grid per survey band: narrowband degenerates, wideband extends.
+
+    Locks the scale grid (root cause 3), not the scale selection: a single
+    narrow band must be seen to collapse to single-scale so it is never again
+    mistaken for a working multiscale run.
+    """
+    scales = _coverage_grid(lo, hi)
+    if kind == _DEGENERATE:
+        assert scales.tolist() == [0.0]
+    elif kind == _RACS_ALL:
+        # Just enough fractional bandwidth for one extended scale.
+        assert len(scales) > 1
+        assert scales[0] == 0.0
+        assert scales[1] == 4.0
+    elif kind == _GMIMS:
+        # Wide band: delta plus >= 3 extended scales, geometric doubling from 4.
+        assert scales[0] == 0.0
+        extended = scales[1:]
+        assert len(extended) >= 3
+        assert np.allclose(extended, 4.0 * 2.0 ** np.arange(len(extended)))
+
+
+def test_default_scales_degeneration_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """The degenerate grid warns loudly; a wideband grid does not.
+
+    The silent collapse to single-scale was the original wheel-spin; the warning
+    is the shippable signal, so guard that it fires exactly when it should.
+    """
+    with caplog.at_level(logging.WARNING, logger="rmtools-lite"):
+        degenerate = _coverage_grid(744e6, 1032e6, quiet=False)  # racs_low
+    assert degenerate.tolist() == [0.0]
+    assert "degenerated to [0.0]" in caplog.text
+    assert "multiscale_scales" in caplog.text  # names the escape hatch
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="rmtools-lite"):
+        wideband = _coverage_grid(300e6, 1800e6, quiet=False)  # gmims
+    assert len(wideband) > 1
+    assert "degenerated" not in caplog.text
+
+
+def test_multiscale_wideband_preserves_point_flux() -> None:
+    """On a wideband band, multiscale on a thin source keeps single-scale flux.
+
+    racs_all's grid is [0, 4]: a true delta must stay on scale 0, so mom0 must
+    match single-scale CLEAN. This is the shippable guarantee (point flux is not
+    destroyed), distinct from the known thin-stealing on deeper grids.
+    """
+    rng = np.random.default_rng(20240717)
+    freq_hz = np.linspace(744e6, 1800e6, 400)  # racs_all
+    lsq = freq_to_lambda2(freq_hz)
+    model = burn_slab(lsq, 0.6, 30, 45, 0.0)  # Faraday-thin point source
+    noisy = (
+        model
+        + rng.normal(0, 0.02, freq_hz.size)
+        + 1j * rng.normal(0, 0.02, freq_hz.size)
+    ).astype(np.complex128)
+    synth = _run_synth(noisy, freq_hz)
+    phi = synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float)
+    fwhm = float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
+    phi2 = synth.rmsf_arrs["phi2_arr_radm2"].to_numpy().astype(float)
+    dirty = synth.fdf_arrs["fdf_dirty_complex_arr"].to_numpy().astype(complex)
+    rmsf = synth.rmsf_arrs["rmsf_complex_arr"].to_numpy().astype(complex)
+    noise = float(synth.fdf_parameters["fdf_error_noise"][0])
+    phi_max_scale = float(np.pi / lsq.min())
+
+    kwargs = {
+        "dirty_fdf_arr": dirty,
+        "phi_arr_radm2": phi,
+        "rmsf_arr": rmsf,
+        "phi_double_arr_radm2": phi2,
+        "fwhm_rmsf_arr": np.array(fwhm),
+        "mask": 8 * noise,
+        "threshold": 1 * noise,
+    }
+    with quiet_logs(logging.ERROR):
+        single = rmclean(**kwargs)
+        multi = rmclean(
+            **kwargs,
+            multiscale=True,
+            phi_max_scale_radm2=phi_max_scale,
+            multiscale_max_iter_sub_minor=2000,
+        )
+    m0_single = calc_faraday_moments(np.abs(single.clean_fdf_arr), phi, fwhm).mom0
+    m0_multi = calc_faraday_moments(np.abs(multi.clean_fdf_arr), phi, fwhm).mom0
+    # Point flux preserved: the thin source stays on scale 0. rtol 0.2 covers
+    # noise realisation while still catching flux being destroyed or doubled.
+    assert np.isclose(m0_single, m0_multi, rtol=0.2)
+    assert np.all(np.isfinite(multi.clean_fdf_arr))
+
+
+def test_multiscale_wideband_does_not_diverge() -> None:
+    """The deep gmims grid [0, 4, 8, 16] stays finite and bounded by the dirty peak.
+
+    Exercises the full extended grid: even when scale selection is imperfect
+    (known thin-stealing), the clean must not run away.
+    """
+    rng = np.random.default_rng(20240718)
+    freq_hz = np.linspace(300e6, 1800e6, 400)  # gmims
+    lsq = freq_to_lambda2(freq_hz)
+    model = burn_slab(lsq, 0.5, 20, 30, 12.0)  # thick source engages extended scales
+    noisy = (
+        model
+        + rng.normal(0, 0.02, freq_hz.size)
+        + 1j * rng.normal(0, 0.02, freq_hz.size)
+    ).astype(np.complex128)
+    synth = _run_synth(noisy, freq_hz)
+    phi = synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float)
+    fwhm = float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
+    phi2 = synth.rmsf_arrs["phi2_arr_radm2"].to_numpy().astype(float)
+    dirty = synth.fdf_arrs["fdf_dirty_complex_arr"].to_numpy().astype(complex)
+    rmsf = synth.rmsf_arrs["rmsf_complex_arr"].to_numpy().astype(complex)
+    noise = float(synth.fdf_parameters["fdf_error_noise"][0])
+    phi_max_scale = float(np.pi / lsq.min())
+
+    with quiet_logs(logging.ERROR):
+        multi = rmclean(
+            dirty_fdf_arr=dirty,
+            phi_arr_radm2=phi,
+            rmsf_arr=rmsf,
+            phi_double_arr_radm2=phi2,
+            fwhm_rmsf_arr=np.array(fwhm),
+            mask=8 * noise,
+            threshold=1 * noise,
+            multiscale=True,
+            phi_max_scale_radm2=phi_max_scale,
+            multiscale_max_iter_sub_minor=2000,
+        )
+    clean_peak = float(np.nanmax(np.abs(multi.clean_fdf_arr)))
+    dirty_peak = float(np.nanmax(np.abs(dirty)))
+    assert np.all(np.isfinite(multi.clean_fdf_arr))
+    # Bounded by the dirty peak (factor 2 leaves headroom for reconvolution).
+    assert clean_peak < 2 * dirty_peak
