@@ -65,11 +65,19 @@ def slab(width_fwhm: float, center_fwhm: float = 0.0, amp: float = 1.0) -> FDFSp
 def build_channel_spectrum(
     spec: FDFSpec, lambda_sq_arr_m2: NDArray[np.float64], fwhm: float
 ) -> NDArray[np.complex128]:
-    """Channel Q + iU from the physical Burn law; |P(lambda^2=0)| = amp.
+    """Channel Q + iU from the physical Burn law, with |P(lambda^2=0)| = amp.
 
     Each component depolarises with lambda^2 about lambda^2 = 0: a Faraday-thin
-    point is flat, external dispersion is a Gaussian in lambda^2, a Burn slab is
-    a sinc. center_fwhm is the RM, width_fwhm the Faraday width (both FWHM units).
+    point is flat, external dispersion is a Gaussian in lambda^2, a Burn slab a
+    sinc.
+
+    Args:
+        spec (FDFSpec): Source as a sum of Burn components.
+        lambda_sq_arr_m2 (NDArray[np.float64]): Channel lambda^2 in m^2.
+        fwhm (float): RMSF FWHM in rad/m^2 (sets the FWHM-unit scale).
+
+    Returns:
+        NDArray[np.complex128]: Channel polarisation Q + iU.
     """
     pol = np.zeros_like(lambda_sq_arr_m2, dtype=np.complex128)
     for comp in spec.components:
@@ -92,6 +100,14 @@ def build_model_fdf(
     """Reference true-FDF shape on phi_arr (peak-normalised to amp), for plots only.
 
     Channel data comes from `build_channel_spectrum`, not from inverting this.
+
+    Args:
+        spec (FDFSpec): Source as a sum of Burn components.
+        phi_arr_radm2 (NDArray[np.float64]): Faraday depth axis in rad/m^2.
+        fwhm (float): RMSF FWHM in rad/m^2.
+
+    Returns:
+        NDArray[np.complex128]: Model FDF on `phi_arr_radm2`.
     """
     fdf = np.zeros_like(phi_arr_radm2, dtype=np.complex128)
     for comp in spec.components:
@@ -117,7 +133,17 @@ def model_to_channel(
     phi_arr_radm2: NDArray[np.float64],
     lam_sq_0_m2: float,
 ) -> NDArray[np.complex128]:
-    """Model FDF (phi domain) -> noise-free channel Q + iU via inverse RM synth."""
+    """Transform a model FDF (phi domain) to noise-free channel Q + iU.
+
+    Args:
+        model_fdf (NDArray[np.complex128]): Model FDF on the phi axis.
+        lambda_sq_arr_m2 (NDArray[np.float64]): Channel lambda^2 in m^2.
+        phi_arr_radm2 (NDArray[np.float64]): Faraday depth axis in rad/m^2.
+        lam_sq_0_m2 (float): Reference lambda^2 in m^2.
+
+    Returns:
+        NDArray[np.complex128]: Noise-free channel Q + iU.
+    """
     return inverse_rmsynth_nufft(
         complex_fdf_arr=model_fdf,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
@@ -138,7 +164,16 @@ def add_channel_noise(
     sigma: float,
     rng: np.random.Generator,
 ) -> NoisyChannels:
-    """Add iid complex Gaussian noise (std sigma in Q and in U) per channel."""
+    """Add iid complex Gaussian noise (std sigma in Q and in U) per channel.
+
+    Args:
+        complex_pol_arr (NDArray[np.complex128]): Noise-free channel Q + iU.
+        sigma (float): Noise std per channel, applied to Q and U.
+        rng (np.random.Generator): Random generator.
+
+    Returns:
+        NoisyChannels: Noisy channels and the per-channel error array.
+    """
     n = complex_pol_arr.shape[0]
     noise = rng.normal(scale=sigma, size=n) + 1j * rng.normal(scale=sigma, size=n)
     error = np.full(n, sigma + 1j * sigma, dtype=np.complex128)
@@ -160,7 +195,15 @@ class Geometry(NamedTuple):
 def build_geometry(
     freq_arr_hz: NDArray[np.float64], phi_max_fwhm: float = PHI_MAX_FWHM
 ) -> Geometry:
-    """Uniform-weight geometry + RMSF for a frequency coverage (matches _probe)."""
+    """Uniform-weight geometry and RMSF for a frequency coverage.
+
+    Args:
+        freq_arr_hz (NDArray[np.float64]): Channel frequencies in Hz.
+        phi_max_fwhm (float): Phi window half-width in RMSF FWHM units.
+
+    Returns:
+        Geometry: lambda^2, weights, reference, FWHM, phi axes, and RMSF.
+    """
     lam2 = freq_to_lambda2(freq_arr_hz)
     weight = np.ones_like(lam2)
     lam_sq_0 = float(np.average(lam2, weights=weight))
@@ -208,10 +251,27 @@ def simulate_fdf(
 ) -> SimResult:
     """Forward-model a spec through channel space to a dirty FDF.
 
-    Noise-free unless a channel sigma (or an S/N against the model channel peak,
-    needing rng) is given. Pass a prebuilt `geometry` to reuse the RMSF.
+    Noise-free unless a channel `sigma` (or `sn`, an S/N against the model channel
+    peak) is given. Pass a prebuilt `geometry` to reuse the RMSF.
+
+    Args:
+        spec (FDFSpec): Source as a sum of Burn components.
+        freq_arr_hz (NDArray[np.float64]): Channel frequencies in Hz.
+        rng (np.random.Generator | None): Random generator; required if `sigma` or `sn` is set.
+        sigma (float | None): Per-channel noise std. Defaults to None.
+        sn (float | None): Target S/N against the model channel peak (sets sigma). Defaults to None.
+        phi_max_fwhm (float): Phi window half-width in RMSF FWHM units.
+        geometry (Geometry | None): Prebuilt geometry to reuse; None builds one.
+
+    Raises:
+        ValueError: If noise is requested (`sigma` or `sn`) without `rng`.
+
+    Returns:
+        SimResult: Dirty FDF with the channel data and geometry behind it.
     """
-    geom = geometry if geometry is not None else build_geometry(freq_arr_hz, phi_max_fwhm)
+    geom = (
+        geometry if geometry is not None else build_geometry(freq_arr_hz, phi_max_fwhm)
+    )
     pol = build_channel_spectrum(spec, geom.lambda_sq_arr_m2, geom.fwhm)
 
     error = np.zeros(pol.shape[0], dtype=np.complex128)
