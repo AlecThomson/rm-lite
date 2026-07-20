@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmclean import rmclean_3d, rmclean_3d_from_synth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
-from rm_lite.utils.clean import rmclean
+from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
 from rm_lite.utils.dask_io import (
     estimate_channel_noise_mad,
     freq_arr_hz_from_header,
@@ -135,13 +135,14 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
     for j in range(ny):
         for i in range(nx):
             ref = rmclean(
-                dirty_fdf_arr=dirty_cube[:, j, i],
-                phi_arr_radm2=synth.phi_arr_radm2,
-                rmsf_arr=rmsf_cube[:, j, i],
-                phi_double_arr_radm2=synth.phi_double_arr_radm2,
-                fwhm_rmsf_arr=np.array(synth.fwhm_rmsf_radm2),
-                mask=MASK_THRESHOLD,
-                threshold=CLEAN_THRESHOLD,
+                RMSynthArrays(
+                    dirty_fdf_arr=dirty_cube[:, j, i],
+                    phi_arr_radm2=synth.phi_arr_radm2,
+                    rmsf_arr=rmsf_cube[:, j, i],
+                    phi_double_arr_radm2=synth.phi_double_arr_radm2,
+                    fwhm_rmsf_arr=np.array(synth.fwhm_rmsf_radm2),
+                ),
+                RMCleanOptions(mask=MASK_THRESHOLD, threshold=CLEAN_THRESHOLD),
             )
             np.testing.assert_allclose(
                 clean_cube[:, j, i], ref.clean_fdf_arr, atol=1e-8

@@ -15,7 +15,7 @@ from rm_lite.utils.clean import (
     MultiscaleOptions,
     RMCleanOptions,
     RMSynthArrays,
-    _rmclean_nd,
+    rmclean,
 )
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import calc_faraday_moments
@@ -56,11 +56,10 @@ def _clean_block(
     fwhm_rmsf_radm2: float,
     clean_options: RMCleanOptions,
     log_level: int,
-    multiscale: bool = False,
     multiscale_options: MultiscaleOptions | None = None,
 ) -> _RMCleanBlockResult:
     with quiet_logs(log_level):
-        result = _rmclean_nd(
+        result = rmclean(
             RMSynthArrays(
                 dirty_fdf_arr=dirty_fdf_block,
                 phi_arr_radm2=phi_arr_radm2,
@@ -69,7 +68,6 @@ def _clean_block(
                 fwhm_rmsf_arr=np.array(fwhm_rmsf_radm2),
             ),
             clean_options,
-            multiscale=multiscale,
             multiscale_options=multiscale_options,
         )
     return _RMCleanBlockResult(
@@ -196,7 +194,6 @@ def rmclean_3d(
             fwhm_rmsf_radm2,
             clean_options,
             log_level,
-            multiscale,
             multiscale_options,
         )
 

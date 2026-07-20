@@ -17,7 +17,7 @@ import pytest
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmclean import rmclean_3d
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
-from rm_lite.utils.clean import RMCleanOptions, rmclean
+from rm_lite.utils.clean import RMCleanOptions
 from rm_lite.utils.fitting import StokesIFitOptions
 from rm_lite.utils.synthesis import FDFOptions
 
@@ -79,7 +79,6 @@ CASES = [
             "n_error_samples": "n_error_samples",
         },
     ),
-    (rmclean, RMCleanOptions, {"max_iter": "max_iter", "gain": "gain"}),
     (rmclean_3d, RMCleanOptions, {"max_iter": "max_iter", "gain": "gain"}),
 ]
 

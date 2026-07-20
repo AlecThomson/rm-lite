@@ -12,7 +12,9 @@ from rm_lite.tools_1d.rmclean import run_rmclean_from_synth
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.utils.clean import (
     MultiscaleOptions,
+    RMCleanOptions,
     RMCleanResults,
+    RMSynthArrays,
     _reconvolve_model,
     compute_scale_kernels,
     convolve_fdf_scale,
@@ -133,17 +135,18 @@ def test_multiscale_oversized_scales_do_not_diverge() -> None:
     oversized[0] = 0.0
     with quiet_logs(logging.ERROR):
         result = rmclean(
-            dirty_fdf_arr=dirty,
-            phi_arr_radm2=phi,
-            rmsf_arr=rmsf,
-            phi_double_arr_radm2=phi2,
-            fwhm_rmsf_arr=np.array(fwhm),
-            mask=8 * noise,
-            threshold=3 * noise,
-            multiscale=True,
-            multiscale_scales=oversized,
-            multiscale_max_iter_sub_minor=2000,
-            fdf_noise=noise,
+            RMSynthArrays(
+                dirty_fdf_arr=dirty,
+                phi_arr_radm2=phi,
+                rmsf_arr=rmsf,
+                phi_double_arr_radm2=phi2,
+                fwhm_rmsf_arr=np.array(fwhm),
+            ),
+            RMCleanOptions(mask=8 * noise, threshold=3 * noise, fdf_noise=noise),
+            multiscale_options=MultiscaleOptions(
+                scales=oversized,
+                max_iter_sub_minor=2000,
+            ),
         )
     clean_peak = float(np.nanmax(np.abs(result.clean_fdf_arr)))
     dirty_peak = float(np.nanmax(np.abs(dirty)))
@@ -174,17 +177,21 @@ def test_multiscale_stall_terminates() -> None:
     max_iter = 300
     with quiet_logs(logging.ERROR):
         result = rmclean(
-            dirty_fdf_arr=dirty,
-            phi_arr_radm2=phi,
-            rmsf_arr=rmsf,
-            phi_double_arr_radm2=phi2,
-            fwhm_rmsf_arr=np.array(fwhm),
-            mask=8 * noise,
-            threshold=1e-4 * noise,  # unreachable: forces a stall, not convergence
-            max_iter=max_iter,
-            multiscale=True,
-            multiscale_max_iter_sub_minor=2000,
-            fdf_noise=noise,
+            RMSynthArrays(
+                dirty_fdf_arr=dirty,
+                phi_arr_radm2=phi,
+                rmsf_arr=rmsf,
+                phi_double_arr_radm2=phi2,
+                fwhm_rmsf_arr=np.array(fwhm),
+            ),
+            RMCleanOptions(
+                mask=8 * noise,
+                # unreachable threshold: forces a stall, not convergence
+                threshold=1e-4 * noise,
+                max_iter=max_iter,
+                fdf_noise=noise,
+            ),
+            multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
         )
     n_iter = int(np.ravel(result.clean_iter_arr)[0])
     assert 0 < n_iter < max_iter  # stalled early, did not grind to the cap
@@ -282,16 +289,15 @@ def test_multiscale_recovers_thick_flux() -> None:
 
     with quiet_logs(logging.ERROR):
         result = rmclean(
-            dirty_fdf_arr=dirty,
-            phi_arr_radm2=phi,
-            rmsf_arr=rmsf,
-            phi_double_arr_radm2=phi2,
-            fwhm_rmsf_arr=np.array(fwhm),
-            mask=8 * noise,
-            threshold=1 * noise,
-            multiscale=True,
-            multiscale_max_iter_sub_minor=2000,
-            fdf_noise=noise,
+            RMSynthArrays(
+                dirty_fdf_arr=dirty,
+                phi_arr_radm2=phi,
+                rmsf_arr=rmsf,
+                phi_double_arr_radm2=phi2,
+                fwhm_rmsf_arr=np.array(fwhm),
+            ),
+            RMCleanOptions(mask=8 * noise, threshold=1 * noise, fdf_noise=noise),
+            multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
         )
     mom0 = calc_faraday_moments(np.abs(result.clean_fdf_arr), phi, fwhm).mom0
     true_flux = 0.9
@@ -426,23 +432,21 @@ def test_multiscale_wideband_preserves_point_flux() -> None:
     noise = float(synth.fdf_parameters["fdf_error_noise"][0])
     phi_max_scale = float(np.pi / lsq.min())
 
-    kwargs = {
-        "dirty_fdf_arr": dirty,
-        "phi_arr_radm2": phi,
-        "rmsf_arr": rmsf,
-        "phi_double_arr_radm2": phi2,
-        "fwhm_rmsf_arr": np.array(fwhm),
-        "mask": 8 * noise,
-        "threshold": 1 * noise,
-        "fdf_noise": noise,
-    }
+    arrays = RMSynthArrays(
+        dirty_fdf_arr=dirty,
+        phi_arr_radm2=phi,
+        rmsf_arr=rmsf,
+        phi_double_arr_radm2=phi2,
+        fwhm_rmsf_arr=np.array(fwhm),
+    )
+    clean_options = RMCleanOptions(mask=8 * noise, threshold=1 * noise, fdf_noise=noise)
     with quiet_logs(logging.ERROR):
-        single = rmclean(**kwargs)
+        single = rmclean(arrays, clean_options)
         multi = rmclean(
-            **kwargs,
-            multiscale=True,
+            arrays,
+            clean_options,
+            multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
             phi_max_scale_radm2=phi_max_scale,
-            multiscale_max_iter_sub_minor=2000,
         )
     m0_single = calc_faraday_moments(np.abs(single.clean_fdf_arr), phi, fwhm).mom0
     m0_multi = calc_faraday_moments(np.abs(multi.clean_fdf_arr), phi, fwhm).mom0
@@ -478,17 +482,16 @@ def test_multiscale_wideband_does_not_diverge() -> None:
 
     with quiet_logs(logging.ERROR):
         multi = rmclean(
-            dirty_fdf_arr=dirty,
-            phi_arr_radm2=phi,
-            rmsf_arr=rmsf,
-            phi_double_arr_radm2=phi2,
-            fwhm_rmsf_arr=np.array(fwhm),
-            mask=8 * noise,
-            threshold=1 * noise,
-            multiscale=True,
+            RMSynthArrays(
+                dirty_fdf_arr=dirty,
+                phi_arr_radm2=phi,
+                rmsf_arr=rmsf,
+                phi_double_arr_radm2=phi2,
+                fwhm_rmsf_arr=np.array(fwhm),
+            ),
+            RMCleanOptions(mask=8 * noise, threshold=1 * noise, fdf_noise=noise),
+            multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
             phi_max_scale_radm2=phi_max_scale,
-            multiscale_max_iter_sub_minor=2000,
-            fdf_noise=noise,
         )
     clean_peak = float(np.nanmax(np.abs(multi.clean_fdf_arr)))
     dirty_peak = float(np.nanmax(np.abs(dirty)))
@@ -507,28 +510,23 @@ def _clean_single_and_hybrid(
     phi_max_scale: float,
 ) -> tuple[RMCleanResults, RMCleanResults]:
     """Single-scale and hybrid-multiscale cleans at matched depth."""
+    arrays = RMSynthArrays(
+        dirty_fdf_arr=sim_dirty,
+        phi_arr_radm2=phi,
+        rmsf_arr=rmsf,
+        phi_double_arr_radm2=phi_double,
+        fwhm_rmsf_arr=np.array([fwhm]),
+    )
+    clean_options = RMCleanOptions(
+        mask=5.0 * noise, threshold=3.0 * noise, fdf_noise=noise
+    )
     with quiet_logs(logging.ERROR):
-        single = rmclean(
-            dirty_fdf_arr=sim_dirty,
-            phi_arr_radm2=phi,
-            rmsf_arr=rmsf,
-            phi_double_arr_radm2=phi_double,
-            fwhm_rmsf_arr=np.array([fwhm]),
-            mask=5.0 * noise,
-            threshold=3.0 * noise,
-            fdf_noise=noise,
-        )
+        single = rmclean(arrays, clean_options)
         multi = rmclean(
-            dirty_fdf_arr=sim_dirty,
-            phi_arr_radm2=phi,
-            rmsf_arr=rmsf,
-            phi_double_arr_radm2=phi_double,
-            fwhm_rmsf_arr=np.array([fwhm]),
-            mask=5.0 * noise,
-            threshold=3.0 * noise,
-            multiscale=True,
+            arrays,
+            clean_options,
+            multiscale_options=MultiscaleOptions(),
             phi_max_scale_radm2=phi_max_scale,
-            fdf_noise=noise,
         )
     return single, multi
 

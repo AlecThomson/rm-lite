@@ -157,10 +157,10 @@ class MinorLoopOptions:
     """Maximum number of iterations"""
     gain: float
     """Loop gain"""
-    mask: float
-    """Masking threshold"""
-    threshold: float
-    """Threshold for stopping the loop"""
+    mask_threshold: float
+    """Amplitude below which a channel is not cleaned"""
+    stopping_threshold: float
+    """Peak amplitude at which the loop stops"""
     start_iter: int = 0
     """Starting iteration"""
     update_mask: bool = True
@@ -257,13 +257,13 @@ def minor_loop(
     mask_arr = ~resid_fdf_spectrum_mask.mask.copy()
     mask_arr_original = mask_arr.copy()
     iter_count = int(minor_loop_options.start_iter)
-    thr_eff = minor_loop_options.mask
+    thr_eff = minor_loop_options.mask_threshold
     last_recompute_peak = np.inf
     if minor_loop_options.update_mask and minor_loop_options.noise is not None:
         # Start tight (seed only) so the RMSF sidelobe ringing sits off-source and
         # inflates the MAD; the incoming mask becomes the hard cap the mask grows in.
         mask_arr = _seed_mask(
-            resid_fdf_spectrum, mask_arr_original, minor_loop_options.mask
+            resid_fdf_spectrum, mask_arr_original, minor_loop_options.mask_threshold
         )
         resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
@@ -290,16 +290,21 @@ def minor_loop(
                 f"Max iterations reached. Exiting loop...performed {iter_count} iterations"
             )
             break
-        if np.ma.max(np.ma.abs(resid_fdf_spectrum_mask)) < minor_loop_options.threshold:
+        if (
+            np.ma.max(np.ma.abs(resid_fdf_spectrum_mask))
+            < minor_loop_options.stopping_threshold
+        ):
             # Region exhausted. In adaptive mode the main source (and its RMSF
             # sidelobes) are now subtracted, so any channel still above the mask
             # floor is real emission: start a new blob there instead of stopping.
             if minor_loop_options.noise is not None:
                 new_seed = _seed_mask(
-                    resid_fdf_spectrum, mask_arr_original, minor_loop_options.mask
+                    resid_fdf_spectrum,
+                    mask_arr_original,
+                    minor_loop_options.mask_threshold,
                 )
                 if new_seed.any():
-                    mask_arr = mask_arr | new_seed
+                    mask_arr |= new_seed
                     resid_fdf_spectrum_mask = np.ma.array(
                         resid_fdf_spectrum, mask=~mask_arr
                     )
@@ -350,7 +355,7 @@ def minor_loop(
                     offsrc_rms = _offsource_rms(resid_fdf_spectrum, mask_arr)
                     noise = minor_loop_options.noise
                     ratio = offsrc_rms / noise if noise > 0 else 1.0
-                    thr_eff = minor_loop_options.mask * max(1.0, ratio)
+                    thr_eff = minor_loop_options.mask_threshold * max(1.0, ratio)
                     last_recompute_peak = peak
                     # Grow only into channels contiguous with the current region
                     # (binary dilation) so the mask cannot jump the RMSF nulls onto
@@ -360,7 +365,7 @@ def minor_loop(
             else:
                 # Mask anything that was previously masked
                 mask_arr = (
-                    np.abs(resid_fdf_spectrum) > minor_loop_options.mask
+                    np.abs(resid_fdf_spectrum) > minor_loop_options.mask_threshold
                 ) & mask_arr_original
         resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
@@ -392,93 +397,8 @@ class RMSynthArrays(NamedTuple):
 
 
 def rmclean(
-    dirty_fdf_arr: NDArray[np.complex128],
-    phi_arr_radm2: NDArray[np.float64],
-    rmsf_arr: NDArray[np.complex128],
-    phi_double_arr_radm2: NDArray[np.float64],
-    fwhm_rmsf_arr: NDArray[np.float64],
-    mask: float,
-    threshold: float,
-    max_iter: int = 1000,
-    gain: float = 0.1,
-    mask_arr: NDArray[np.bool_] | None = None,
-    multiscale: bool = False,
-    multiscale_scales: NDArray[np.float64] | None = None,
-    multiscale_n_scales: int | None = None,
-    multiscale_kernel: KernelType = "tapered_quad",
-    multiscale_max_iter_sub_minor: int = 10_000,
-    multiscale_sub_minor_fraction: float = 0.5,
-    multiscale_selection_margin: float = 0.08,
-    phi_max_scale_radm2: float | None = None,
-    fdf_noise: float | None = None,
-) -> RMCleanResults:
-    """Perform RM-CLEAN on a Faraday dispersion function array.
-
-    Args:
-        dirty_fdf_arr (NDArray[np.complex128]): Dirty Faraday dispersion function array
-        phi_arr_radm2 (NDArray[np.float64]): Faraday depth array in rad/m^2
-        rmsf_arr (NDArray[np.complex128]): RMSF array
-        phi_double_arr_radm2 (NDArray[np.float64]): Double-length Faraday depth array in rad/m^2
-        fwhm_rmsf_arr (NDArray[np.float64]): FWHM of the RMSF array
-        mask (float): Masking threshold - pixels below this value are not cleaned
-        threshold (float): Cleaning threshold - stop when all pixels are below this value
-        max_iter (int, optional): Maximum clean iterations. Defaults to 1000.
-        gain (float, optional): Clean loop gain. Defaults to 0.1.
-        mask_arr (NDArray[np.bool_] | None, optional): Additional mask of pixels to avoid. Defaults to None.
-        multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
-        multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales (RMSF FWHM units); None auto-selects.
-        multiscale_n_scales (int | None, optional): Cap on the auto scale count.
-        multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
-        multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations per scale. Defaults to 10_000.
-        multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
-        multiscale_selection_margin (float, optional): Hybrid scale-selection parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points and marginally resolved sources on the delta scale. Defaults to 0.08.
-        phi_max_scale_radm2 (float | None, optional): Largest recoverable Faraday scale (pi / lambda_sq_min); sets the auto scale range. None falls back to the phi window.
-        fdf_noise (float | None, optional): Theoretical FDF noise; enables the adaptive off-source auto-mask (mask contracts off the RMSF sidelobes of bright sources, then relaxes to `mask` as they subtract). None keeps the fixed-mask behaviour. Defaults to None.
-
-    Returns:
-        RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr, sub_minor_iter_arr
-    """
-    rm_synth_arrays = RMSynthArrays(
-        dirty_fdf_arr=dirty_fdf_arr,
-        phi_arr_radm2=phi_arr_radm2,
-        rmsf_arr=rmsf_arr,
-        phi_double_arr_radm2=phi_double_arr_radm2,
-        fwhm_rmsf_arr=fwhm_rmsf_arr,
-        fdf_mask_arr=mask_arr,
-    )
-    clean_options = RMCleanOptions(
-        mask=mask,
-        threshold=threshold,
-        max_iter=max_iter,
-        gain=gain,
-        fdf_noise=fdf_noise,
-    )
-    multiscale_options = (
-        MultiscaleOptions(
-            scales=multiscale_scales,
-            n_scales=multiscale_n_scales,
-            kernel=multiscale_kernel,
-            max_iter_sub_minor=multiscale_max_iter_sub_minor,
-            sub_minor_fraction=multiscale_sub_minor_fraction,
-            selection_margin=multiscale_selection_margin,
-        )
-        if multiscale
-        else None
-    )
-
-    return _rmclean_nd(
-        rm_synth_arrays,
-        clean_options,
-        multiscale=multiscale,
-        multiscale_options=multiscale_options,
-        phi_max_scale_radm2=phi_max_scale_radm2,
-    )
-
-
-def _rmclean_nd(
     rm_synth_arrays: RMSynthArrays,
     clean_options: RMCleanOptions,
-    multiscale: bool = False,
     multiscale_options: MultiscaleOptions | None = None,
     phi_max_scale_radm2: float | None = None,
 ) -> RMCleanResults:
@@ -486,10 +406,12 @@ def _rmclean_nd(
 
     Args:
         rm_synth_arrays (RMSynthArrays): Dirty FDF cube, phi axes, RMSF, masks.
-        clean_options (RMCleanOptions): Mask, threshold, gain, max_iter.
-        multiscale (bool): Use multiscale CLEAN.
-        multiscale_options (MultiscaleOptions | None): Multiscale settings if enabled.
-        phi_max_scale_radm2 (float | None): Largest recoverable scale for the auto grid.
+        clean_options (RMCleanOptions): Mask, threshold, gain, max_iter, FDF noise.
+        multiscale_options (MultiscaleOptions | None): Multiscale RM-CLEAN settings
+            (recovers Faraday-thick structure). None runs single-scale RM-CLEAN.
+        phi_max_scale_radm2 (float | None): Largest recoverable Faraday scale
+            (pi / lambda_sq_min); sets the auto scale range. None falls back to the
+            phi window.
 
     Raises:
         ValueError: If the input array shapes are inconsistent.
@@ -497,6 +419,7 @@ def _rmclean_nd(
     Returns:
         RMCleanResults: Per-pixel clean/model/resid cubes and iteration counts.
     """
+    multiscale = multiscale_options is not None
     # Sanity checks on array sizes
     checks: list[tuple[bool, str]] = [
         (
@@ -706,8 +629,8 @@ def minor_cycle(
     minor_loop_options = MinorLoopOptions(
         max_iter=clean_options.max_iter,
         gain=clean_options.gain,
-        mask=clean_options.mask,
-        threshold=clean_options.threshold,
+        mask_threshold=clean_options.mask,
+        stopping_threshold=clean_options.threshold,
         start_iter=0,
         update_mask=True,
         noise=clean_options.fdf_noise,
@@ -1439,8 +1362,8 @@ def _multiscale_minor_cycles(
             MinorLoopOptions(
                 max_iter=max_iter_sub_minor,
                 gain=gain,
-                mask=stop_threshold * thresh_scale,
-                threshold=threshold_sub,
+                mask_threshold=stop_threshold * thresh_scale,
+                stopping_threshold=threshold_sub,
                 update_mask=True,
             ),
         )

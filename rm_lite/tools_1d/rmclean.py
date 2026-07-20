@@ -10,7 +10,12 @@ from numpy.typing import NDArray
 from scipy import interpolate
 
 from rm_lite.tools_1d.rmsynth import RMSynth1DResults
-from rm_lite.utils.clean import rmclean
+from rm_lite.utils.clean import (
+    MultiscaleOptions,
+    RMCleanOptions,
+    RMSynthArrays,
+    rmclean,
+)
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     TheoreticalNoise,
@@ -121,26 +126,39 @@ def run_rmclean_from_synth(
 
     fdf_dirty_arr = rmsyth_arrs_df["fdf_dirty_complex_arr"].to_numpy().astype(complex)
 
+    multiscale_options = (
+        MultiscaleOptions(
+            scales=multiscale_scales,
+            n_scales=multiscale_n_scales,
+            kernel=multiscale_kernel,
+            max_iter_sub_minor=multiscale_max_iter_sub_minor,
+            sub_minor_fraction=multiscale_sub_minor_fraction,
+            selection_margin=multiscale_selection_margin,
+        )
+        if multiscale
+        else None
+    )
+
     rm_clean_results = rmclean(
-        dirty_fdf_arr=fdf_dirty_arr,
-        phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
-        rmsf_arr=rmsf_arrs_df["rmsf_complex_arr"].to_numpy().astype(complex),
-        phi_double_arr_radm2=rmsf_arrs_df["phi2_arr_radm2"].to_numpy().astype(float),
-        fwhm_rmsf_arr=fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float),
-        mask=mask,
-        threshold=threshold,
-        max_iter=max_iter,
-        gain=gain,
-        mask_arr=mask_arr,
-        multiscale=multiscale,
-        multiscale_scales=multiscale_scales,
-        multiscale_n_scales=multiscale_n_scales,
-        multiscale_kernel=multiscale_kernel,
-        multiscale_max_iter_sub_minor=multiscale_max_iter_sub_minor,
-        multiscale_sub_minor_fraction=multiscale_sub_minor_fraction,
-        multiscale_selection_margin=multiscale_selection_margin,
+        RMSynthArrays(
+            dirty_fdf_arr=fdf_dirty_arr,
+            phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
+            rmsf_arr=rmsf_arrs_df["rmsf_complex_arr"].to_numpy().astype(complex),
+            phi_double_arr_radm2=rmsf_arrs_df["phi2_arr_radm2"]
+            .to_numpy()
+            .astype(float),
+            fwhm_rmsf_arr=fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float),
+            fdf_mask_arr=mask_arr,
+        ),
+        RMCleanOptions(
+            mask=mask,
+            threshold=threshold,
+            max_iter=max_iter,
+            gain=gain,
+            fdf_noise=theoretical_noise.fdf_error_noise,
+        ),
+        multiscale_options=multiscale_options,
         phi_max_scale_radm2=float(fdf_parameters["phi_max_scale_radm2"][0]),
-        fdf_noise=theoretical_noise.fdf_error_noise,
     )
     (
         clean_fdf_arr,
