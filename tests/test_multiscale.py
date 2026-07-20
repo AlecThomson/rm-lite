@@ -12,6 +12,7 @@ from rm_lite.tools_1d.rmclean import run_rmclean_from_synth
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.utils.clean import (
     MultiscaleOptions,
+    RMCleanResults,
     _reconvolve_model,
     compute_scale_kernels,
     convolve_fdf_scale,
@@ -21,6 +22,13 @@ from rm_lite.utils.clean import (
     scale_bias_function,
 )
 from rm_lite.utils.logging import quiet_logs
+from rm_lite.utils.simulate import (
+    build_geometry,
+    build_model_fdf,
+    delta,
+    gauss,
+    simulate_fdf,
+)
 from rm_lite.utils.synthesis import (
     calc_faraday_moments,
     freq_to_lambda2,
@@ -378,16 +386,19 @@ def test_default_scales_coverage_matrix(lo: float, hi: float, kind: str) -> None
     if kind == _DEGENERATE:
         assert scales.tolist() == [0.0]
     elif kind == _RACS_ALL:
-        # Just enough fractional bandwidth for one extended scale.
+        # Just enough fractional bandwidth for extended scales; fine grid
+        # anchors at 3 (make_fine_scales).
         assert len(scales) > 1
         assert scales[0] == 0.0
-        assert scales[1] == 4.0
+        assert scales[1] == 3.0
     elif kind == _GMIMS:
-        # Wide band: delta plus >= 3 extended scales, geometric doubling from 4.
+        # Wide band: delta plus >= 3 extended scales; fine grid anchors at 3
+        # then doubles geometrically from 6.
         assert scales[0] == 0.0
         extended = scales[1:]
         assert len(extended) >= 3
-        assert np.allclose(extended, 4.0 * 2.0 ** np.arange(len(extended)))
+        assert extended[0] == 3.0
+        assert np.allclose(extended[1:], 6.0 * 2.0 ** np.arange(len(extended) - 1))
 
 
 def test_default_scales_degeneration_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -412,7 +423,7 @@ def test_default_scales_degeneration_warning(caplog: pytest.LogCaptureFixture) -
 def test_multiscale_wideband_preserves_point_flux() -> None:
     """On a wideband band, multiscale on a thin source keeps single-scale flux.
 
-    racs_all's grid is [0, 4]: a true delta must stay on scale 0, so mom0 must
+    racs_all's grid starts [0, 3, ...]: a true delta must stay on scale 0, so mom0 must
     match single-scale CLEAN. This is the shippable guarantee (point flux is not
     destroyed), distinct from the known thin-stealing on deeper grids.
     """
@@ -460,7 +471,7 @@ def test_multiscale_wideband_preserves_point_flux() -> None:
 
 
 def test_multiscale_wideband_does_not_diverge() -> None:
-    """The deep gmims grid [0, 4, 8, 16] stays finite and bounded by the dirty peak.
+    """The deep gmims grid [0, 3, 6, 12, 24] stays finite and bounded by the dirty peak.
 
     Exercises the full extended grid: even when scale selection is imperfect
     (known thin-stealing), the clean must not run away.
@@ -501,3 +512,109 @@ def test_multiscale_wideband_does_not_diverge() -> None:
     assert np.all(np.isfinite(multi.clean_fdf_arr))
     # Bounded by the dirty peak (factor 2 leaves headroom for reconvolution).
     assert clean_peak < 2 * dirty_peak
+
+
+def _clean_single_and_hybrid(
+    sim_dirty: NDArray[np.complex128],
+    rmsf: NDArray[np.complex128],
+    phi: NDArray[np.float64],
+    phi_double: NDArray[np.float64],
+    fwhm: float,
+    noise: float,
+    phi_max_scale: float,
+) -> tuple[RMCleanResults, RMCleanResults]:
+    """Single-scale and hybrid-multiscale cleans at matched depth."""
+    with quiet_logs(logging.ERROR):
+        single = rmclean(
+            dirty_fdf_arr=sim_dirty,
+            phi_arr_radm2=phi,
+            rmsf_arr=rmsf,
+            phi_double_arr_radm2=phi_double,
+            fwhm_rmsf_arr=np.array([fwhm]),
+            mask=5.0 * noise,
+            threshold=3.0 * noise,
+        )
+        multi = rmclean(
+            dirty_fdf_arr=sim_dirty,
+            phi_arr_radm2=phi,
+            rmsf_arr=rmsf,
+            phi_double_arr_radm2=phi_double,
+            fwhm_rmsf_arr=np.array([fwhm]),
+            mask=5.0 * noise,
+            threshold=3.0 * noise,
+            multiscale=True,
+            phi_max_scale_radm2=phi_max_scale,
+        )
+    return single, multi
+
+
+def _model_shape_err(
+    model: NDArray[np.complex128], truth: NDArray[np.complex128]
+) -> float:
+    """Scale-free rms of |model| against best-fit-amplitude |truth|."""
+    a = np.abs(model)
+    t = np.abs(truth)
+    amp = float((a * t).sum() / (t * t).sum())
+    return float(np.sqrt(np.mean((a - amp * t) ** 2)) / (amp * t.max()))
+
+
+def test_hybrid_model_quality_wideband() -> None:
+    """On a wide band (300-1800 MHz) a thick Gaussian's raw component model is
+    much closer to truth under hybrid selection than single-scale's spike comb.
+
+    The full benchmark bounds this ratio at 0.6 over 24 realisations; loosened
+    to 0.7 here for 4 realisations with distinct seeds.
+    """
+    freqs = np.linspace(300e6, 1800e6, 300)
+    geom = build_geometry(freqs)
+    spec = gauss(1.5, amp=1.0)
+    truth = build_model_fdf(spec, geom.phi_arr_radm2, geom.fwhm)
+    pms = float(np.pi / np.nanmin(geom.lambda_sq_arr_m2))
+    ratios = []
+    for i in range(4):
+        rng = np.random.default_rng(800000 + i)
+        sim = simulate_fdf(spec, freqs, rng=rng, sn=24.0, geometry=geom)
+        single, multi = _clean_single_and_hybrid(
+            sim.dirty_fdf,
+            sim.rmsf_arr,
+            geom.phi_arr_radm2,
+            geom.phi_double_arr_radm2,
+            geom.fwhm,
+            sim.fdf_noise,
+            pms,
+        )
+        err_single = _model_shape_err(np.asarray(single.model_fdf_arr).ravel(), truth)
+        err_multi = _model_shape_err(np.asarray(multi.model_fdf_arr).ravel(), truth)
+        ratios.append(err_multi / err_single)
+    assert float(np.median(ratios)) <= 0.7
+
+
+def test_hybrid_delta_steps_parity() -> None:
+    """On a bright offset delta, hybrid multiscale does exactly single-scale
+    work (same sub-minor step count, same flux)."""
+    freqs = np.linspace(300e6, 1800e6, 300)
+    geom = build_geometry(freqs)
+    spec = delta(center_fwhm=3.3, amp=1.0)
+    pms = float(np.pi / np.nanmin(geom.lambda_sq_arr_m2))
+    for i in range(4):
+        rng = np.random.default_rng(810000 + i)
+        sim = simulate_fdf(spec, freqs, rng=rng, sn=24.0, geometry=geom)
+        single, multi = _clean_single_and_hybrid(
+            sim.dirty_fdf,
+            sim.rmsf_arr,
+            geom.phi_arr_radm2,
+            geom.phi_double_arr_radm2,
+            geom.fwhm,
+            sim.fdf_noise,
+            pms,
+        )
+        steps_single = int(np.ravel(single.sub_minor_iter_arr)[0])
+        steps_multi = int(np.ravel(multi.sub_minor_iter_arr)[0])
+        assert steps_multi == steps_single
+        m0_single = calc_faraday_moments(
+            np.abs(single.clean_fdf_arr), geom.phi_arr_radm2, geom.fwhm
+        ).mom0
+        m0_multi = calc_faraday_moments(
+            np.abs(multi.clean_fdf_arr), geom.phi_arr_radm2, geom.fwhm
+        ).mom0
+        assert np.isclose(m0_single, m0_multi, rtol=1e-6)

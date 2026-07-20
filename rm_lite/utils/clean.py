@@ -27,6 +27,21 @@ DType = TypeVar("DType", bound=np.generic)
 
 KernelType: TypeAlias = Literal["tapered_quad", "gaussian"]
 
+SelectionType: TypeAlias = Literal["bias", "snr", "hybrid"]
+
+# Hybrid (width-gated snr) selection.
+# Engage an extended scale only when the residual peak fits wider than
+# HYBRID_WIDTH_FACTOR x the measured dirty-beam width AND the best extended
+# matched-filter score reaches HYBRID_SCORE_FACTOR x the scale-0 score, while
+# the peak is above HYBRID_ENGAGE_MASK_FACTOR x the component-finding mask;
+# otherwise fall back to plain snr selection. The width test must use the
+# MEASURED half-max width of |RMSF| (the dirty beam, near-in sidelobe
+# shoulders included), never the theoretical fwhm: under non-uniform lambda^2
+# sampling a pure delta fits far wider than 1.2 x the theoretical fwhm.
+HYBRID_WIDTH_FACTOR = 1.2
+HYBRID_SCORE_FACTOR = 0.85
+HYBRID_ENGAGE_MASK_FACTOR = 2.0
+
 # Bail out of a spectrum's minor-cycle (scale-selection) loop if the residual
 # peak exceeds this factor times the best (lowest) peak seen: a runaway backstop.
 DIVERGENCE_FACTOR = 2.0
@@ -306,7 +321,7 @@ def rmclean(
     multiscale_kernel: KernelType = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
-    multiscale_selection: Literal["bias", "snr"] = "bias",
+    multiscale_selection: SelectionType = "hybrid",
     multiscale_selection_margin: float = 0.08,
     phi_max_scale_radm2: float | None = None,
     noise_rmsf_arr: NDArray[np.complex128] | None = None,
@@ -331,8 +346,8 @@ def rmclean(
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
         multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations per scale. Defaults to 10_000.
         multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
-        multiscale_selection ("bias" | "snr", optional): Scale-selection mode. "bias" = Offringa eq-3 scale-bias (default); "snr" = matched-filter max|R conv K_s| / sigma_s (uses a finer scale grid). Defaults to "bias".
-        multiscale_selection_margin (float, optional): SNR selector only, parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points and marginally resolved sources on the delta scale. Defaults to 0.08.
+        multiscale_selection ("bias" | "snr" | "hybrid", optional): Scale-selection mode. "bias" = Offringa eq-3 scale-bias; "snr" = matched-filter max|R conv K_s| / sigma_s (uses a finer scale grid); "hybrid" (default) = width-gated snr, engaging extended scales only when the residual peak fits wider than the measured dirty beam and the extended score competes with scale 0. Defaults to "hybrid".
+        multiscale_selection_margin (float, optional): SNR selector (and hybrid fallback), parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points and marginally resolved sources on the delta scale. Defaults to 0.08.
         phi_max_scale_radm2 (float | None, optional): Largest recoverable Faraday scale (pi / lambda_sq_min); sets the auto scale range. None falls back to the phi window.
         noise_rmsf_arr (NDArray[np.complex128] | None, optional): w^2-RMSF noise covariance (double-phi axis, same shape as rmsf_arr) for the selection="snr" sigma_s. None uses rmsf_arr (exact for uniform weights). Defaults to None.
 
@@ -675,13 +690,18 @@ class MultiscaleOptions:
     """Maximum sub-minor (per-scale Hogbom) iterations"""
     sub_minor_fraction: float = 0.5
     """Re-select a scale once the activated scale's peak drops by this fraction"""
-    selection: Literal["bias", "snr"] = "bias"
-    """Scale selector. "bias" = Offringa eq-3 scale-bias; "snr" = matched filter
-    max|R conv K_s| / sigma_s (finer grid, no bias tuning needed)."""
+    selection: SelectionType = "hybrid"
+    """Scale selector (default "hybrid"). "bias" = Offringa eq-3 scale-bias; "snr" =
+    matched filter max|R conv K_s| / sigma_s (finer grid, no bias tuning needed);
+    "hybrid" = width-gated snr: engages extended scales only when the residual
+    peak fits wider than the measured dirty beam and the extended score competes
+    with scale 0, else behaves as "snr". Plain "snr" scores are near
+    scale-degenerate under correlated FDF noise, so with the default margin it
+    almost never engages; "hybrid" does while staying point-safe."""
     selection_margin: float = 0.08
-    """SNR selector only: relative margin in [0, 1) favouring smaller scales.
-    Among scales within this fraction of the best score, the smallest wins, which
-    keeps points on the delta scale. 0 = raw argmax."""
+    """SNR selector (and the hybrid fallback): relative margin in [0, 1) favouring
+    smaller scales. Among scales within this fraction of the best score, the
+    smallest wins, which keeps points on the delta scale. 0 = raw argmax."""
 
     def __post_init__(self) -> None:
         if not 0 <= self.selection_margin < 1:
@@ -966,6 +986,11 @@ class ScaleKernels(NamedTuple):
     """Per-scale FDF noise std relative to scale 0 under correlated FDF noise,
     for the matched-filter (SNR) selector: sqrt((K_s conv K_s conv C)(0) / C(0))
     with C the noise-covariance RMSF. sigma_s[0] == 1."""
+    point_width: float
+    """Measured half-max width of |RMSF| in rad/m^2: the dirty-beam width a
+    delta presents in the dirty |FDF|, near-in sidelobe shoulders included.
+    Wider than the theoretical fwhm under non-uniform lambda^2 sampling; the
+    hybrid selector's width test calibrates against this, never the fwhm."""
 
 
 def compute_scale_kernels(
@@ -1032,6 +1057,7 @@ def compute_scale_kernels(
             )
             qform[i] = float(np.real(noise_conv_twice[cov_peak_index]))
     sigma_s = np.sqrt(qform / qform[0])
+    d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
     return ScaleKernels(
         scales,
         rmsf_conv_scale,
@@ -1039,7 +1065,22 @@ def compute_scale_kernels(
         peak_response,
         fwhm_conv_scale_twice,
         sigma_s,
+        _halfmax_width_radm2(np.abs(rmsf_spectrum), d_phi),
     )
+
+
+def _halfmax_width_radm2(profile: NDArray[np.float64], d_phi: float) -> float:
+    """Half-max width of a peaked profile; on |RMSF| this is the measured
+    dirty-beam width (>> theoretical fwhm under non-uniform lambda^2 sampling)."""
+    peak_index = int(np.argmax(profile))
+    half = profile[peak_index] / 2.0
+    hi = peak_index
+    while hi + 1 < len(profile) and profile[hi + 1] > half:
+        hi += 1
+    lo = peak_index
+    while lo - 1 >= 0 and profile[lo - 1] > half:
+        lo -= 1
+    return (hi - lo + 1) * d_phi
 
 
 def find_significant_scale(
@@ -1050,29 +1091,47 @@ def find_significant_scale(
     phi_double_arr_radm2: NDArray[np.float64],
     kernel: KernelType,
     active: NDArray[np.bool_] | None = None,
-    selection: Literal["bias", "snr"] = "bias",
+    selection: SelectionType = "bias",
     selection_margin: float = 0.0,
+    engage_floor: float = 0.0,
 ) -> int:
     """Index of the most-significant scale (Offringa & Smirnov 2017).
 
     "bias" scores `max|resid conv K_s| * bias_s` (lower `scale_bias` favours larger
     scales); "snr" scores the matched filter `max|resid conv K_s| / sigma_s`, with
     `selection_margin` preferring the smallest scale within that margin of the best.
+    "hybrid" is width-gated snr: engage an extended scale only when the residual
+    peak fits wider than the measured dirty beam AND its score competes with
+    scale 0, else fall back to "snr" (see `_hybrid_scale_selection`).
 
     Args:
         resid_fdf_spectrum (NDArray[np.complex128]): Current residual FDF.
         scale_kernels (ScaleKernels): Precomputed per-scale responses.
-        scale_bias (float): Bias-selector scale-bias (unused for "snr").
+        scale_bias (float): Bias-selector scale-bias (unused otherwise).
         rmsf_fwhm (float): RMSF FWHM in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-phi axis.
         kernel (KernelType): Scale-kernel shape.
         active (NDArray[np.bool_] | None): Scales still allowed to be selected.
-        selection ("bias" | "snr"): Scale selector.
-        selection_margin (float): SNR parsimony margin (see MultiscaleOptions).
+        selection ("bias" | "snr" | "hybrid"): Scale selector.
+        selection_margin (float): SNR parsimony margin (see MultiscaleOptions);
+            for "hybrid" it applies to the snr fallback.
+        engage_floor (float): Hybrid only: below this residual peak (absolute FDF
+            units) always fall back to snr. 0 disables the gate.
 
     Returns:
         int: Index into `scale_kernels.scales` of the selected scale.
     """
+    if selection == "hybrid":
+        return _hybrid_scale_selection(
+            resid_fdf_spectrum,
+            scale_kernels,
+            rmsf_fwhm,
+            phi_double_arr_radm2,
+            kernel,
+            active=active,
+            selection_margin=selection_margin,
+            engage_floor=engage_floor,
+        )
     bias = scale_bias_function(scale_kernels.scales, scale_bias)
     scores = np.full_like(scale_kernels.scales, -np.inf)
     for i, scale in enumerate(scale_kernels.scales):
@@ -1094,6 +1153,92 @@ def find_significant_scale(
             within = scores >= best * (1 - selection_margin)
             return int(np.argmax(within))
     return int(np.argmax(scores))
+
+
+def _hybrid_scale_selection(
+    resid_fdf_spectrum: NDArray[np.complex128],
+    scale_kernels: ScaleKernels,
+    rmsf_fwhm: float,
+    phi_double_arr_radm2: NDArray[np.float64],
+    kernel: KernelType,
+    active: NDArray[np.bool_] | None,
+    selection_margin: float,
+    engage_floor: float,
+) -> int:
+    """Width-gated snr selection.
+
+    Engage an extended scale only when two independent tests agree, else fall
+    back to plain snr selection with `selection_margin`:
+    1. Width: bounded half-max fit of the residual peak wider than
+       HYBRID_WIDTH_FACTOR x the measured dirty-beam width (a delta fits 1.0x,
+       the narrowest genuinely extended source ~2x).
+    2. Score: best active extended matched-filter score at least
+       HYBRID_SCORE_FACTOR x the scale-0 score (kills residual junk that fits
+       wide but scores poorly at wide scales).
+    Engagement takes the argmax score among active extended scales. Below
+    `engage_floor` (endgame) always falls back.
+    """
+
+    def snr_fallback() -> int:
+        return find_significant_scale(
+            resid_fdf_spectrum,
+            scale_kernels,
+            1.0,
+            rmsf_fwhm,
+            phi_double_arr_radm2,
+            kernel,
+            active=active,
+            selection="snr",
+            selection_margin=selection_margin,
+        )
+
+    abs_resid = np.abs(resid_fdf_spectrum)
+    peak_index = int(np.argmax(abs_resid))
+    if engage_floor > 0 and abs_resid[peak_index] < engage_floor:
+        return snr_fallback()
+
+    point_width = scale_kernels.point_width
+    d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
+    # Walk just past the decision point; hitting the bound means "wide".
+    max_steps = int(2.0 * point_width / d_phi) + 1
+    half_val = abs_resid[peak_index] / 2.0
+    hi = peak_index
+    while (
+        hi + 1 < len(abs_resid)
+        and abs_resid[hi + 1] > half_val
+        and hi - peak_index < max_steps
+    ):
+        hi += 1
+    lo = peak_index
+    while lo - 1 >= 0 and abs_resid[lo - 1] > half_val and peak_index - lo < max_steps:
+        lo -= 1
+    if (hi - lo + 1) * d_phi < HYBRID_WIDTH_FACTOR * point_width:
+        return snr_fallback()
+
+    scales = scale_kernels.scales
+    ext_active = np.array(
+        [
+            (active is None or bool(active[i])) and float(s) > 0
+            for i, s in enumerate(scales)
+        ]
+    )
+    zero_active = bool(float(scales[0]) == 0 and (active is None or bool(active[0])))
+    if not ext_active.any() or not zero_active:
+        return snr_fallback()
+    scores = np.full(len(scales), -np.inf)
+    for i, scale in enumerate(scales):
+        if not (ext_active[i] or float(scale) == 0):
+            continue
+        resid_conv = convolve_fdf_scale(
+            float(scale), rmsf_fwhm, resid_fdf_spectrum, phi_double_arr_radm2, kernel
+        )
+        scores[i] = float(np.nanmax(np.abs(resid_conv))) / float(
+            scale_kernels.sigma_s[i]
+        )
+    best_ext = int(np.argmax(np.where(ext_active, scores, -np.inf)))
+    if scores[best_ext] < HYBRID_SCORE_FACTOR * scores[0]:
+        return snr_fallback()
+    return best_ext
 
 
 def _multiscale_minor_cycles(
@@ -1183,6 +1328,7 @@ def _multiscale_minor_cycles(
             active=active,
             selection=selection,
             selection_margin=multiscale_options.selection_margin,
+            engage_floor=HYBRID_ENGAGE_MASK_FACTOR * clean_options.mask,
         )
         scale = float(scales[scale_index])
         peak_response = float(kernels.peak_response[scale_index])
@@ -1311,6 +1457,28 @@ def _build_scale_masks(
     return masks
 
 
+def _classify_hybrid_source(
+    dirty_fdf_spectrum: NDArray[np.complex128],
+    phi_double_arr_radm2: NDArray[np.float64],
+    kernels: ScaleKernels,
+    multiscale_options: MultiscaleOptions,
+) -> MultiscaleOptions:
+    """Classify the source once on the DIRTY spectrum for "hybrid" selection.
+
+    A peak that fits at beam width is a point source: lock the whole clean to
+    "snr" so mid-clean sidelobe pedestals (which can fit wide while the peak is
+    still above the engage floor) never re-open extended selection. A wide fit
+    keeps "hybrid" with its per-cycle gates. No-op for other selectors.
+    """
+    if multiscale_options.selection != "hybrid":
+        return multiscale_options
+    d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
+    width = _halfmax_width_radm2(np.abs(dirty_fdf_spectrum), d_phi)
+    if width < HYBRID_WIDTH_FACTOR * kernels.point_width:
+        return dataclasses.replace(multiscale_options, selection="snr")
+    return multiscale_options
+
+
 def multiscale_clean_spectrum(
     dirty_fdf_spectrum: NDArray[np.complex128],
     phi_arr_radm2: NDArray[np.float64],
@@ -1361,6 +1529,9 @@ def multiscale_clean_spectrum(
         phi_double_arr_radm2,
         kernel,
         noise_rmsf_spectrum=noise_rmsf_spectrum,
+    )
+    multiscale_options = _classify_hybrid_source(
+        dirty_fdf_spectrum, phi_double_arr_radm2, kernels, multiscale_options
     )
 
     # Phase-1 detection support: each scale may clean where its scale-convolved
@@ -1447,7 +1618,7 @@ def default_scales(
     The auto max scale is `phi_max_scale_radm2` (pi / lambda_sq_min) when given,
     capped at the FDF phi window: a kernel wider than the window is meaningless (its
     response flattens, its normalisation blows up). "bias" takes the coarse
-    `make_scales` grid, "snr" the finer `make_fine_scales`.
+    `make_scales` grid, "snr" and "hybrid" the finer `make_fine_scales`.
 
     Args:
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth axis (sets the window cap).
@@ -1468,7 +1639,7 @@ def default_scales(
         max_scale = min(phi_max_scale_radm2 / rmsf_fwhm, window_max_scale)
     else:
         max_scale = window_max_scale
-    if multiscale_options.selection == "snr":
+    if multiscale_options.selection in ("snr", "hybrid"):
         scales = make_fine_scales(max_scale, n_scales=multiscale_options.n_scales)
         first_scale = 3.0
     else:

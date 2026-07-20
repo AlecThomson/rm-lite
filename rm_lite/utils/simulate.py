@@ -29,16 +29,19 @@ from rm_lite.utils.synthesis import (
 
 PHI_MAX_FWHM = 40.0  # phi window half-width in RMSF FWHM units (matches _probe)
 
-ComponentKind = Literal["delta", "gauss", "slab"]
+ComponentKind = Literal["delta", "gauss", "slab", "internal"]
 
 
 class Component(NamedTuple):
     """One source component (Burn model); widths and RM centre in RMSF FWHM units."""
 
     kind: ComponentKind
-    width_fwhm: float = 0.0  # gauss Faraday sigma / slab full width; 0 for delta
+    width_fwhm: float = (
+        0.0  # gauss Faraday sigma / slab and internal full depth; 0 for delta
+    )
     center_fwhm: float = 0.0  # RM (Faraday rotation) in FWHM units
     amp: float = 1.0  # intrinsic polarised fraction |P(lambda^2=0)|
+    sigma_rm_fwhm: float = 0.0  # internal only: turbulent Faraday dispersion sigma
 
 
 class FDFSpec(NamedTuple):
@@ -62,6 +65,24 @@ def slab(width_fwhm: float, center_fwhm: float = 0.0, amp: float = 1.0) -> FDFSp
     return FDFSpec((Component("slab", width_fwhm, center_fwhm, amp),))
 
 
+def internal(
+    width_fwhm: float,
+    sigma_rm_fwhm: float,
+    center_fwhm: float = 0.0,
+    amp: float = 1.0,
+) -> FDFSpec:
+    """Turbulent slab: internal Faraday dispersion (Sokoloff et al. 1998, eq. 34).
+
+    Full Faraday depth `width_fwhm` with Gaussian RM scatter `sigma_rm_fwhm`;
+    reduces to `slab` at zero scatter. Polynomial depolarisation tail
+    (~1/(2 sigma^2 lambda^4)), far slower than the `gauss` exponential
+    (cf. O'Sullivan et al. 2012; Ma et al. 2019a).
+    """
+    return FDFSpec(
+        (Component("internal", width_fwhm, center_fwhm, amp, sigma_rm_fwhm),)
+    )
+
+
 def build_channel_spectrum(
     spec: FDFSpec, lambda_sq_arr_m2: NDArray[np.float64], fwhm: float
 ) -> NDArray[np.complex128]:
@@ -82,12 +103,29 @@ def build_channel_spectrum(
     pol = np.zeros_like(lambda_sq_arr_m2, dtype=np.complex128)
     for comp in spec.components:
         rotation = np.exp(2j * comp.center_fwhm * fwhm * lambda_sq_arr_m2)
+        envelope: NDArray[np.float64] | NDArray[np.complex128]
         if comp.kind == "gauss":
             sigma_phi = comp.width_fwhm * fwhm
             envelope = np.exp(-2.0 * sigma_phi**2 * lambda_sq_arr_m2**2)
         elif comp.kind == "slab":
             delta_phi = comp.width_fwhm * fwhm
             envelope = np.sinc(delta_phi * lambda_sq_arr_m2 / np.pi)
+        elif comp.kind == "internal":
+            # Sokoloff et al. (1998) eq. 34, symmetrised about the component
+            # centre (the e^{-i depth lam^2} factor) to match the slab convention.
+            depth = comp.width_fwhm * fwhm
+            sigma_rm = comp.sigma_rm_fwhm * fwhm
+            s_arr = (
+                2.0 * sigma_rm**2 * lambda_sq_arr_m2**2
+                - 2.0j * depth * lambda_sq_arr_m2
+            )
+            small = np.abs(s_arr) < 1e-12
+            s_safe = np.where(small, 1.0, s_arr)
+            envelope = np.asarray(
+                np.where(small, 1.0, (1.0 - np.exp(-s_safe)) / s_safe)
+                * np.exp(-1j * depth * lambda_sq_arr_m2),
+                dtype=np.complex128,
+            )
         else:  # delta: Faraday-thin, no depolarisation
             envelope = np.ones_like(lambda_sq_arr_m2)
         pol += comp.amp * rotation * envelope
@@ -119,6 +157,19 @@ def build_model_fdf(
             fdf += comp.amp * unit_centred_gaussian(
                 phi_arr_radm2 - center, stddev=comp.width_fwhm * fwhm
             ).astype(np.complex128)
+        elif comp.kind == "internal":
+            # Depth distribution: uniform over the slab, Gaussian-scattered.
+            half = comp.width_fwhm * fwhm / 2.0
+            tophat = (np.abs(phi_arr_radm2 - center) <= half).astype(np.float64)
+            if not tophat.any():
+                tophat[int(np.argmin(np.abs(phi_arr_radm2 - center)))] = 1.0
+            if comp.sigma_rm_fwhm > 0:
+                kern = unit_centred_gaussian(
+                    phi_arr_radm2 - phi_arr_radm2[len(phi_arr_radm2) // 2],
+                    stddev=comp.sigma_rm_fwhm * fwhm,
+                )
+                tophat = np.convolve(tophat, kern / kern.sum(), mode="same")
+            fdf += comp.amp * (tophat / tophat.max()).astype(np.complex128)
         else:  # slab
             half = comp.width_fwhm * fwhm / 2.0
             fdf += comp.amp * (np.abs(phi_arr_radm2 - center) <= half).astype(
@@ -193,19 +244,22 @@ class Geometry(NamedTuple):
 
 
 def build_geometry(
-    freq_arr_hz: NDArray[np.float64], phi_max_fwhm: float = PHI_MAX_FWHM
+    freq_arr_hz: NDArray[np.float64],
+    phi_max_fwhm: float = PHI_MAX_FWHM,
+    weight_arr: NDArray[np.float64] | None = None,
 ) -> Geometry:
-    """Uniform-weight geometry and RMSF for a frequency coverage.
+    """Geometry and RMSF for a frequency coverage.
 
     Args:
         freq_arr_hz (NDArray[np.float64]): Channel frequencies in Hz.
         phi_max_fwhm (float): Phi window half-width in RMSF FWHM units.
+        weight_arr (NDArray[np.float64] | None): Channel weights; None is uniform.
 
     Returns:
         Geometry: lambda^2, weights, reference, FWHM, phi axes, and RMSF.
     """
     lam2 = freq_to_lambda2(freq_arr_hz)
-    weight = np.ones_like(lam2)
+    weight = np.ones_like(lam2) if weight_arr is None else np.asarray(weight_arr)
     lam_sq_0 = float(np.average(lam2, weights=weight))
     fwhm = get_fwhm_rmsf(lam2).fwhm_rmsf_radm2
     phi_arr = make_phi_arr(phi_max_radm2=phi_max_fwhm * fwhm, d_phi_radm2=fwhm / 10.0)
@@ -326,6 +380,29 @@ def demo() -> None:
     order = np.argsort(geom.lambda_sq_arr_m2)
     gpol = build_channel_spectrum(gauss(4.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm)
     assert np.all(np.diff(np.abs(gpol)[order]) <= 1e-9), "gauss envelope not monotone"
+
+    # Internal dispersion (Sokoloff eq. 34): reduces to the Burn slab at zero
+    # scatter, stays bounded, and its polynomial tail outlives the gauss
+    # exponential at matched dispersion.
+    pol_slab = build_channel_spectrum(
+        slab(4.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
+    )
+    pol_int0 = build_channel_spectrum(
+        internal(4.0, 0.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
+    )
+    assert np.allclose(pol_int0, pol_slab, atol=1e-9), "internal(w, 0) != slab(w)"
+    pol_int = build_channel_spectrum(
+        internal(4.0, 1.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
+    )
+    assert np.abs(pol_int).max() <= 0.7 + 1e-6, "internal |P| > amp"
+    lam2_max = float(geom.lambda_sq_arr_m2.max())
+    tail_int = np.abs(
+        build_channel_spectrum(internal(0.0, 1.0), np.array([lam2_max]), geom.fwhm)
+    )[0]
+    tail_gauss = np.abs(
+        build_channel_spectrum(gauss(1.0), np.array([lam2_max]), geom.fwhm)
+    )[0]
+    assert tail_int > tail_gauss, "internal tail must outlive gauss tail"
 
     n1 = simulate_fdf(delta(), freq, rng=rng, sigma=0.1).fdf_noise
     n2 = simulate_fdf(delta(), freq, rng=rng, sigma=0.2).fdf_noise
