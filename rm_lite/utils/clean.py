@@ -824,6 +824,16 @@ KERNEL_FUNCS: dict[str, Callable[..., NDArray[np.float64]]] = {
     "gaussian": gaussian_scale_kernel_function,
 }
 
+# Kernel half-width as a fraction of scale_radm2 (= scale * rmsf_fwhm), used to trim
+# the convolution kernel to its real support instead of sampling it across the whole
+# signal. tapered_quad is exactly zero beyond scale_radm2/2 (the Hanning gate), so
+# 0.5 loses nothing. gaussian has no hard cutoff; 6 sigma (sigma = (3/16)*scale_radm2)
+# leaves a truncation error of ~1e-8 relative, well below any numerical tolerance here.
+KERNEL_SUPPORT_FACTOR: dict[str, float] = {
+    "tapered_quad": 0.5,
+    "gaussian": 6 * 3 / 16,
+}
+
 
 def convolve_fdf_scale(
     scale: float,
@@ -852,13 +862,19 @@ def convolve_fdf_scale(
     if scale == 0:
         return fdf_arr
     kernel_func = KERNEL_FUNCS.get(kernel, gaussian_scale_kernel_function)
-    # Sample the kernel on a zero-centred grid of the SAME length as the signal
-    # (same d_phi as phi_double). A kernel longer than the signal would produce
-    # boundary garbage under scipy's reflect mode; this keeps them matched for
-    # both FDF-length and RMSF-length inputs.
+    # Sample the kernel on a zero-centred grid trimmed to its real support (see
+    # KERNEL_SUPPORT_FACTOR), not the full signal length: scipy.ndimage.convolve is
+    # O(n * kernel_len), and the kernel is negligible (tapered_quad: exactly zero)
+    # beyond that support. Capped at n so a kernel wider than the signal (large
+    # scale, narrow phi window) still can't exceed it and produce boundary garbage
+    # under scipy's reflect mode.
     d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
     n = len(fdf_arr)
-    kernel_grid = (np.arange(n) - n // 2) * d_phi
+    support_factor = KERNEL_SUPPORT_FACTOR.get(
+        kernel, KERNEL_SUPPORT_FACTOR["gaussian"]
+    )
+    half_width = min(int(np.ceil(support_factor * scale * fwhm / d_phi)), (n - 1) // 2)
+    kernel_grid = np.arange(-half_width, half_width + 1) * d_phi
     kernel_arr = kernel_func(kernel_grid, scale, fwhm, sum_normalised=sum_normalised)
 
     if np.iscomplexobj(fdf_arr):
