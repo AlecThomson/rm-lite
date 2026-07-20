@@ -10,7 +10,12 @@ from typing import Literal, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.ndimage import binary_dilation, convolve
+from scipy.ndimage import (
+    binary_dilation,
+    convolve,
+    maximum_filter1d,
+    minimum_filter1d,
+)
 from tqdm.auto import tqdm
 
 from rm_lite.utils.arrays import nd_to_two_d, two_d_to_nd
@@ -1336,6 +1341,51 @@ def _hybrid_scale_selection(
     return best_ext
 
 
+def adaptive_scale_supports(
+    dirty_fdf_spectrum: NDArray[np.complex128],
+    source_region: NDArray[np.bool_],
+    kernels: ScaleKernels,
+    scales: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    kernel: KernelType,
+    rmsf_fwhm: float,
+    mask: float,
+) -> list[NDArray[np.bool_]]:
+    """Opening-filter scale supports (eye-patch flint-crew, 1D RM analogue).
+
+    Per scale: scale-convolve the dirty FDF, morphologically OPEN it (min then max
+    filter of the scale width) to isolate structure at least that wide, gate at the
+    flux-correct amplitude `mask * peak_response`, and confine to `source_region`
+    dilated by the scale width. `source_region` is the tight adaptive mask from the
+    single-scale off-source pre-pass; dilating per scale is the eye-patch
+    beam-shape-erosion analogue and keeps extended scales from spreading onto the
+    RMSF sidelobe islands (the pond). A scale with an empty support is inactive.
+    """
+    d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
+    supports: list[NDArray[np.bool_]] = []
+    for i, scale in enumerate(scales):
+        w = max(1, round(float(scale) * rmsf_fwhm / d_phi))
+        region = (
+            source_region
+            if float(scale) == 0
+            else binary_dilation(source_region, iterations=w)
+        )
+        abs_conv = np.abs(
+            convolve_fdf_scale(
+                float(scale),
+                rmsf_fwhm,
+                dirty_fdf_spectrum,
+                phi_double_arr_radm2,
+                kernel,
+            )
+        )
+        opened = (
+            maximum_filter1d(minimum_filter1d(abs_conv, w), w) if w > 1 else abs_conv
+        )
+        supports.append((opened > mask * float(kernels.peak_response[i])) & region)
+    return supports
+
+
 def _multiscale_minor_cycles(
     resid_fdf_spectrum: NDArray[np.complex128],
     model_fdf_spectrum: NDArray[np.complex128],
@@ -1612,6 +1662,27 @@ def multiscale_clean_spectrum(
         minor cycles (scale re-selections); sub_minor_iters the per-scale Hogbom
         steps (comparable to single-scale's iteration count).
     """
+    # A delta-only grid IS single-scale (narrow bands degenerate here): delegate so
+    # the result is bit-identical to single-scale CLEAN, not just numerically close.
+    if len(scales) == 1 and float(scales[0]) == 0:
+        r = minor_cycle(
+            RMSynthArrays(
+                dirty_fdf_arr=dirty_fdf_spectrum,
+                phi_arr_radm2=phi_arr_radm2,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                rmsf_arr=rmsf_spectrum,
+                fwhm_rmsf_arr=np.array([rmsf_fwhm]),
+            ),
+            clean_options,
+        )
+        return (
+            r.clean_fdf_spectrum,
+            r.resid_fdf_spectrum,
+            r.model_fdf_spectrum,
+            r.iter_count,
+            r.iter_count,
+        )
+
     mask = clean_options.mask
     threshold = clean_options.threshold
     kernel = multiscale_options.kernel
@@ -1625,26 +1696,60 @@ def multiscale_clean_spectrum(
         kernel,
         noise_rmsf_spectrum=noise_rmsf_spectrum,
     )
-    multiscale_options = _classify_hybrid_source(
-        dirty_fdf_spectrum, phi_double_arr_radm2, kernels, multiscale_options
-    )
-
-    # Phase-1 detection support: each scale may clean where its scale-convolved
-    # dirty exceeds the mask. A source at the mask amplitude has a scale-convolved
-    # peak of `mask * peak_response`, so the scale kernel sets the mask width.
-    scale_supports = [
-        np.abs(
-            convolve_fdf_scale(
-                float(scale),
-                rmsf_fwhm,
-                dirty_fdf_spectrum,
-                phi_double_arr_radm2,
-                kernel,
-            )
+    # Adaptive opening-filter masking replaces the frozen dirty-based supports and
+    # the dirty hybrid classification (activation is the opening filter).
+    adaptive = clean_options.fdf_noise is not None
+    if not adaptive:
+        multiscale_options = _classify_hybrid_source(
+            dirty_fdf_spectrum, phi_double_arr_radm2, kernels, multiscale_options
         )
-        > mask * float(peak_response_s)
-        for scale, peak_response_s in zip(scales, kernels.peak_response, strict=True)
-    ]
+
+    if adaptive:
+        # Single-scale off-source pre-pass gives the tight source region (its
+        # component footprint), which bounds every scale's opening-filter support.
+        # This keeps the flux-correct multiscale minor cycles unchanged while
+        # confining them off the RMSF sidelobe islands. A noise-only spectrum yields
+        # an empty region -> empty supports -> the guard below returns (no clean).
+        pre_pass = minor_cycle(
+            RMSynthArrays(
+                dirty_fdf_arr=dirty_fdf_spectrum,
+                phi_arr_radm2=phi_arr_radm2,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                rmsf_arr=rmsf_spectrum,
+                fwhm_rmsf_arr=np.array([rmsf_fwhm]),
+            ),
+            clean_options,
+        )
+        source_region = np.abs(pre_pass.model_fdf_spectrum) > 0
+        scale_supports = adaptive_scale_supports(
+            dirty_fdf_spectrum,
+            source_region,
+            kernels,
+            scales,
+            phi_double_arr_radm2,
+            kernel,
+            rmsf_fwhm,
+            mask,
+        )
+    else:
+        # Phase-1 detection support: each scale may clean where its scale-convolved
+        # dirty exceeds the mask. A source at the mask amplitude has a scale-convolved
+        # peak of `mask * peak_response`, so the scale kernel sets the mask width.
+        scale_supports = [
+            np.abs(
+                convolve_fdf_scale(
+                    float(scale),
+                    rmsf_fwhm,
+                    dirty_fdf_spectrum,
+                    phi_double_arr_radm2,
+                    kernel,
+                )
+            )
+            > mask * float(peak_response_s)
+            for scale, peak_response_s in zip(
+                scales, kernels.peak_response, strict=True
+            )
+        ]
     if not np.logical_or.reduce(scale_supports).any():
         return (
             _restore_multiscale(model_fdf_spectrum, phi_double_arr_radm2, rmsf_fwhm),

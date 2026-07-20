@@ -94,6 +94,7 @@ def rmclean_3d(
     max_iter: int = 1000,
     gain: float = 0.1,
     moment_threshold: float | None = None,
+    fdf_noise: float | None = None,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
     multiscale_scale_bias: float = 0.6,
@@ -125,6 +126,10 @@ def rmclean_3d(
             amplitude units) applied to the clean FDF before computing the
             Faraday moment maps, passed to `calc_faraday_moments`. None includes
             all amplitudes (noise-biased). Defaults to None.
+        fdf_noise (float | None, optional): Theoretical FDF noise; enables the
+            adaptive off-source auto-mask (mask contracts off the RMSF sidelobes of
+            bright sources, then relaxes as they subtract). None keeps the
+            fixed-mask behaviour. Defaults to None.
         log_level (int, optional): Log level applied to `rm_lite`'s logger while
             each chunk runs. `rmclean`'s Hogbom loop logs at INFO and WARNING
             per pixel (e.g. "Starting minor loop...", "All channels masked...
@@ -159,6 +164,7 @@ def rmclean_3d(
         threshold=threshold,
         max_iter=max_iter,
         gain=gain,
+        fdf_noise=fdf_noise,
     )
     multiscale_options = (
         MultiscaleOptions(
@@ -306,6 +312,7 @@ def rmclean_3d_from_synth(
         max_iter=max_iter,
         gain=gain,
         moment_threshold=moment_threshold,
+        fdf_noise=fdf_error_noise,
         log_level=log_level,
         multiscale=multiscale,
         multiscale_scale_bias=multiscale_scale_bias,
