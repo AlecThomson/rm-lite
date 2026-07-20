@@ -879,9 +879,10 @@ def briggs_weight(
     natural-weighted mean sampling density (CASA convention) so `robust` is
     comparable across datasets with different channel counts."""
     density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
-    mean_density = float(
-        np.sum(natural_weight_arr * density) / np.sum(natural_weight_arr)
-    )
+    total_weight = float(np.sum(natural_weight_arr))
+    if total_weight == 0:
+        return np.zeros_like(natural_weight_arr)
+    mean_density = float(np.sum(natural_weight_arr * density) / total_weight)
     f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
     weight: NDArray[np.float64] = natural_weight_arr / (1.0 + density * f_sq)
     return weight
@@ -1416,6 +1417,7 @@ fdf_params_schema = pl.Schema(
         "lam_sq_0_m2": pl.Float64,
         "ref_freq_hz": pl.Float64,
         "fwhm_rmsf_radm2": pl.Float64,
+        "phi_max_scale_radm2": pl.Float64,
         "fdf_error_noise": pl.Float64,
         "fdf_q_noise": pl.Float64,
         "fdf_u_noise": pl.Float64,
@@ -1626,6 +1628,7 @@ def get_fdf_parameters(
                 "lam_sq_0_m2": lam_sq_0_m2,
                 "ref_freq_hz": lambda2_to_freq(lam_sq_0_m2),
                 "fwhm_rmsf_radm2": fwhm_rmsf_radm2,
+                "phi_max_scale_radm2": float(np.pi / np.nanmin(lambda_sq_arr_m2)),
                 "fdf_error_noise": theoretical_noise.fdf_error_noise,
                 "fdf_q_noise": theoretical_noise.fdf_q_noise,
                 "fdf_u_noise": theoretical_noise.fdf_u_noise,

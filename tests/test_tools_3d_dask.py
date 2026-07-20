@@ -15,7 +15,7 @@ from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmclean import rmclean_3d, rmclean_3d_from_synth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
-from rm_lite.utils.clean import rmclean
+from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
 from rm_lite.utils.dask_io import (
     estimate_channel_noise_mad,
     freq_arr_hz_from_header,
@@ -135,13 +135,14 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
     for j in range(ny):
         for i in range(nx):
             ref = rmclean(
-                dirty_fdf_arr=dirty_cube[:, j, i],
-                phi_arr_radm2=synth.phi_arr_radm2,
-                rmsf_arr=rmsf_cube[:, j, i],
-                phi_double_arr_radm2=synth.phi_double_arr_radm2,
-                fwhm_rmsf_arr=np.array(synth.fwhm_rmsf_radm2),
-                mask=MASK_THRESHOLD,
-                threshold=CLEAN_THRESHOLD,
+                RMSynthArrays(
+                    dirty_fdf_arr=dirty_cube[:, j, i],
+                    phi_arr_radm2=synth.phi_arr_radm2,
+                    rmsf_arr=rmsf_cube[:, j, i],
+                    phi_double_arr_radm2=synth.phi_double_arr_radm2,
+                    fwhm_rmsf_arr=np.array(synth.fwhm_rmsf_radm2),
+                ),
+                RMCleanOptions(mask=MASK_THRESHOLD, threshold=CLEAN_THRESHOLD),
             )
             np.testing.assert_allclose(
                 clean_cube[:, j, i], ref.clean_fdf_arr, atol=1e-8
@@ -288,6 +289,36 @@ def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
         # to_zarr, once by .compute() here), and repeat NUFFT calls can differ
         # at the ~1e-15 level.
         np.testing.assert_allclose(group[name][:], array.compute(), atol=1e-10)
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_rmclean_3d_multiscale_smoke(synthetic_cube: SyntheticCube):
+    """Multiscale RM-CLEAN threads through the delayed/dask 3D path unbroken."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+
+    synth = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    clean = rmclean_3d(
+        synth.fdf_dirty_cube,
+        synth.rmsf_cube,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+        multiscale=True,
+    )
+    clean_cube, model_cube, iter_map = compute(
+        clean.clean_fdf_cube, clean.model_fdf_cube, clean.iter_count_map
+    )
+
+    ny, nx = synthetic_cube.rm_map.shape
+    assert clean_cube.shape[1:] == (ny, nx)
+    assert np.isfinite(clean_cube).all()
+    assert np.isfinite(model_cube).all()
+    assert (iter_map > 0).any()
 
 
 def test_freq_arr_hz_from_header_reads_spectral_wcs():

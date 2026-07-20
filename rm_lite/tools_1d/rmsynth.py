@@ -104,8 +104,8 @@ def run_rmsynth(
         weight_type (WeightType, optional): Weighting: 'variance' (1/sigma^2), 'uniform' (equal per channel), 'uniform_lsq' (equal per lambda^2 interval, narrows the RMSF), 'briggs' (robust). Defaults to "variance".
         robust (float | None, optional): Briggs robust parameter, required for weight_type='briggs'. Defaults to None.
         do_fit_rmsf (bool, optional): Fit the RMSF main lobe. Defaults to False.
-        do_fit_rmsf_real (bool, optional): The the real part of the RMSF. Defaults to False.
-        fit_function ("log" | "linear", optional): _description_. Defaults to "log".
+        do_fit_rmsf_real (bool, optional): Fit only the real part of the RMSF. Defaults to False.
+        fit_function ("log" | "linear", optional): RMSF fit function. Defaults to "log".
         fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
 

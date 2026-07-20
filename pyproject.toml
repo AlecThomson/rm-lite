@@ -165,12 +165,6 @@ warn_return_any = false
 module = ["tests.test_examples"]
 disallow_untyped_calls = false
 
-[[tool.mypy.overrides]]
-# Placeholder module: unconditionally raises NotImplementedError at import
-# time, so everything below it is intentionally unreachable/unfinished.
-module = ["rm_lite.utils.multiscale"]
-ignore_errors = true
-
 
 [tool.typos.default.extend-identifiers]
 arange = "arange"

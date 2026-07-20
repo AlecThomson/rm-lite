@@ -38,10 +38,11 @@ def _peak_rss(chunk_arg: str) -> int:
 
 
 def test_memory_scales_with_chunk_size_not_cube_size():
-    small_chunk_peak_rss = _peak_rss("32")
-    full_block_peak_rss = _peak_rss("full")
+    small_chunk_compute_rss = _peak_rss("32")
+    full_block_compute_rss = _peak_rss("full")
 
-    assert small_chunk_peak_rss < full_block_peak_rss * 0.7, (
-        f"small-chunk peak RSS ({small_chunk_peak_rss}) should be well below "
-        f"the single-block peak RSS ({full_block_peak_rss}) for the same cube"
+    assert small_chunk_compute_rss < full_block_compute_rss * 0.7, (
+        f"small-chunk computation-phase RSS delta ({small_chunk_compute_rss} kB) "
+        f"should be well below the single-block computation-phase RSS delta "
+        f"({full_block_compute_rss} kB) for the same cube"
     )
