@@ -290,6 +290,36 @@ def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
         np.testing.assert_allclose(group[name][:], array.compute(), atol=1e-10)
 
 
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_rmclean_3d_multiscale_smoke(synthetic_cube: SyntheticCube):
+    """Multiscale RM-CLEAN threads through the delayed/dask 3D path unbroken."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+
+    synth = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    clean = rmclean_3d(
+        synth.fdf_dirty_cube,
+        synth.rmsf_cube,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+        multiscale=True,
+    )
+    clean_cube, model_cube, iter_map = compute(
+        clean.clean_fdf_cube, clean.model_fdf_cube, clean.iter_count_map
+    )
+
+    ny, nx = synthetic_cube.rm_map.shape
+    assert clean_cube.shape[1:] == (ny, nx)
+    assert np.isfinite(clean_cube).all()
+    assert np.isfinite(model_cube).all()
+    assert (iter_map > 0).any()
+
+
 def test_freq_arr_hz_from_header_reads_spectral_wcs():
     header = Header()
     header["NAXIS"] = 3

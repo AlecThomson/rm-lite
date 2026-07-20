@@ -17,9 +17,7 @@ from rm_lite.utils.clean import (
     compute_scale_kernels,
     convolve_fdf_scale,
     default_scales,
-    make_scales,
     rmclean,
-    scale_bias_function,
 )
 from rm_lite.utils.logging import quiet_logs
 from rm_lite.utils.simulate import (
@@ -93,26 +91,6 @@ def _run_synth(complex_pol: NDArray[np.complex128], freq_hz: NDArray[np.float64]
     err = np.ones_like(complex_pol) * (rms + 1j * rms)
     with quiet_logs(logging.ERROR):
         return run_rmsynth(freq_hz, complex_pol, err, n_samples=10, phi_max_radm2=250.0)
-
-
-def test_scale_bias_function() -> None:
-    scales = np.array([0.0, 1.0, 2.0, 4.0])
-    bias = scale_bias_function(scales, 0.6)
-    assert bias[0] == 1.0
-    # Lower scale_bias favours larger scales: weights increase with scale.
-    assert np.all(np.diff(bias[1:]) > 0)
-    # A single scale gets unit weight.
-    assert scale_bias_function(np.array([0.0]), 0.6)[0] == 1.0
-
-
-def test_make_scales() -> None:
-    # Default first_scale=4 (WSClean's rule): 0 then geometric doubling.
-    scales = make_scales(40.0)
-    assert scales[0] == 0.0
-    assert np.allclose(scales, [0, 4, 8, 16, 32])
-    assert len(make_scales(40.0, n_scales=3)) == 3
-    # An explicit first_scale still drives a finer grid.
-    assert np.allclose(make_scales(10.0, first_scale=1.0), [0, 1, 2, 4, 8])
 
 
 def test_default_scales_capped_to_phi_window() -> None:
@@ -629,3 +607,19 @@ def test_hybrid_delta_steps_parity() -> None:
         # the delta a hair differently from single-scale. Still catches flux
         # being destroyed or doubled.
         assert np.isclose(m0_single, m0_multi, rtol=0.02)
+
+
+def test_explicit_scales_sorted_and_require_delta() -> None:
+    # Unsorted input is normalised to ascending order (selectors index scales[0]
+    # as the delta scale and assume ascending).
+    opts = MultiscaleOptions(scales=np.array([8.0, 0.0, 3.0]))
+    assert opts.scales is not None
+    np.testing.assert_array_equal(opts.scales, [0.0, 3.0, 8.0])
+
+    # Missing the delta (0) scale is rejected.
+    with pytest.raises(ValueError, match="must include 0"):
+        MultiscaleOptions(scales=np.array([3.0, 8.0]))
+
+    # Empty is still rejected.
+    with pytest.raises(ValueError, match="non-empty"):
+        MultiscaleOptions(scales=np.array([]))

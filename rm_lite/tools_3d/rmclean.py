@@ -76,9 +76,7 @@ def _clean_block(
         clean_fdf=result.clean_fdf_arr,
         model_fdf=result.model_fdf_arr,
         resid_fdf=result.resid_fdf_arr,
-        # RMCleanResults.clean_iter_arr is annotated NDArray[np.int16] but is
-        # actually built with dtype=int (int64) here.
-        iter_count=result.clean_iter_arr,  # type: ignore[arg-type]
+        iter_count=result.clean_iter_arr,
     )
 
 

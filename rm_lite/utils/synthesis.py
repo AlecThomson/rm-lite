@@ -879,9 +879,10 @@ def briggs_weight(
     natural-weighted mean sampling density (CASA convention) so `robust` is
     comparable across datasets with different channel counts."""
     density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
-    mean_density = float(
-        np.sum(natural_weight_arr * density) / np.sum(natural_weight_arr)
-    )
+    total_weight = float(np.sum(natural_weight_arr))
+    if total_weight == 0:
+        return np.zeros_like(natural_weight_arr)
+    mean_density = float(np.sum(natural_weight_arr * density) / total_weight)
     f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
     weight: NDArray[np.float64] = natural_weight_arr / (1.0 + density * f_sq)
     return weight

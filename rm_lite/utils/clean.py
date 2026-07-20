@@ -32,7 +32,7 @@ DType = TypeVar("DType", bound=np.generic)
 
 KernelType: TypeAlias = Literal["tapered_quad", "gaussian"]
 
-SelectionType: TypeAlias = Literal["bias", "snr", "hybrid"]
+SelectionType: TypeAlias = Literal["snr", "hybrid"]
 
 # Hybrid (width-gated snr) selection.
 # Engage an extended scale only when the residual peak fits wider than
@@ -68,13 +68,13 @@ class RMCleanResults(NamedTuple):
     """The cleaned Faraday dispersion function cube"""
     model_fdf_arr: NDArray[np.complex128]
     """The clean components cube"""
-    clean_iter_arr: NDArray[np.int16]
+    clean_iter_arr: NDArray[np.int64]
     """CLEAN iterations per pixel. Single-scale: minor iterations (one component
     each). Multiscale: minor cycles (scale re-selections); see
     `sub_minor_iter_arr` for the comparable component count."""
     resid_fdf_arr: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
-    sub_minor_iter_arr: NDArray[np.int16]
+    sub_minor_iter_arr: NDArray[np.int64]
     """Total component-placement steps per pixel: single-scale equals
     `clean_iter_arr`; multiscale sums the sub-minor (per-scale Hogbom) iterations
     over all minor cycles. This is the count comparable to single-scale."""
@@ -348,9 +348,9 @@ def minor_loop(
                 peak = float(np.abs(peak_fdf))
                 if peak < 0.8 * last_recompute_peak:
                     offsrc_rms = _offsource_rms(resid_fdf_spectrum, mask_arr)
-                    thr_eff = minor_loop_options.mask * max(
-                        1.0, offsrc_rms / minor_loop_options.noise
-                    )
+                    noise = minor_loop_options.noise
+                    ratio = offsrc_rms / noise if noise > 0 else 1.0
+                    thr_eff = minor_loop_options.mask * max(1.0, ratio)
                     last_recompute_peak = peak
                     # Grow only into channels contiguous with the current region
                     # (binary dilation) so the mask cannot jump the RMSF nulls onto
@@ -423,7 +423,7 @@ def rmclean(
         mask (float): Masking threshold - pixels below this value are not cleaned
         threshold (float): Cleaning threshold - stop when all pixels are below this value
         max_iter (int, optional): Maximum clean iterations. Defaults to 1000.
-        gain (float, optional): Glean loop gain. Defaults to 0.1.
+        gain (float, optional): Clean loop gain. Defaults to 0.1.
         mask_arr (NDArray[np.bool_] | None, optional): Additional mask of pixels to avoid. Defaults to None.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
         multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales (RMSF FWHM units); None auto-selects.
@@ -758,9 +758,6 @@ def minor_cycle(
 class MultiscaleOptions:
     """Options for multiscale RM-CLEAN."""
 
-    scale_bias: float = 0.6
-    """Bias selector only: scale-bias in (0, 1] (Offringa & Smirnov 2017, eq. 3).
-    Lower favours larger scales; 1 behaves like single-scale. Default 0.6 (WSClean)."""
     scales: NDArray[np.float64] | None = None
     """Explicit scales (RMSF FWHM units); None auto-selects WSClean-style"""
     n_scales: int | None = None
@@ -772,13 +769,12 @@ class MultiscaleOptions:
     sub_minor_fraction: float = 0.5
     """Re-select a scale once the activated scale's peak drops by this fraction"""
     selection: SelectionType = "hybrid"
-    """Scale selector (default "hybrid"). "bias" = Offringa eq-3 scale-bias; "snr" =
-    matched filter max|R conv K_s| / sigma_s (finer grid, no bias tuning needed);
-    "hybrid" = width-gated snr: engages extended scales only when the residual
-    peak fits wider than the measured dirty beam and the extended score competes
-    with scale 0, else behaves as "snr". Plain "snr" scores are near
-    scale-degenerate under correlated FDF noise, so with the default margin it
-    almost never engages; "hybrid" does while staying point-safe."""
+    """Scale selector (default "hybrid"). "snr" = matched filter
+    max|R conv K_s| / sigma_s; "hybrid" = width-gated snr: engages extended scales
+    only when the residual peak fits wider than the measured dirty beam and the
+    extended score competes with scale 0, else behaves as "snr". Plain "snr" scores
+    are near scale-degenerate under correlated FDF noise, so with the default margin
+    it almost never engages; "hybrid" does while staying point-safe."""
     selection_margin: float = 0.08
     """SNR selector (and the hybrid fallback): relative margin in [0, 1) favouring
     smaller scales. Among scales within this fraction of the best score, the
@@ -796,72 +792,26 @@ class MultiscaleOptions:
         if self.max_iter_sub_minor < 1:
             msg = "max_iter_sub_minor must be >= 1."
             raise ValueError(msg)
-        if self.scales is not None and len(self.scales) == 0:
-            msg = "scales must be non-empty."
-            raise ValueError(msg)
-
-
-@np.vectorize
-def _scale_bias_function(scale: float, scale_0: float, scale_bias: float) -> float:
-    """Scale-bias function (Offringa & Smirnov 2017, eq. 3)."""
-    if scale == 0:
-        return 1.0
-    return float(scale_bias ** (-1 - np.log2(scale / scale_0)))
-
-
-def scale_bias_function(
-    scales: NDArray[np.float64],
-    scale_bias: float,
-) -> NDArray[np.float64]:
-    """Scale-bias weighting per scale (Offringa & Smirnov 2017, eq. 3)."""
-    if len(scales) == 1:
-        return np.ones_like(scales)
-    first_nonzero = scales[scales > 0].min()
-    return np.asarray(
-        _scale_bias_function(scales, scale_0=first_nonzero, scale_bias=scale_bias),
-        dtype=np.float64,
-    )
-
-
-def make_scales(
-    max_scale: float,
-    n_scales: int | None = None,
-    first_scale: float = 4.0,
-) -> NDArray[np.float64]:
-    """WSClean-style scale set: 0 then geometric doubling up to `max_scale`.
-
-    `first_scale` defaults to 4 (RMSF FWHM units): WSClean's rule of a window 4x
-    the beam FWHM, so the first extended scale is well wider than the RMSF and
-    point sources stay on the delta scale.
-
-    Args:
-        max_scale (float): Upper bound in RMSF FWHM units (exclusive).
-        n_scales (int | None): Cap on the scale count; None keeps all.
-        first_scale (float): First extended scale in RMSF FWHM units.
-
-    Returns:
-        NDArray[np.float64]: Scales in RMSF FWHM units, starting at 0.
-    """
-    scales = [0.0]
-    scale = first_scale
-    while scale < max_scale:
-        scales.append(scale)
-        scale *= 2
-    scale_arr = np.array(scales, dtype=np.float64)
-    if n_scales is not None:
-        scale_arr = scale_arr[:n_scales]
-    return scale_arr
+        if self.scales is not None:
+            if len(self.scales) == 0:
+                msg = "scales must be non-empty."
+                raise ValueError(msg)
+            scales = np.sort(np.asarray(self.scales, dtype=np.float64))
+            if scales[0] != 0.0:
+                msg = f"scales must include 0 (the delta scale), got {scales}."
+                raise ValueError(msg)
+            # Selectors index scales[0] as scale 0 and assume ascending order.
+            object.__setattr__(self, "scales", scales)
 
 
 def make_fine_scales(
     max_scale: float,
     n_scales: int | None = None,
 ) -> NDArray[np.float64]:
-    """SNR-selector scale set: 0, 3, then geometric doubling from 6 to `max_scale`.
+    """Scale set: 0, 3, then geometric doubling from 6 to `max_scale`.
 
-    Finer than `make_scales`, which the SNR selector can afford (it is point-safe
-    via sigma_s). The first anchor is 3, not 1.5: a point's matched-filter score at
-    s=1.5 is only ~1% below scale 0, so noise flipped bright points onto it.
+    The first anchor is 3, not 1.5: a point's matched-filter score at s=1.5 is only
+    ~1% below scale 0, so noise flipped bright points onto it.
 
     Args:
         max_scale (float): Upper bound in RMSF FWHM units (exclusive).
@@ -1153,19 +1103,17 @@ def _halfmax_width_radm2(profile: NDArray[np.float64], d_phi: float) -> float:
 def find_significant_scale(
     resid_fdf_spectrum: NDArray[np.complex128],
     scale_kernels: ScaleKernels,
-    scale_bias: float,
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
     kernel: KernelType,
     active: NDArray[np.bool_] | None = None,
-    selection: SelectionType = "bias",
+    selection: SelectionType = "snr",
     selection_margin: float = 0.0,
     engage_floor: float = 0.0,
 ) -> int:
     """Index of the most-significant scale (Offringa & Smirnov 2017).
 
-    "bias" scores `max|resid conv K_s| * bias_s` (lower `scale_bias` favours larger
-    scales); "snr" scores the matched filter `max|resid conv K_s| / sigma_s`, with
+    "snr" scores the matched filter `max|resid conv K_s| / sigma_s`, with
     `selection_margin` preferring the smallest scale within that margin of the best.
     "hybrid" is width-gated snr: engage an extended scale only when the residual
     peak fits wider than the measured dirty beam AND its score competes with
@@ -1174,12 +1122,11 @@ def find_significant_scale(
     Args:
         resid_fdf_spectrum (NDArray[np.complex128]): Current residual FDF.
         scale_kernels (ScaleKernels): Precomputed per-scale responses.
-        scale_bias (float): Bias-selector scale-bias (unused otherwise).
         rmsf_fwhm (float): RMSF FWHM in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-phi axis.
         kernel (KernelType): Scale-kernel shape.
         active (NDArray[np.bool_] | None): Scales still allowed to be selected.
-        selection ("bias" | "snr" | "hybrid"): Scale selector.
+        selection ("snr" | "hybrid"): Scale selector.
         selection_margin (float): SNR parsimony margin (see MultiscaleOptions);
             for "hybrid" it applies to the snr fallback.
         engage_floor (float): Hybrid only: below this residual peak (absolute FDF
@@ -1199,7 +1146,6 @@ def find_significant_scale(
             selection_margin=selection_margin,
             engage_floor=engage_floor,
         )
-    bias = scale_bias_function(scale_kernels.scales, scale_bias)
     scores = np.full_like(scale_kernels.scales, -np.inf)
     for i, scale in enumerate(scale_kernels.scales):
         if active is not None and not active[i]:
@@ -1208,11 +1154,8 @@ def find_significant_scale(
             scale, rmsf_fwhm, resid_fdf_spectrum, phi_double_arr_radm2, kernel
         )
         peak = float(np.nanmax(np.abs(resid_conv)))
-        if selection == "snr":
-            scores[i] = peak / scale_kernels.sigma_s[i]
-        else:
-            scores[i] = peak * bias[i]
-    if selection == "snr" and selection_margin > 0:
+        scores[i] = peak / scale_kernels.sigma_s[i]
+    if selection_margin > 0:
         best = float(np.max(scores))
         if np.isfinite(best) and best > 0:
             # Scales are sorted ascending, so the first within-margin index is the
@@ -1250,7 +1193,6 @@ def _hybrid_scale_selection(
         return find_significant_scale(
             resid_fdf_spectrum,
             scale_kernels,
-            1.0,
             rmsf_fwhm,
             phi_double_arr_radm2,
             kernel,
@@ -1380,7 +1322,6 @@ def _multiscale_minor_cycles(
     max_iter = clean_options.max_iter
     max_iter_sub_minor = multiscale_options.max_iter_sub_minor
     sub_minor_fraction = multiscale_options.sub_minor_fraction
-    scale_bias = multiscale_options.scale_bias
     selection = multiscale_options.selection
     active = np.array([bool(s.any()) for s in allowed_supports])
     support = np.logical_or.reduce(allowed_supports)
@@ -1433,7 +1374,6 @@ def _multiscale_minor_cycles(
         scale_index = find_significant_scale(
             resid_fdf_spectrum,
             kernels,
-            scale_bias,
             rmsf_fwhm,
             phi_double_arr_radm2,
             kernel,
@@ -1448,10 +1388,9 @@ def _multiscale_minor_cycles(
 
         # thresh_scale sets the detection threshold in the once-convolved residual,
         # where the noise std scales by sigma_s (= sqrt(peak_response) for uniform
-        # weights) relative to scale 0. "snr" uses sigma_s; "bias" keeps the
-        # historical peak_response (an amplitude stop, not a noise threshold).
-        # Amplitude recovery (dividing by peak_response) is separate, see below.
-        thresh_scale = peak_response if selection == "bias" else sigma_s_i
+        # weights) relative to scale 0. Amplitude recovery (dividing by
+        # peak_response) is separate, see below.
+        thresh_scale = sigma_s_i
 
         # Scale-convolved residual; sub-minor cleans in this space, restricted to
         # the scale's allowed region and down to the stop threshold.
@@ -1780,8 +1719,7 @@ def default_scales(
 
     The auto max scale is `phi_max_scale_radm2` (pi / lambda_sq_min) when given,
     capped at the FDF phi window: a kernel wider than the window is meaningless (its
-    response flattens, its normalisation blows up). "bias" takes the coarse
-    `make_scales` grid, "snr" and "hybrid" the finer `make_fine_scales`.
+    response flattens, its normalisation blows up). Uses the `make_fine_scales` grid.
 
     Args:
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth axis (sets the window cap).
@@ -1802,16 +1740,11 @@ def default_scales(
         max_scale = min(phi_max_scale_radm2 / rmsf_fwhm, window_max_scale)
     else:
         max_scale = window_max_scale
-    if multiscale_options.selection in ("snr", "hybrid"):
-        scales = make_fine_scales(max_scale, n_scales=multiscale_options.n_scales)
-        first_scale = 3.0
-    else:
-        scales = make_scales(max_scale, n_scales=multiscale_options.n_scales)
-        first_scale = 4.0
+    scales = make_fine_scales(max_scale, n_scales=multiscale_options.n_scales)
     if len(scales) == 1:
         logger.warning(
             "Multiscale auto grid degenerated to [0.0]: the phi window is narrower "
-            f"than 2*first_scale*RMSF FWHM ({2 * first_scale * rmsf_fwhm:0.3g} rad/m^2), "
+            f"than 2*3*RMSF FWHM ({2 * 3.0 * rmsf_fwhm:0.3g} rad/m^2), "
             "so no extended scale fits and multiscale CLEAN reduces to single-scale. "
             "Pass explicit `multiscale_scales` to force an extended grid."
         )
