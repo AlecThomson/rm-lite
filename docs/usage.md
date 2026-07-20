@@ -10,11 +10,10 @@ examples should work as written.
 examples/rmsynth_1d.ipynb
 examples/rmclean_1d.ipynb
 examples/rmclean_multiscale_1d.ipynb
+examples/weighting_1d.ipynb
 examples/rmsynth_2d.ipynb
-examples/rmclean_2d.ipynb
 examples/rmsynth_3d.ipynb
 examples/rmsynth_3d_stokes_i.ipynb
 examples/rmclean_3d.ipynb
 examples/parallel_3d_dask.ipynb
-
 ```

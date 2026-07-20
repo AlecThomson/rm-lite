@@ -100,6 +100,20 @@ class TheoreticalNoise(NamedTuple):
     """Theoretical noise of the imaginary FDF"""
 
 
+WeightType = Literal["variance", "natural", "uniform", "uniform_lsq", "briggs"]
+""" RM-synthesis weighting: `variance`/`natural` (1/sigma^2, equivalent),
+`uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
+narrows the RMSF), `briggs` (robust interpolation between natural and
+uniform_lsq, needs `robust`). """
+WEIGHT_TYPES: tuple[str, ...] = (
+    "variance",
+    "natural",
+    "uniform",
+    "uniform_lsq",
+    "briggs",
+)
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class FDFOptions:
     """Options for RM-synthesis, shared by the 1D and 3D tools"""
@@ -110,16 +124,23 @@ class FDFOptions:
     """ Faraday depth resolution """
     n_samples: float | None = 10.0
     """ Number of samples """
-    weight_type: Literal["variance", "uniform"] = "variance"
+    weight_type: WeightType = "variance"
     """ Weight type """
+    robust: float | None = None
+    """ Briggs robust parameter (required for weight_type='briggs') """
     do_fit_rmsf: bool = False
     """ Fit RMSF """
     do_fit_rmsf_real: bool = False
     """ Fit real part of the RMSF """
 
     def __post_init__(self) -> None:
-        if self.weight_type not in ("variance", "uniform"):
-            msg = f"weight_type must be 'variance' or 'uniform', got {self.weight_type!r}."
+        if self.weight_type not in WEIGHT_TYPES:
+            msg = (
+                f"weight_type must be one of {WEIGHT_TYPES}, got {self.weight_type!r}."
+            )
+            raise ValueError(msg)
+        if self.weight_type == "briggs" and self.robust is None:
+            msg = "weight_type='briggs' requires a `robust` parameter."
             raise ValueError(msg)
         if self.d_phi_radm2 is None and self.n_samples is None:
             msg = "Either d_phi_radm2 or n_samples must be provided."
@@ -797,6 +818,75 @@ def compute_rmsf_params(
     )
 
 
+def _lambda_sq_density(
+    lambda_sq_arr_m2: NDArray[np.float64],
+    natural_weight_arr: NDArray[np.float64],
+    cell_m2: float,
+) -> NDArray[np.float64]:
+    """Local lambda^2 sampling density on a virtual grid of cells width cell_m2:
+    the total natural weight in each channel's cell, over the cell width.
+    Channels sharing a cell share one density, so uniform_lsq (natural/density)
+    gives them equal weight and no single channel jumps within a cell; each
+    occupied cell then contributes equally (interferometric uniform weighting).
+    briggs blends it with the natural weight via robust. The density steps where
+    the true sampling density changes (gaps, channelisation changes); this is
+    correct inverse-density weighting, not aliasing. Flagged channels (zero
+    natural weight) get zero density."""
+    density = np.zeros_like(lambda_sq_arr_m2)
+    good = natural_weight_arr > 0
+    if not good.any():
+        return density
+    origin = float(lambda_sq_arr_m2[good].min())
+    cell_idx = np.floor((lambda_sq_arr_m2[good] - origin) / cell_m2).astype(np.int64)
+    occupancy = np.zeros(int(cell_idx.max()) + 1)
+    np.add.at(occupancy, cell_idx, natural_weight_arr[good])
+    density[good] = occupancy[cell_idx] / cell_m2
+    return density
+
+
+def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Natural (inverse-variance) weights; all ones if no noise is given."""
+    if (real_qu_error == 0).all():
+        return np.ones_like(real_qu_error)
+    return 1.0 / real_qu_error**2
+
+
+def uniform_lsq_weight(
+    lambda_sq_arr_m2: NDArray[np.float64],
+    natural_weight_arr: NDArray[np.float64],
+    cell_m2: float,
+) -> NDArray[np.float64]:
+    """Uniform-in-lambda^2 weights: natural weights divided by the virtual-grid
+    lambda^2 sampling density, so each occupied cell contributes equally
+    regardless of how densely it is sampled, and channels sharing a cell get
+    equal weight. This is interferometric uniform weighting on the lambda^2 grid;
+    it narrows the RMSF main lobe. The density (and hence the weight) steps where
+    the true sampling density changes (gaps, channelisation)."""
+    density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
+    weight = np.zeros_like(natural_weight_arr)
+    np.divide(natural_weight_arr, density, out=weight, where=density > 0)
+    return weight
+
+
+def briggs_weight(
+    lambda_sq_arr_m2: NDArray[np.float64],
+    natural_weight_arr: NDArray[np.float64],
+    robust: float,
+    cell_m2: float,
+) -> NDArray[np.float64]:
+    """Briggs robust weights interpolating natural (robust -> +inf) and
+    uniform-in-lambda^2 (robust -> -inf). The `f^2` factor is normalised by the
+    natural-weighted mean sampling density (CASA convention) so `robust` is
+    comparable across datasets with different channel counts."""
+    density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
+    mean_density = float(
+        np.sum(natural_weight_arr * density) / np.sum(natural_weight_arr)
+    )
+    f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
+    weight: NDArray[np.float64] = natural_weight_arr / (1.0 + density * f_sq)
+    return weight
+
+
 def compute_rmsynth_params(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
@@ -846,17 +936,33 @@ def compute_rmsynth_params(
         f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
     )
 
-    # Calculate the weighting as 1/sigma^2 or all 1s (uniform)
-    if fdf_options.weight_type == "variance":
-        if (real_qu_error == 0).all():
-            real_qu_error = np.ones(len(real_qu_error))
-        weight_arr = 1.0 / real_qu_error**2
-    else:
-        weight_arr = np.ones_like(freq_arr_hz)
+    # lambda^2 gridding cell: caps the per-channel spacing for the lambda^2-based
+    # weights so large gaps do not hand runaway weight to gap-edge channels.
+    cell_m2 = float(np.sqrt(3.0) / phi_max_radm2)
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
-
+    # Zero flagged channels before the density-based weights so they do not
+    # inflate their neighbours' sampling density.
     mask = ~np.isfinite(complex_pol_arr)
+    natural_weight_arr = natural_weight(real_qu_error)
+    natural_weight_arr[mask] = 0.0
+    match fdf_options.weight_type:
+        case "variance" | "natural":
+            weight_arr = natural_weight_arr
+        case "uniform":
+            weight_arr = np.ones_like(freq_arr_hz)
+        case "uniform_lsq":
+            weight_arr = uniform_lsq_weight(
+                lambda_sq_arr_m2, natural_weight_arr, cell_m2
+            )
+        case "briggs":
+            if fdf_options.robust is None:
+                msg = "Briggs weighting requires a `robust` parameter."
+                raise ValueError(msg)
+            weight_arr = briggs_weight(
+                lambda_sq_arr_m2, natural_weight_arr, fdf_options.robust, cell_m2
+            )
+
     weight_arr[mask] = 0.0
 
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
