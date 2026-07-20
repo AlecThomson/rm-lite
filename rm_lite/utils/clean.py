@@ -118,7 +118,7 @@ class RMCleanOptions:
     """Masking threshold - pixels below this value are not cleaned"""
     threshold: float
     """Cleaning threshold - stop when all pixels are below this value"""
-    max_iter: int = 1000
+    max_iter: int = 100_000
     """Maximum clean iterations"""
     gain: float = 0.1
     """Clean loop gain"""

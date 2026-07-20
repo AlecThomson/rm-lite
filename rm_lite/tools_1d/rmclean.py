@@ -60,7 +60,7 @@ def run_rmclean_from_synth(
     rm_synth_1d_results: RMSynth1DResults,
     auto_mask: float = 7,
     auto_threshold: float = 1,
-    max_iter: int = 10_000,
+    max_iter: int = 100_000,
     gain: float = 0.1,
     mask_arr: NDArray[np.bool_] | None = None,
     moment_threshold_snr: float = 5.0,

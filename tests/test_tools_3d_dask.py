@@ -13,7 +13,7 @@ from astropy.io.fits import Header
 from dask.base import compute
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
-from rm_lite.tools_3d.rmclean import rmclean_3d, rmclean_3d_from_synth
+from rm_lite.tools_3d.rmclean import run_rmclean, run_rmclean_from_synth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
 from rm_lite.utils.dask_io import (
@@ -113,7 +113,7 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
-    clean = rmclean_3d(
+    clean = run_rmclean(
         synth.fdf_dirty_cube,
         synth.rmsf_cube,
         synth.phi_arr_radm2,
@@ -180,7 +180,7 @@ def test_rmclean_3d_block_runs_once_per_chunk(
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
-    clean = rmclean3d_mod.rmclean_3d(
+    clean = rmclean3d_mod.run_rmclean(
         synth.fdf_dirty_cube,
         synth.rmsf_cube,
         synth.phi_arr_radm2,
@@ -229,7 +229,7 @@ def test_write_zarr_group_shares_computation_across_arrays(
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
-    clean = rmclean3d_mod.rmclean_3d(
+    clean = rmclean3d_mod.run_rmclean(
         synth.fdf_dirty_cube,
         synth.rmsf_cube,
         synth.phi_arr_radm2,
@@ -261,7 +261,7 @@ def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
-    clean = rmclean_3d(
+    clean = run_rmclean(
         synth.fdf_dirty_cube,
         synth.rmsf_cube,
         synth.phi_arr_radm2,
@@ -300,7 +300,7 @@ def test_rmclean_3d_multiscale_smoke(synthetic_cube: SyntheticCube):
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
-    clean = rmclean_3d(
+    clean = run_rmclean(
         synth.fdf_dirty_cube,
         synth.rmsf_cube,
         synth.phi_arr_radm2,
@@ -399,7 +399,7 @@ def test_rmclean_3d_moment_maps(synthetic_cube: SyntheticCube):
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
     moment_threshold = 5.0 * synth.theoretical_noise.fdf_error_noise
-    clean = rmclean_3d(
+    clean = run_rmclean(
         synth.fdf_dirty_cube,
         synth.rmsf_cube,
         synth.phi_arr_radm2,
@@ -436,7 +436,7 @@ def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
-    clean = rmclean_3d_from_synth(synth, moment_threshold_snr=5.0)
+    clean = run_rmclean_from_synth(synth, moment_threshold_snr=5.0)
 
     assert isinstance(clean.mom1_map, da.Array)
     assert clean.mom1_map.shape == synthetic_cube.rm_map.shape

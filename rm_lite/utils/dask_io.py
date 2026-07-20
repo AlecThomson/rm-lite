@@ -189,7 +189,7 @@ def write_zarr_group(
     full array is never materialised in memory before writing. All arrays are
     written in a single `dask.compute()` call rather than one `to_zarr()` call
     per array: if two arrays share upstream graph nodes (e.g. the four outputs
-    of `rm_lite.tools_3d.rmclean.rmclean_3d`, which all come from one per-chunk
+    of `rm_lite.tools_3d.rmclean.run_rmclean`, which all come from one per-chunk
     `dask.delayed` call), computing them separately would silently redo that
     shared work once per array.
 
@@ -275,7 +275,7 @@ def estimate_channel_noise_mad(
     The per-channel noise this returns can be turned into a weight array
     (`weight_arr = 1 / noise**2`) for `rm_lite.tools_3d.rmsynth.rmsynth_3d`,
     and from there `rm_lite.utils.synthesis.compute_theoretical_noise` gives
-    the FDF-domain noise used to set `rm_lite.tools_3d.rmclean.rmclean_3d`'s
+    the FDF-domain noise used to set `rm_lite.tools_3d.rmclean.run_rmclean`'s
     `mask`/`threshold` (mirroring the 1D `run_rmclean_from_synth` auto-mask/
     auto-threshold convention).
 
