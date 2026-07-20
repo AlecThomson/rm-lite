@@ -150,6 +150,7 @@ def run_rmclean_from_synth(
         # the exact w^2-RMSF cannot be built here; None falls back to the ordinary
         # RMSF, exact for uniform weights. See owner note.
         noise_rmsf_arr=None,
+        fdf_noise=theoretical_noise.fdf_error_noise,
     )
     (
         clean_fdf_arr,

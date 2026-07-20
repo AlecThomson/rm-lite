@@ -10,7 +10,7 @@ from typing import Literal, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.ndimage import convolve
+from scipy.ndimage import binary_dilation, convolve
 from tqdm.auto import tqdm
 
 from rm_lite.utils.arrays import nd_to_two_d, two_d_to_nd
@@ -117,6 +117,8 @@ class RMCleanOptions:
     """Maximum clean iterations"""
     gain: float = 0.1
     """Clean loop gain"""
+    fdf_noise: float | None = None
+    """Theoretical FDF noise; enables the adaptive off-source auto-mask when set."""
 
     def __post_init__(self) -> None:
         if self.max_iter < 1:
@@ -158,6 +160,44 @@ class MinorLoopOptions:
     """Starting iteration"""
     update_mask: bool = True
     """Update the mask after each iteration"""
+    noise: float | None = None
+    """FDF noise floor for the adaptive off-source auto-mask; None disables it
+    (fixed mask, legacy behaviour)."""
+
+
+def _offsource_rms(
+    resid_fdf_spectrum: NDArray[np.complex128],
+    mask_arr: NDArray[np.bool_],
+) -> float:
+    """Robust (MAD) RMS of the residual outside the current mask region.
+
+    Sidelobe-inflated while a bright source remains, falling to the noise floor
+    once it subtracts; this is what makes the auto-mask contract off the RMSF
+    sidelobes. Returns 0.0 when too few off-source channels remain (the caller
+    floors it at the FDF noise).
+    """
+    off = resid_fdf_spectrum[~mask_arr]
+    if off.size < 8:
+        return 0.0
+    pooled = np.concatenate([off.real, off.imag])
+    med = np.median(pooled)
+    return float(1.4826 * np.median(np.abs(pooled - med)))
+
+
+def _seed_mask(
+    resid_fdf_spectrum: NDArray[np.complex128],
+    cap_arr: NDArray[np.bool_],
+    floor: float,
+) -> NDArray[np.bool_]:
+    """Tight adaptive-mask seed: just the brightest allowed channel, if it clears
+    the mask floor. Below the floor (noise-only) the seed is empty, so nothing
+    cleans. The global peak is always real emission, so seeding it is safe."""
+    mask_arr = np.zeros(resid_fdf_spectrum.shape, dtype=bool)
+    allowed = np.where(cap_arr, np.abs(resid_fdf_spectrum), 0.0)
+    seed_idx = int(np.argmax(allowed))
+    if allowed[seed_idx] > floor:
+        mask_arr[seed_idx] = True
+    return mask_arr
 
 
 def shift_rmsf(
@@ -212,6 +252,15 @@ def minor_loop(
     mask_arr = ~resid_fdf_spectrum_mask.mask.copy()
     mask_arr_original = mask_arr.copy()
     iter_count = int(minor_loop_options.start_iter)
+    thr_eff = minor_loop_options.mask
+    last_recompute_peak = np.inf
+    if minor_loop_options.update_mask and minor_loop_options.noise is not None:
+        # Start tight (seed only) so the RMSF sidelobe ringing sits off-source and
+        # inflates the MAD; the incoming mask becomes the hard cap the mask grows in.
+        mask_arr = _seed_mask(
+            resid_fdf_spectrum, mask_arr_original, minor_loop_options.mask
+        )
+        resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     # Find the index of the peak of the RMSF
     max_rmsf_index = np.nanargmax(np.abs(rmsf_spectrum))
@@ -237,6 +286,20 @@ def minor_loop(
             )
             break
         if np.ma.max(np.ma.abs(resid_fdf_spectrum_mask)) < minor_loop_options.threshold:
+            # Region exhausted. In adaptive mode the main source (and its RMSF
+            # sidelobes) are now subtracted, so any channel still above the mask
+            # floor is real emission: start a new blob there instead of stopping.
+            if minor_loop_options.noise is not None:
+                new_seed = _seed_mask(
+                    resid_fdf_spectrum, mask_arr_original, minor_loop_options.mask
+                )
+                if new_seed.any():
+                    mask_arr = mask_arr | new_seed
+                    resid_fdf_spectrum_mask = np.ma.array(
+                        resid_fdf_spectrum, mask=~mask_arr
+                    )
+                    last_recompute_peak = np.inf
+                    continue
             logger.info(
                 f"Threshold reached. Exiting loop...performed {iter_count} iterations"
             )
@@ -268,9 +331,32 @@ def minor_loop(
         )
         # Remake masked residual FDF
         if minor_loop_options.update_mask:
-            mask_arr = np.abs(resid_fdf_spectrum) > minor_loop_options.mask
-            # Mask anything that was previously masked
-            mask_arr = mask_arr & mask_arr_original
+            if minor_loop_options.noise is not None:
+                # Adaptive off-source auto-mask: the region ACCUMULATES and cleaning
+                # stays confined to it between recomputes, so it tracks the source
+                # instead of chasing RMSF sidelobes. On a peak drop (ponytail: O(n)
+                # MAD only then, ~tens/spectrum, matters for 3D) recompute the
+                # sidelobe-inflated threshold, grow the region off it, and re-seed
+                # the global peak (always real emission). The floor gate means a
+                # noise-like residual seeds nothing, so the loop converges and a
+                # noise-only spectrum cleans nothing.
+                peak = float(np.abs(peak_fdf))
+                if peak < 0.8 * last_recompute_peak:
+                    offsrc_rms = _offsource_rms(resid_fdf_spectrum, mask_arr)
+                    thr_eff = minor_loop_options.mask * max(
+                        1.0, offsrc_rms / minor_loop_options.noise
+                    )
+                    last_recompute_peak = peak
+                    # Grow only into channels contiguous with the current region
+                    # (binary dilation) so the mask cannot jump the RMSF nulls onto
+                    # disconnected sidelobe islands.
+                    above = (np.abs(resid_fdf_spectrum) > thr_eff) & mask_arr_original
+                    mask_arr = mask_arr | (binary_dilation(mask_arr) & above)
+            else:
+                # Mask anything that was previously masked
+                mask_arr = (
+                    np.abs(resid_fdf_spectrum) > minor_loop_options.mask
+                ) & mask_arr_original
         resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     return MinorLoopResults(
@@ -325,6 +411,7 @@ def rmclean(
     multiscale_selection_margin: float = 0.08,
     phi_max_scale_radm2: float | None = None,
     noise_rmsf_arr: NDArray[np.complex128] | None = None,
+    fdf_noise: float | None = None,
 ) -> RMCleanResults:
     """Perform RM-CLEAN on a Faraday dispersion function array.
 
@@ -350,6 +437,7 @@ def rmclean(
         multiscale_selection_margin (float, optional): SNR selector (and hybrid fallback), parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points and marginally resolved sources on the delta scale. Defaults to 0.08.
         phi_max_scale_radm2 (float | None, optional): Largest recoverable Faraday scale (pi / lambda_sq_min); sets the auto scale range. None falls back to the phi window.
         noise_rmsf_arr (NDArray[np.complex128] | None, optional): w^2-RMSF noise covariance (double-phi axis, same shape as rmsf_arr) for the selection="snr" sigma_s. None uses rmsf_arr (exact for uniform weights). Defaults to None.
+        fdf_noise (float | None, optional): Theoretical FDF noise; enables the adaptive off-source auto-mask (mask contracts off the RMSF sidelobes of bright sources, then relaxes to `mask` as they subtract). None keeps the fixed-mask behaviour. Defaults to None.
 
     Returns:
         RMCleanResults: clean_fdf_arr, model_fdf_arr, clean_iter_arr, resid_fdf_arr, sub_minor_iter_arr
@@ -368,6 +456,7 @@ def rmclean(
         threshold=threshold,
         max_iter=max_iter,
         gain=gain,
+        fdf_noise=fdf_noise,
     )
     multiscale_options = (
         MultiscaleOptions(
@@ -602,7 +691,12 @@ def minor_cycle(
     # Initialise arrays to hold the residual FDF, clean components, clean FDF
     resid_fdf_spectrum = rm_synth_1d_arrays.dirty_fdf_arr.copy()
 
-    mask_arr = np.abs(rm_synth_1d_arrays.dirty_fdf_arr) > clean_options.mask
+    if clean_options.fdf_noise is not None:
+        # Adaptive mask: cap is the whole allowed region (minor_loop starts tight
+        # from a seed and grows the mask against the falling off-source noise).
+        mask_arr = np.ones_like(resid_fdf_spectrum, dtype=bool)
+    else:
+        mask_arr = np.abs(rm_synth_1d_arrays.dirty_fdf_arr) > clean_options.mask
 
     if rm_synth_1d_arrays.fdf_mask_arr is not None:
         assert rm_synth_1d_arrays.fdf_mask_arr.ndim == 1, (
@@ -630,6 +724,7 @@ def minor_cycle(
         threshold=clean_options.threshold,
         start_iter=0,
         update_mask=True,
+        noise=clean_options.fdf_noise,
     )
 
     logger.info("Starting initial minor loop...")
