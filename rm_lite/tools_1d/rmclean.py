@@ -10,7 +10,7 @@ from numpy.typing import NDArray
 from scipy import interpolate
 
 from rm_lite.tools_1d.rmsynth import RMSynth1DResults
-from rm_lite.utils.clean import SelectionType, rmclean
+from rm_lite.utils.clean import rmclean
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     TheoreticalNoise,
@@ -60,13 +60,11 @@ def run_rmclean_from_synth(
     mask_arr: NDArray[np.bool_] | None = None,
     moment_threshold_snr: float = 5.0,
     multiscale: bool = False,
-    multiscale_scale_bias: float = 0.6,
     multiscale_scales: NDArray[np.float64] | None = None,
     multiscale_n_scales: int | None = None,
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
-    multiscale_selection: SelectionType = "hybrid",
     multiscale_selection_margin: float = 0.08,
 ) -> RMClean1DResults:
     """Run RM-CLEAN on the results of RM-synth.
@@ -80,14 +78,12 @@ def run_rmclean_from_synth(
         mask_arr (NDArray[np.bool_] | None, optional): Optional mask array. Defaults to None.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to the clean FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
-        multiscale_scale_bias (float, optional): Scale-bias in (0, 1]; lower favours larger scales more. Defaults to 0.6.
         multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales (RMSF FWHM units); None auto-selects from the RMSF max scale.
         multiscale_n_scales (int | None, optional): Cap on the auto scale count.
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
         multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations per scale. Defaults to 10_000.
         multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
-        multiscale_selection ("bias" | "snr" | "hybrid", optional): Scale-selection mode. "bias" = Offringa eq-3 scale-bias; "snr" = matched-filter selection (finer scale grid); "hybrid" (default) = width-gated snr, engaging extended scales only when the residual peak fits wider than the measured dirty beam and the extended score competes with scale 0. The exact sigma_s needs the w^2-RMSF, which is not stored in RMSynth1DResults (only the RMSF is), so the ordinary RMSF is used here (exact for uniform weights). Defaults to "hybrid".
-        multiscale_selection_margin (float, optional): SNR selector (and hybrid fallback), parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points on the delta scale. Defaults to 0.08.
+        multiscale_selection_margin (float, optional): Hybrid scale-selection parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points on the delta scale. Defaults to 0.08.
 
     Returns:
         RMClean1DResults: RM-CLEAN results: `fdf_parameters`, `fdf_arrs`, `clean_parameters`.
@@ -137,19 +133,13 @@ def run_rmclean_from_synth(
         gain=gain,
         mask_arr=mask_arr,
         multiscale=multiscale,
-        multiscale_scale_bias=multiscale_scale_bias,
         multiscale_scales=multiscale_scales,
         multiscale_n_scales=multiscale_n_scales,
         multiscale_kernel=multiscale_kernel,
         multiscale_max_iter_sub_minor=multiscale_max_iter_sub_minor,
         multiscale_sub_minor_fraction=multiscale_sub_minor_fraction,
-        multiscale_selection=multiscale_selection,
         multiscale_selection_margin=multiscale_selection_margin,
         phi_max_scale_radm2=float(fdf_parameters["phi_max_scale_radm2"][0]),
-        # RMSynth1DResults does not store the channel weights (only the RMSF), so
-        # the exact w^2-RMSF cannot be built here; None falls back to the ordinary
-        # RMSF, exact for uniform weights.
-        noise_rmsf_arr=None,
         fdf_noise=theoretical_noise.fdf_error_noise,
     )
     (

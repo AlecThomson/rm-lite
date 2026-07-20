@@ -389,9 +389,6 @@ class RMSynthArrays(NamedTuple):
     """FWHM of the RMSF array"""
     fdf_mask_arr: NDArray[np.bool_] | None = None
     """Mask of pixels to clean"""
-    noise_rmsf_arr: NDArray[np.complex128] | None = None
-    """w^2-RMSF noise covariance on the double-phi axis; None -> use rmsf_arr
-    (exact for uniform weights). Only used by multiscale selection="snr"."""
 
 
 def rmclean(
@@ -406,16 +403,13 @@ def rmclean(
     gain: float = 0.1,
     mask_arr: NDArray[np.bool_] | None = None,
     multiscale: bool = False,
-    multiscale_scale_bias: float = 0.6,
     multiscale_scales: NDArray[np.float64] | None = None,
     multiscale_n_scales: int | None = None,
     multiscale_kernel: KernelType = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
-    multiscale_selection: SelectionType = "hybrid",
     multiscale_selection_margin: float = 0.08,
     phi_max_scale_radm2: float | None = None,
-    noise_rmsf_arr: NDArray[np.complex128] | None = None,
     fdf_noise: float | None = None,
 ) -> RMCleanResults:
     """Perform RM-CLEAN on a Faraday dispersion function array.
@@ -432,16 +426,13 @@ def rmclean(
         gain (float, optional): Glean loop gain. Defaults to 0.1.
         mask_arr (NDArray[np.bool_] | None, optional): Additional mask of pixels to avoid. Defaults to None.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers Faraday-thick structure). Defaults to False.
-        multiscale_scale_bias (float, optional): Scale-bias in (0, 1]; lower favours larger scales more. Defaults to 0.6.
         multiscale_scales (NDArray[np.float64] | None, optional): Explicit scales (RMSF FWHM units); None auto-selects.
         multiscale_n_scales (int | None, optional): Cap on the auto scale count.
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
         multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations per scale. Defaults to 10_000.
         multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
-        multiscale_selection ("bias" | "snr" | "hybrid", optional): Scale-selection mode. "bias" = Offringa eq-3 scale-bias; "snr" = matched-filter max|R conv K_s| / sigma_s (uses a finer scale grid); "hybrid" (default) = width-gated snr, engaging extended scales only when the residual peak fits wider than the measured dirty beam and the extended score competes with scale 0. Defaults to "hybrid".
-        multiscale_selection_margin (float, optional): SNR selector (and hybrid fallback), parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points and marginally resolved sources on the delta scale. Defaults to 0.08.
+        multiscale_selection_margin (float, optional): Hybrid scale-selection parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points and marginally resolved sources on the delta scale. Defaults to 0.08.
         phi_max_scale_radm2 (float | None, optional): Largest recoverable Faraday scale (pi / lambda_sq_min); sets the auto scale range. None falls back to the phi window.
-        noise_rmsf_arr (NDArray[np.complex128] | None, optional): w^2-RMSF noise covariance (double-phi axis, same shape as rmsf_arr) for the selection="snr" sigma_s. None uses rmsf_arr (exact for uniform weights). Defaults to None.
         fdf_noise (float | None, optional): Theoretical FDF noise; enables the adaptive off-source auto-mask (mask contracts off the RMSF sidelobes of bright sources, then relaxes to `mask` as they subtract). None keeps the fixed-mask behaviour. Defaults to None.
 
     Returns:
@@ -454,7 +445,6 @@ def rmclean(
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_arr=fwhm_rmsf_arr,
         fdf_mask_arr=mask_arr,
-        noise_rmsf_arr=noise_rmsf_arr,
     )
     clean_options = RMCleanOptions(
         mask=mask,
@@ -465,13 +455,11 @@ def rmclean(
     )
     multiscale_options = (
         MultiscaleOptions(
-            scale_bias=multiscale_scale_bias,
             scales=multiscale_scales,
             n_scales=multiscale_n_scales,
             kernel=multiscale_kernel,
             max_iter_sub_minor=multiscale_max_iter_sub_minor,
             sub_minor_fraction=multiscale_sub_minor_fraction,
-            selection=multiscale_selection,
             selection_margin=multiscale_selection_margin,
         )
         if multiscale
@@ -556,11 +544,6 @@ def _rmclean_nd(
     # Reshape the arrays to 2D i.e. [phi, x, y] -> [phi, x*y]
     dirty_fdf_arr_2d = nd_to_two_d(rm_synth_arrays.dirty_fdf_arr)
     rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.rmsf_arr)
-    noise_rmsf_arr_2d = (
-        nd_to_two_d(rm_synth_arrays.noise_rmsf_arr)
-        if rm_synth_arrays.noise_rmsf_arr is not None
-        else None
-    )
     iter_count_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
     sub_minor_iter_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
     fwhm_rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.fwhm_rmsf_arr)
@@ -604,9 +587,6 @@ def _rmclean_nd(
                     scales=scales,
                     clean_options=clean_options,
                     multiscale_options=ms_options,
-                    noise_rmsf_spectrum=noise_rmsf_arr_2d[:, pix_idx]
-                    if noise_rmsf_arr_2d is not None
-                    else None,
                 )
             )
             clean_fdf_spectrum_2d[:, pix_idx] = clean_spec
@@ -1085,8 +1065,8 @@ class ScaleKernels(NamedTuple):
     width)."""
     sigma_s: NDArray[np.float64]
     """Per-scale FDF noise std relative to scale 0 under correlated FDF noise,
-    for the matched-filter (SNR) selector: sqrt((K_s conv K_s conv C)(0) / C(0))
-    with C the noise-covariance RMSF. sigma_s[0] == 1."""
+    for the matched-filter (snr) score inside hybrid selection:
+    sqrt((K_s conv K_s conv RMSF)(0) / RMSF(0)). sigma_s[0] == 1."""
     point_width: float
     """Measured half-max width of |RMSF| in rad/m^2: the dirty-beam width a
     delta presents in the dirty |FDF|, near-in sidelobe shoulders included.
@@ -1100,7 +1080,6 @@ def compute_scale_kernels(
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
     kernel: KernelType,
-    noise_rmsf_spectrum: NDArray[np.complex128] | None = None,
 ) -> ScaleKernels:
     """Precompute the per-scale RMSF responses for one spectrum.
 
@@ -1112,9 +1091,6 @@ def compute_scale_kernels(
         rmsf_fwhm (float): RMSF FWHM in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-phi axis.
         kernel (KernelType): Scale-kernel shape.
-        noise_rmsf_spectrum (NDArray[np.complex128] | None): w^2-RMSF noise
-            covariance for sigma_s; None uses `rmsf_spectrum` (exact for uniform
-            weights).
 
     Returns:
         ScaleKernels: Per-scale responses (see that type).
@@ -1124,11 +1100,11 @@ def compute_scale_kernels(
     peak_response = np.ones_like(scales)
     fwhm_conv_scale_twice = np.full_like(scales, rmsf_fwhm)
     # sigma_s = sqrt((K_s conv K_s conv C)(0) / C(0)): the zero-lag value of the
-    # noise covariance C twice-convolved with the scale kernel. C is the w^2-RMSF
-    # when supplied, else the ordinary RMSF (exact for uniform weights). "Zero
-    # lag" is the RMSF peak channel; the twice-conv response peaks there too.
-    cov = rmsf_spectrum if noise_rmsf_spectrum is None else noise_rmsf_spectrum
-    cov_peak_index = int(np.nanargmax(np.abs(cov)))
+    # noise covariance C twice-convolved with the scale kernel. C is the ordinary
+    # RMSF (exact for uniform weights). "Zero lag" is the RMSF peak channel; the
+    # twice-conv response peaks there too. Since C == RMSF, the twice-conv of C is
+    # exactly conv_twice, so qform reuses it.
+    cov_peak_index = int(np.nanargmax(np.abs(rmsf_spectrum)))
     qform = np.ones_like(scales)
     for i, scale in enumerate(scales):
         conv_once = convolve_fdf_scale(
@@ -1146,17 +1122,7 @@ def compute_scale_kernels(
                 phi_double_arr_radm2=phi_double_arr_radm2,
                 fwhm_rmsf_radm2=rmsf_fwhm * scale,
             )
-        if noise_rmsf_spectrum is None:
-            # C == RMSF, so the twice-conv of C is exactly conv_twice; reuse it.
-            qform[i] = float(np.real(conv_twice[cov_peak_index]))
-        else:
-            noise_conv_once = convolve_fdf_scale(
-                scale, rmsf_fwhm, cov, phi_double_arr_radm2, kernel
-            )
-            noise_conv_twice = convolve_fdf_scale(
-                scale, rmsf_fwhm, noise_conv_once, phi_double_arr_radm2, kernel
-            )
-            qform[i] = float(np.real(noise_conv_twice[cov_peak_index]))
+        qform[i] = float(np.real(conv_twice[cov_peak_index]))
     sigma_s = np.sqrt(qform / qform[0])
     d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
     return ScaleKernels(
@@ -1634,7 +1600,6 @@ def multiscale_clean_spectrum(
     scales: NDArray[np.float64],
     clean_options: RMCleanOptions,
     multiscale_options: MultiscaleOptions,
-    noise_rmsf_spectrum: NDArray[np.complex128] | None = None,
 ) -> tuple[
     NDArray[np.complex128], NDArray[np.complex128], NDArray[np.complex128], int, int
 ]:
@@ -1655,8 +1620,6 @@ def multiscale_clean_spectrum(
         scales (NDArray[np.float64]): Scales in RMSF FWHM units.
         clean_options (RMCleanOptions): Mask, threshold, gain, max_iter.
         multiscale_options (MultiscaleOptions): Kernel, selector, sub-minor settings.
-        noise_rmsf_spectrum (NDArray[np.complex128] | None): w^2-RMSF noise
-            covariance for the SNR sigma_s; None uses `rmsf_spectrum`.
 
     Returns:
         (clean, resid, model, minor_iters, sub_minor_iters): minor_iters counts
@@ -1695,7 +1658,6 @@ def multiscale_clean_spectrum(
         rmsf_fwhm,
         phi_double_arr_radm2,
         kernel,
-        noise_rmsf_spectrum=noise_rmsf_spectrum,
     )
     # Adaptive opening-filter masking replaces the frozen dirty-based supports and
     # the dirty hybrid classification (activation is the opening filter).
