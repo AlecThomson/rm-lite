@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -49,8 +49,11 @@ def _rotation(
     lambda_sq_arr_m2: NDArray[np.float64], psi0_deg: float, rm_radm2: float
 ) -> NDArray[np.complex128]:
     """Faraday rotation phase e^{2i(psi0 + RM lambda^2)}."""
-    return np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lambda_sq_arr_m2)).astype(
-        np.complex128
+    return cast(
+        NDArray[np.complex128],
+        np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lambda_sq_arr_m2)).astype(
+            np.complex128
+        ),
     )
 
 
