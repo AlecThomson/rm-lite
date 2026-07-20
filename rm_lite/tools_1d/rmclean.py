@@ -148,7 +148,7 @@ def run_rmclean_from_synth(
         phi_max_scale_radm2=float(fdf_parameters["phi_max_scale_radm2"][0]),
         # RMSynth1DResults does not store the channel weights (only the RMSF), so
         # the exact w^2-RMSF cannot be built here; None falls back to the ordinary
-        # RMSF, exact for uniform weights. See owner note.
+        # RMSF, exact for uniform weights.
         noise_rmsf_arr=None,
         fdf_noise=theoretical_noise.fdf_error_noise,
     )

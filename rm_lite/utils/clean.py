@@ -573,6 +573,7 @@ def _rmclean_nd(
     resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
 
     if multiscale:
+        logger.warning("Multiscale RM-CLEAN enabled - note this is still experimental!")
         ms_options = multiscale_options or MultiscaleOptions()
         rmsf_fwhm = float(np.nanmedian(np.real(fwhm_rmsf_arr_2d)))
         scales = default_scales(
