@@ -556,7 +556,7 @@ def test_hybrid_model_quality_wideband() -> None:
     ratios = []
     for i in range(4):
         rng = np.random.default_rng(800000 + i)
-        sim = simulate_fdf(spec, freqs, rng=rng, sn=24.0, geometry=geom)
+        sim = simulate_fdf(spec, freqs, rng=rng, signal_to_noise=24.0, geometry=geom)
         single, multi = _clean_single_and_hybrid(
             sim.dirty_fdf,
             sim.rmsf_arr,
@@ -582,7 +582,7 @@ def test_hybrid_delta_steps_parity() -> None:
     pms = float(np.pi / np.nanmin(geom.lambda_sq_arr_m2))
     for i in range(4):
         rng = np.random.default_rng(810000 + i)
-        sim = simulate_fdf(spec, freqs, rng=rng, sn=24.0, geometry=geom)
+        sim = simulate_fdf(spec, freqs, rng=rng, signal_to_noise=24.0, geometry=geom)
         single, multi = _clean_single_and_hybrid(
             sim.dirty_fdf,
             sim.rmsf_arr,

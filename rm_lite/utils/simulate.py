@@ -1,22 +1,20 @@
-"""Synthetic FDF data: the single source of truth for simulated RM-synthesis.
-
-Sources are built in the CHANNEL domain from the physical Burn depolarisation
-law (`build_channel_spectrum`): the polarised signal depolarises with lambda^2
-about lambda^2 = 0, so |P| is bounded by the intrinsic fraction and the envelope
-is anchored at zero wavelength, not at the RM-synthesis reference. Noise is then
-injected per frequency channel and transformed by the package RM synthesis, so
-the FDF noise is the physically correct correlated complex Gaussian field, not
-iid noise painted onto phi.
-"""
+"""Synthetic FDF data: the single source of truth for simulated RM-synthesis"""
 
 from __future__ import annotations
 
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
 
 from rm_lite.utils.fitting import unit_centred_gaussian
+from rm_lite.utils.spectra import (
+    ComponentKind,
+    _burn_envelope,
+    faraday_gaussian_spectrum,
+    faraday_simple_spectrum,
+    faraday_slab_spectrum,
+)
 from rm_lite.utils.synthesis import (
     compute_theoretical_noise,
     freq_to_lambda2,
@@ -27,9 +25,15 @@ from rm_lite.utils.synthesis import (
     rmsynth_nufft,
 )
 
-PHI_MAX_FWHM = 40.0  # phi window half-width in RMSF FWHM units (matches _probe)
+# Re-exported so the example notebooks import all synthetic-spectrum builders
+# from one place; the physical-unit builders themselves live in `spectra`.
+__all__ = [
+    "faraday_gaussian_spectrum",
+    "faraday_simple_spectrum",
+    "faraday_slab_spectrum",
+]
 
-ComponentKind = Literal["delta", "gauss", "slab", "internal"]
+PHI_MAX_FWHM = 40.0  # phi window half-width in RMSF FWHM units (matches _probe)
 
 
 class Component(NamedTuple):
@@ -41,7 +45,7 @@ class Component(NamedTuple):
     )
     center_fwhm: float = 0.0  # RM (Faraday rotation) in FWHM units
     amp: float = 1.0  # intrinsic polarised fraction |P(lambda^2=0)|
-    sigma_rm_fwhm: float = 0.0  # internal only: turbulent Faraday dispersion sigma
+    sigma_rm_fwhm: float = 0.0  # turbulent only: internal Faraday dispersion sigma
 
 
 class FDFSpec(NamedTuple):
@@ -65,7 +69,7 @@ def slab(width_fwhm: float, center_fwhm: float = 0.0, amp: float = 1.0) -> FDFSp
     return FDFSpec((Component("slab", width_fwhm, center_fwhm, amp),))
 
 
-def internal(
+def turbulent(
     width_fwhm: float,
     sigma_rm_fwhm: float,
     center_fwhm: float = 0.0,
@@ -79,7 +83,7 @@ def internal(
     (cf. O'Sullivan et al. 2012; Ma et al. 2019a).
     """
     return FDFSpec(
-        (Component("internal", width_fwhm, center_fwhm, amp, sigma_rm_fwhm),)
+        (Component("turbulent", width_fwhm, center_fwhm, amp, sigma_rm_fwhm),)
     )
 
 
@@ -90,7 +94,8 @@ def build_channel_spectrum(
 
     Each component depolarises with lambda^2 about lambda^2 = 0: a Faraday-thin
     point is flat, external dispersion is a Gaussian in lambda^2, a Burn slab a
-    sinc.
+    sinc. Component widths and centres are in RMSF FWHM units; for physical
+    rad/m^2 spectra with a polarisation angle use `faraday_*_spectrum`.
 
     Args:
         spec (FDFSpec): Source as a sum of Burn components.
@@ -103,31 +108,12 @@ def build_channel_spectrum(
     pol = np.zeros_like(lambda_sq_arr_m2, dtype=np.complex128)
     for comp in spec.components:
         rotation = np.exp(2j * comp.center_fwhm * fwhm * lambda_sq_arr_m2)
-        envelope: NDArray[np.float64] | NDArray[np.complex128]
-        if comp.kind == "gauss":
-            sigma_phi = comp.width_fwhm * fwhm
-            envelope = np.exp(-2.0 * sigma_phi**2 * lambda_sq_arr_m2**2)
-        elif comp.kind == "slab":
-            delta_phi = comp.width_fwhm * fwhm
-            envelope = np.sinc(delta_phi * lambda_sq_arr_m2 / np.pi)
-        elif comp.kind == "internal":
-            # Sokoloff et al. (1998) eq. 34, symmetrised about the component
-            # centre (the e^{-i depth lam^2} factor) to match the slab convention.
-            depth = comp.width_fwhm * fwhm
-            sigma_rm = comp.sigma_rm_fwhm * fwhm
-            s_arr = (
-                2.0 * sigma_rm**2 * lambda_sq_arr_m2**2
-                - 2.0j * depth * lambda_sq_arr_m2
-            )
-            small = np.abs(s_arr) < 1e-12
-            s_safe = np.where(small, 1.0, s_arr)
-            envelope = np.asarray(
-                np.where(small, 1.0, (1.0 - np.exp(-s_safe)) / s_safe)
-                * np.exp(-1j * depth * lambda_sq_arr_m2),
-                dtype=np.complex128,
-            )
-        else:  # delta: Faraday-thin, no depolarisation
-            envelope = np.ones_like(lambda_sq_arr_m2)
+        envelope = _burn_envelope(
+            comp.kind,
+            lambda_sq_arr_m2,
+            comp.width_fwhm * fwhm,
+            comp.sigma_rm_fwhm * fwhm,
+        )
         pol += comp.amp * rotation * envelope
     return pol.astype(np.complex128)
 
@@ -157,7 +143,7 @@ def build_model_fdf(
             fdf += comp.amp * unit_centred_gaussian(
                 phi_arr_radm2 - center, stddev=comp.width_fwhm * fwhm
             ).astype(np.complex128)
-        elif comp.kind == "internal":
+        elif comp.kind == "turbulent":
             # Depth distribution: uniform over the slab, Gaussian-scattered.
             half = comp.width_fwhm * fwhm / 2.0
             tophat = (np.abs(phi_arr_radm2 - center) <= half).astype(np.float64)
@@ -299,26 +285,26 @@ def simulate_fdf(
     freq_arr_hz: NDArray[np.float64],
     rng: np.random.Generator | None = None,
     sigma: float | None = None,
-    sn: float | None = None,
+    signal_to_noise: float | None = None,
     phi_max_fwhm: float = PHI_MAX_FWHM,
     geometry: Geometry | None = None,
 ) -> SimResult:
     """Forward-model a spec through channel space to a dirty FDF.
 
-    Noise-free unless a channel `sigma` (or `sn`, an S/N against the model channel
-    peak) is given. Pass a prebuilt `geometry` to reuse the RMSF.
+    Noise-free unless a channel `sigma` (or `signal_to_noise`, against the model
+    channel peak) is given. Pass a prebuilt `geometry` to reuse the RMSF.
 
     Args:
         spec (FDFSpec): Source as a sum of Burn components.
         freq_arr_hz (NDArray[np.float64]): Channel frequencies in Hz.
-        rng (np.random.Generator | None): Random generator; required if `sigma` or `sn` is set.
+        rng (np.random.Generator | None): Random generator; required if `sigma` or `signal_to_noise` is set.
         sigma (float | None): Per-channel noise std. Defaults to None.
-        sn (float | None): Target S/N against the model channel peak (sets sigma). Defaults to None.
+        signal_to_noise (float | None): Target S/N against the model channel peak (sets sigma). Defaults to None.
         phi_max_fwhm (float): Phi window half-width in RMSF FWHM units.
         geometry (Geometry | None): Prebuilt geometry to reuse; None builds one.
 
     Raises:
-        ValueError: If noise is requested (`sigma` or `sn`) without `rng`.
+        ValueError: If noise is requested (`sigma` or `signal_to_noise`) without `rng`.
 
     Returns:
         SimResult: Dirty FDF with the channel data and geometry behind it.
@@ -329,13 +315,13 @@ def simulate_fdf(
     pol = build_channel_spectrum(spec, geom.lambda_sq_arr_m2, geom.fwhm)
 
     error = np.zeros(pol.shape[0], dtype=np.complex128)
-    if sigma is not None or sn is not None:
+    if sigma is not None or signal_to_noise is not None:
         if rng is None:
             msg = "rng is required when injecting noise."
             raise ValueError(msg)
         if sigma is None:
-            assert sn is not None
-            sigma = float(np.nanmax(np.abs(pol))) / sn
+            assert signal_to_noise is not None
+            sigma = float(np.nanmax(np.abs(pol))) / signal_to_noise
         noisy = add_channel_noise(pol, sigma, rng)
         pol, error = noisy.complex_pol_arr, noisy.complex_pol_error
 
@@ -381,33 +367,52 @@ def demo() -> None:
     gpol = build_channel_spectrum(gauss(4.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm)
     assert np.all(np.diff(np.abs(gpol)[order]) <= 1e-9), "gauss envelope not monotone"
 
-    # Internal dispersion (Sokoloff eq. 34): reduces to the Burn slab at zero
+    # Turbulent dispersion (Sokoloff eq. 34): reduces to the Burn slab at zero
     # scatter, stays bounded, and its polynomial tail outlives the gauss
     # exponential at matched dispersion.
     pol_slab = build_channel_spectrum(
         slab(4.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
     )
     pol_int0 = build_channel_spectrum(
-        internal(4.0, 0.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
+        turbulent(4.0, 0.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
     )
-    assert np.allclose(pol_int0, pol_slab, atol=1e-9), "internal(w, 0) != slab(w)"
+    assert np.allclose(pol_int0, pol_slab, atol=1e-9), "turbulent(w, 0) != slab(w)"
     pol_int = build_channel_spectrum(
-        internal(4.0, 1.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
+        turbulent(4.0, 1.0, amp=0.7), geom.lambda_sq_arr_m2, geom.fwhm
     )
-    assert np.abs(pol_int).max() <= 0.7 + 1e-6, "internal |P| > amp"
+    assert np.abs(pol_int).max() <= 0.7 + 1e-6, "turbulent |P| > amp"
     lam2_max = float(geom.lambda_sq_arr_m2.max())
     tail_int = np.abs(
-        build_channel_spectrum(internal(0.0, 1.0), np.array([lam2_max]), geom.fwhm)
+        build_channel_spectrum(turbulent(0.0, 1.0), np.array([lam2_max]), geom.fwhm)
     )[0]
     tail_gauss = np.abs(
         build_channel_spectrum(gauss(1.0), np.array([lam2_max]), geom.fwhm)
     )[0]
-    assert tail_int > tail_gauss, "internal tail must outlive gauss tail"
+    assert tail_int > tail_gauss, "turbulent tail must outlive gauss tail"
+
+    # Physical-unit channel builders (rad/m^2, with psi0): thin is flat at
+    # frac_pol, extended stays bounded by it, slab(delta=0) reduces to thin, and
+    # psi0 sets the zero-lambda^2 angle.
+    lam2 = geom.lambda_sq_arr_m2
+    thin = faraday_simple_spectrum(lam2, frac_pol=0.5, psi0_deg=20.0, rm_radm2=30.0)
+    assert np.allclose(np.abs(thin), 0.5), "thin |P| != frac_pol"
+    at_zero = faraday_simple_spectrum(np.zeros(1), 0.5, psi0_deg=20.0, rm_radm2=30.0)
+    assert abs(np.angle(at_zero[0]) / 2 - np.deg2rad(20.0)) < 1e-9, "psi0"
+    thick_slab = faraday_slab_spectrum(lam2, 0.5, 0.0, 30.0, delta_rm_radm2=10.0)
+    thick_gauss = faraday_gaussian_spectrum(lam2, 0.5, 0.0, 30.0, sigma_rm_radm2=10.0)
+    assert np.abs(thick_slab).max() <= 0.5 + 1e-9, "slab |P| > frac_pol"
+    assert np.abs(thick_gauss).max() <= 0.5 + 1e-9, "gauss |P| > frac_pol"
+    assert np.allclose(
+        faraday_slab_spectrum(lam2, 0.5, 0.0, 30.0, 0.0),
+        faraday_simple_spectrum(lam2, 0.5, 0.0, 30.0),
+    ), "slab(delta=0) != thin at matched psi0/rm"
 
     n1 = simulate_fdf(delta(), freq, rng=rng, sigma=0.1).fdf_noise
     n2 = simulate_fdf(delta(), freq, rng=rng, sigma=0.2).fdf_noise
     assert n1 > 0, "noisy FDF noise must be positive"
     assert abs(n2 / n1 - 2.0) < 1e-6, f"FDF noise must scale with sigma: {n2 / n1}"
+    sn = simulate_fdf(delta(), freq, rng=rng, signal_to_noise=10.0).fdf_noise
+    assert sn > 0, "signal_to_noise path must inject noise"
 
     print("simulate.demo OK")  # noqa: T201
 
