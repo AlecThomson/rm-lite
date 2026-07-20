@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, Protocol
 
 import numpy as np
-from astropy.modeling.models import Gaussian1D
 from astropy.stats import akaike_info_criterion_lsq
 from numpy.typing import ArrayLike, NDArray
 from scipy import optimize, stats
@@ -108,12 +107,10 @@ def gaussian(
         raise ValueError(msg)
     if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
-    if isinstance(amplitude, complex):
-        return np.array(
-            Gaussian1D(amplitude=amplitude.real, mean=mean, stddev=stddev)(x)
-            + 1j * Gaussian1D(amplitude=amplitude.imag, mean=mean, stddev=stddev)(x)
-        )
-    return np.array(Gaussian1D(amplitude=amplitude, mean=mean, stddev=stddev)(x))
+    if stddev is None:
+        msg = "stddev cannot be None"
+        raise ValueError(msg)
+    return np.asarray(amplitude * np.exp(-0.5 * ((x - mean) / stddev) ** 2))
 
 
 def unit_gaussian(
@@ -127,7 +124,10 @@ def unit_gaussian(
         raise ValueError(msg)
     if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
-    return np.array(Gaussian1D(amplitude=1, mean=mean, stddev=stddev)(x))
+    if stddev is None:
+        msg = "stddev cannot be None"
+        raise ValueError(msg)
+    return np.asarray(np.exp(-0.5 * ((x - mean) / stddev) ** 2))
 
 
 def unit_centred_gaussian(
@@ -138,7 +138,10 @@ def unit_centred_gaussian(
         raise ValueError(msg)
     if stddev is None and fwhm is not None:
         stddev = fwhm_to_sigma(fwhm)
-    return np.array(Gaussian1D(amplitude=1, mean=0, stddev=stddev)(x))
+    if stddev is None:
+        msg = "stddev cannot be None"
+        raise ValueError(msg)
+    return np.asarray(np.exp(-0.5 * (x / stddev) ** 2))
 
 
 def fit_rmsf(

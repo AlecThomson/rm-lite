@@ -27,6 +27,7 @@ from rm_lite.utils.fitting import (
     sample_model_error,
 )
 from rm_lite.utils.logging import logger
+from rm_lite.utils.spectra import faraday_simple_spectrum
 
 # Ricean polarisation-bias correction: debiased P = sqrt(P^2 - factor * sigma^2)
 # (POSSUM report 11).
@@ -1767,30 +1768,6 @@ def calculate_sigma_add(
     )
 
 
-def faraday_simple_spectrum(
-    freq_arr_hz: NDArray[np.float64],
-    frac_pol: float,
-    psi0_deg: float,
-    rm_radm2: float,
-) -> NDArray[np.complex128]:
-    """Create a simple Faraday spectrum with a single component.
-
-    Args:
-        freq_arr_hz (NDArray[np.float64]): Frequency array in Hz
-        frac_pol (float): Fractional polarization
-        psi0_deg (float): Initial polarization angle in degrees
-        rm_radm2 (float): RM in rad/m^2
-
-    Returns:
-        NDArray[np.float64]: Complex polarization spectrum
-    """
-    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
-
-    return np.asarray(
-        frac_pol * np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lambda_sq_arr_m2))
-    )
-
-
 def measure_qu_complexity(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
@@ -1801,7 +1778,7 @@ def measure_qu_complexity(
 ) -> StokesSigmaAdd:
     # Create a RM-thin model to subtract
     simple_model = faraday_simple_spectrum(
-        freq_arr_hz=freq_arr_hz,
+        lambda_sq_arr_m2=freq_to_lambda2(freq_arr_hz),
         frac_pol=frac_pol,
         psi0_deg=psi0_deg,
         rm_radm2=rm_radm2,

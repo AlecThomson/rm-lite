@@ -21,7 +21,7 @@ from tqdm.auto import tqdm
 from rm_lite.utils.arrays import nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
     fit_rmsf,
-    gaussian,
+    fwhm_to_sigma,
     unit_centred_gaussian,
 )
 from rm_lite.utils.logging import TqdmToLogger, logger
@@ -96,16 +96,12 @@ class CleanLoopResults(NamedTuple):
 class MinorLoopResults(NamedTuple):
     """Results of the RM-CLEAN minor loop"""
 
-    clean_fdf_spectrum: NDArray[np.complex128]
-    """The cleaned Faraday dispersion function cube"""
     resid_fdf_spectrum: NDArray[np.complex128]
     """The residual Faraday dispersion function cube"""
     resid_fdf_spectrum_mask: np.ma.MaskedArray
     """The masked residual Faraday dispersion function cube"""
     model_fdf_spectrum: NDArray[np.complex128]
     """The clean components cube"""
-    model_rmsf_spectrum: NDArray[np.complex128]
-    """ Model * RMSF """
     iter_count: int
     """The number of iterations"""
 
@@ -118,7 +114,7 @@ class RMCleanOptions:
     """Masking threshold - pixels below this value are not cleaned"""
     threshold: float
     """Cleaning threshold - stop when all pixels are below this value"""
-    max_iter: int = 1000
+    max_iter: int = 100_000
     """Maximum clean iterations"""
     gain: float = 0.1
     """Clean loop gain"""
@@ -226,11 +222,14 @@ def shift_rmsf(
     Returns:
         NDArray[np.complex128]: RMSF shifted to `fdf_index`, clipped to FDF length.
     """
-    return np.asarray(
-        np.roll(rmsf_spectrum, fdf_index + n_phi_pad - max_rmsf_index)[
-            n_phi_pad:-n_phi_pad
-        ]
-    )
+    # Gather only the clipped FDF window instead of np.roll copying the whole
+    # double-length array each call (np.roll was the single hottest op in the
+    # minor loop). take(mode="wrap") reproduces roll's wraparound exactly:
+    # roll(a, s)[n_phi_pad + j] == a[(n_phi_pad + j - s) mod len].
+    shift = fdf_index + n_phi_pad - max_rmsf_index
+    fdf_len = len(rmsf_spectrum) - 2 * n_phi_pad
+    indices = np.arange(n_phi_pad, n_phi_pad + fdf_len) - shift
+    return np.asarray(rmsf_spectrum.take(indices, mode="wrap"))
 
 
 def minor_loop(
@@ -247,14 +246,14 @@ def minor_loop(
     Returns:
         MinorLoopResults: Clean, residual, model, masked residual, and iteration count.
     """
-    resid_fdf_spectrum_mask = minor_loop_arrays.resid_fdf_spectrum_mask.copy()
     resid_fdf_spectrum = minor_loop_arrays.resid_fdf_spectrum_mask.data.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
-    clean_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
-    model_rmsf_spectrum = np.zeros_like(resid_fdf_spectrum)
     rmsf_spectrum = minor_loop_arrays.rmsf_spectrum.copy()
-    phi_arr_radm2 = minor_loop_arrays.phi_arr_radm2.copy()
-    mask_arr = ~resid_fdf_spectrum_mask.mask.copy()
+    # Track the clean region as a plain boolean mask (True = active), not an
+    # np.ma.MaskedArray: rebuilding a masked array and taking np.ma.max/argmax
+    # each iteration was ~40% of minor_loop runtime. The peak is taken via
+    # np.where below instead.
+    mask_arr = ~np.ma.getmaskarray(minor_loop_arrays.resid_fdf_spectrum_mask).copy()
     mask_arr_original = mask_arr.copy()
     iter_count = int(minor_loop_options.start_iter)
     thr_eff = minor_loop_options.mask_threshold
@@ -265,7 +264,6 @@ def minor_loop(
         mask_arr = _seed_mask(
             resid_fdf_spectrum, mask_arr_original, minor_loop_options.mask_threshold
         )
-        resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     # Find the index of the peak of the RMSF
     max_rmsf_index = np.nanargmax(np.abs(rmsf_spectrum))
@@ -273,14 +271,18 @@ def minor_loop(
     # Calculate the padding in the sampled RMSF
     # Assumes only integer shifts and symmetric RMSF
     n_phi_pad = int(
-        (len(minor_loop_arrays.phi_double_arr_radm2) - len(phi_arr_radm2)) / 2
+        (
+            len(minor_loop_arrays.phi_double_arr_radm2)
+            - len(minor_loop_arrays.phi_arr_radm2)
+        )
+        / 2
     )
 
     logger.info(f"Starting minor loop... {mask_arr.sum()} pixels in the mask")
     for iter_count in range(
         minor_loop_options.start_iter, minor_loop_options.max_iter + 1
     ):
-        if resid_fdf_spectrum_mask.mask.all():
+        if not mask_arr.any():
             logger.warning(
                 f"All channels masked. Exiting loop...performed {iter_count} iterations"
             )
@@ -290,10 +292,11 @@ def minor_loop(
                 f"Max iterations reached. Exiting loop...performed {iter_count} iterations"
             )
             break
-        if (
-            np.ma.max(np.ma.abs(resid_fdf_spectrum_mask))
-            < minor_loop_options.stopping_threshold
-        ):
+        # Masked absolute residual (off-mask channels set to -inf); one pass gives
+        # both the peak value and its index.
+        masked_abs = np.where(mask_arr, np.abs(resid_fdf_spectrum), -np.inf)
+        peak_fdf_index = int(np.argmax(masked_abs))
+        if masked_abs[peak_fdf_index] < minor_loop_options.stopping_threshold:
             # Region exhausted. In adaptive mode the main source (and its RMSF
             # sidelobes) are now subtracted, so any channel still above the mask
             # floor is real emission: start a new blob there instead of stopping.
@@ -305,9 +308,6 @@ def minor_loop(
                 )
                 if new_seed.any():
                     mask_arr |= new_seed
-                    resid_fdf_spectrum_mask = np.ma.array(
-                        resid_fdf_spectrum, mask=~mask_arr
-                    )
                     last_recompute_peak = np.inf
                     continue
             logger.info(
@@ -315,9 +315,7 @@ def minor_loop(
             )
             break
         # Get the absolute peak channel, values and Faraday depth
-        peak_fdf_index = np.ma.argmax(np.abs(resid_fdf_spectrum_mask))
-        peak_fdf = resid_fdf_spectrum_mask[peak_fdf_index]
-        peak_rm = phi_arr_radm2[peak_fdf_index]
+        peak_fdf = resid_fdf_spectrum[peak_fdf_index]
 
         # A clean component is "loop-gain * peak_fdf
         clean_component = minor_loop_options.gain * peak_fdf
@@ -327,18 +325,12 @@ def minor_loop(
         shifted_rmsf_spectrum = shift_rmsf(
             rmsf_spectrum, int(peak_fdf_index), n_phi_pad, int(max_rmsf_index)
         )
-        model_rmsf_spectrum += clean_component * shifted_rmsf_spectrum
 
         # Subtract the product of the clean_component shifted RMSF from the residual FDF
         resid_fdf_spectrum -= clean_component * shifted_rmsf_spectrum
 
-        # Restore the clean_component * a Gaussian to the cleaned FDF
-        clean_fdf_spectrum += gaussian(
-            x=phi_arr_radm2,
-            amplitude=clean_component,
-            mean=float(peak_rm),
-            fwhm=minor_loop_arrays.rmsf_fwhm,
-        )
+        # (The clean FDF is restored from the final model in one pass; see
+        # `restore_model`, so no per-iteration Gaussian is built here.)
         # Remake masked residual FDF
         if minor_loop_options.update_mask:
             if minor_loop_options.noise is not None:
@@ -367,15 +359,38 @@ def minor_loop(
                 mask_arr = (
                     np.abs(resid_fdf_spectrum) > minor_loop_options.mask_threshold
                 ) & mask_arr_original
-        resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
 
     return MinorLoopResults(
-        clean_fdf_spectrum=clean_fdf_spectrum,
         resid_fdf_spectrum=resid_fdf_spectrum,
-        resid_fdf_spectrum_mask=resid_fdf_spectrum_mask,
+        resid_fdf_spectrum_mask=np.ma.array(resid_fdf_spectrum, mask=~mask_arr),
         model_fdf_spectrum=model_fdf_spectrum,
-        model_rmsf_spectrum=model_rmsf_spectrum,
         iter_count=iter_count,
+    )
+
+
+def restore_model(
+    model_fdf_spectrum: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    rmsf_fwhm: float,
+) -> NDArray[np.complex128]:
+    """Restore a delta model with a unit-peak clean beam (one pass).
+
+    Sum of per-component Gaussians == the delta model convolved with the clean
+    beam; doing it once from the final model is identical to the old
+    per-iteration restore but avoids a full-array Gaussian every minor iteration.
+    Distinct component channels are bounded by the FDF length, so the outer sum
+    is at most len(phi)^2.
+    """
+    nonzero = np.nonzero(model_fdf_spectrum)[0]
+    if nonzero.size == 0:
+        return np.zeros_like(model_fdf_spectrum)
+    sigma = fwhm_to_sigma(rmsf_fwhm)
+    beams = np.exp(
+        -0.5 * ((phi_arr_radm2[None, :] - phi_arr_radm2[nonzero][:, None]) / sigma) ** 2
+    )
+    return np.asarray(
+        (model_fdf_spectrum[nonzero][:, None] * beams).sum(axis=0),
+        dtype=np.complex128,
     )
 
 
@@ -661,12 +676,17 @@ def minor_cycle(
         ),
     )
 
-    clean_fdf_spectrum = np.squeeze(
-        deep_loop_results.clean_fdf_spectrum + initial_loop_results.clean_fdf_spectrum
-    )
     resid_fdf_spectrum = np.squeeze(deep_loop_results.resid_fdf_spectrum)
     model_fdf_spectrum = np.squeeze(
         deep_loop_results.model_fdf_spectrum + initial_loop_results.model_fdf_spectrum
+    )
+    clean_fdf_spectrum = np.squeeze(
+        restore_model(
+            deep_loop_results.model_fdf_spectrum
+            + initial_loop_results.model_fdf_spectrum,
+            rm_synth_1d_arrays.phi_arr_radm2,
+            float(rm_synth_1d_arrays.fwhm_rmsf_arr.squeeze()),
+        )
     )
 
     return CleanLoopResults(
@@ -824,6 +844,16 @@ KERNEL_FUNCS: dict[str, Callable[..., NDArray[np.float64]]] = {
     "gaussian": gaussian_scale_kernel_function,
 }
 
+# Kernel half-width as a fraction of scale_radm2 (= scale * rmsf_fwhm), used to trim
+# the convolution kernel to its real support instead of sampling it across the whole
+# signal. tapered_quad is exactly zero beyond scale_radm2/2 (the Hanning gate), so
+# 0.5 loses nothing. gaussian has no hard cutoff; 6 sigma (sigma = (3/16)*scale_radm2)
+# leaves a truncation error of ~1e-8 relative, well below any numerical tolerance here.
+KERNEL_SUPPORT_FACTOR: dict[str, float] = {
+    "tapered_quad": 0.5,
+    "gaussian": 6 * 3 / 16,
+}
+
 
 def convolve_fdf_scale(
     scale: float,
@@ -852,13 +882,19 @@ def convolve_fdf_scale(
     if scale == 0:
         return fdf_arr
     kernel_func = KERNEL_FUNCS.get(kernel, gaussian_scale_kernel_function)
-    # Sample the kernel on a zero-centred grid of the SAME length as the signal
-    # (same d_phi as phi_double). A kernel longer than the signal would produce
-    # boundary garbage under scipy's reflect mode; this keeps them matched for
-    # both FDF-length and RMSF-length inputs.
+    # Sample the kernel on a zero-centred grid trimmed to its real support (see
+    # KERNEL_SUPPORT_FACTOR), not the full signal length: scipy.ndimage.convolve is
+    # O(n * kernel_len), and the kernel is negligible (tapered_quad: exactly zero)
+    # beyond that support. Capped at n so a kernel wider than the signal (large
+    # scale, narrow phi window) still can't exceed it and produce boundary garbage
+    # under scipy's reflect mode.
     d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
     n = len(fdf_arr)
-    kernel_grid = (np.arange(n) - n // 2) * d_phi
+    support_factor = KERNEL_SUPPORT_FACTOR.get(
+        kernel, KERNEL_SUPPORT_FACTOR["gaussian"]
+    )
+    half_width = min(int(np.ceil(support_factor * scale * fwhm / d_phi)), (n - 1) // 2)
+    kernel_grid = np.arange(-half_width, half_width + 1) * d_phi
     kernel_arr = kernel_func(kernel_grid, scale, fwhm, sum_normalised=sum_normalised)
 
     if np.iscomplexobj(fdf_arr):

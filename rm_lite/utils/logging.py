@@ -99,7 +99,7 @@ def quiet_logs(level: int = logging.WARNING) -> Iterator[None]:
 
     Reentrant and thread-safe: concurrent callers (e.g. dask workers running
     one call per chunk, possibly requesting different levels, e.g. `rmsynth_3d`
-    defaults to WARNING and `rmclean_3d` to ERROR) share a multiset of active
+    defaults to WARNING and `run_rmclean` to ERROR) share a multiset of active
     requested levels. The logger's level is always the max (most restrictive)
     of whatever's currently active, recomputed on every entry/exit, and only
     restored to its original value once every caller has exited. Tracking a

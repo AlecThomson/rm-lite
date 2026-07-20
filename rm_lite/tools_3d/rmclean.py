@@ -78,7 +78,7 @@ def _clean_block(
     )
 
 
-def rmclean_3d(
+def run_rmclean(
     fdf_dirty_cube: da.Array,
     rmsf_cube: da.Array,
     phi_arr_radm2: NDArray[np.float64],
@@ -86,7 +86,7 @@ def rmclean_3d(
     fwhm_rmsf_radm2: float,
     mask: float,
     threshold: float,
-    max_iter: int = 1000,
+    max_iter: int = 100_000,
     gain: float = 0.1,
     moment_threshold: float | None = None,
     fdf_noise: float | None = None,
@@ -229,11 +229,11 @@ def rmclean_3d(
     )
 
 
-def rmclean_3d_from_synth(
+def run_rmclean_from_synth(
     rm_synth_3d_results: RMSynth3DResults,
     auto_mask: float = 7,
     auto_threshold: float = 1,
-    max_iter: int = 1000,
+    max_iter: int = 100_000,
     gain: float = 0.1,
     moment_threshold_snr: float = 5.0,
     log_level: int = logging.ERROR,
@@ -247,7 +247,7 @@ def rmclean_3d_from_synth(
 ) -> RMClean3DResults:
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
 
-    Convenience wrapper that unpacks an `RMSynth3DResults` into `rmclean_3d`,
+    Convenience wrapper that unpacks an `RMSynth3DResults` into `run_rmclean`,
     mirroring `rm_lite.tools_1d.rmclean.run_rmclean_from_synth`. `mask` and
     `threshold` are scaled from `rm_synth_3d_results.theoretical_noise`, the
     same way the 1D version scales from its per-pixel theoretical noise. 3D
@@ -266,11 +266,11 @@ def rmclean_3d_from_synth(
         moment_threshold_snr (float, optional): SNR cut (times the theoretical
             FDF noise) applied to the clean FDF before computing the Faraday
             moment maps. Defaults to 5.0.
-        log_level (int, optional): See `rmclean_3d`. Defaults to `logging.ERROR`.
+        log_level (int, optional): See `run_rmclean`. Defaults to `logging.ERROR`.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
         scales, n_scales, kernel, max_iter_sub_minor, sub_minor_fraction,
-            selection_margin: Multiscale options, see `rmclean_3d`.
+            selection_margin: Multiscale options, see `run_rmclean`.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -285,7 +285,7 @@ def rmclean_3d_from_synth(
         f"Auto mask: {mask:0.3g}, auto threshold: {threshold:0.3g}."
     )
 
-    return rmclean_3d(
+    return run_rmclean(
         fdf_dirty_cube=rm_synth_3d_results.fdf_dirty_cube,
         rmsf_cube=rm_synth_3d_results.rmsf_cube,
         phi_arr_radm2=rm_synth_3d_results.phi_arr_radm2,
