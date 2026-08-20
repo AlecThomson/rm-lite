@@ -32,15 +32,9 @@ dependencies = [
     "numpy>=1.22",
     "scipy",
     "astropy>=6",
-    "tdqm",
-    "deprecation",
+    "tqdm",
     "finufft",
-    "bilby>=1.1.5",
-    "emcee",
-    "nestle",
-    "corner",
     "polars",
-    "sigfig",
     "dask[array]",
     "zarr",
 ]
@@ -55,7 +49,7 @@ dev = [
     "nbconvert",
     "jupyter",
     "ipython",
-    "pytest",
+    "matplotlib",
     "prek>=0.4.6",
     "distributed",
 ]
@@ -137,7 +131,7 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 
 [[tool.mypy.overrides]]
-module = ["astropy.*", "sigfig.*", "finufft.*", "uncertainties.*"]
+module = ["astropy.*", "finufft.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

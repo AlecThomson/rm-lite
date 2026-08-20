@@ -50,9 +50,7 @@ class CustomFormatter(logging.Formatter):
         return formatter.format(record)
 
 
-def get_logger(
-    name: str = "rmtools-lite", attach_handler: bool = True
-) -> logging.Logger:
+def get_logger(name: str = "rm-lite", attach_handler: bool = True) -> logging.Logger:
     """Will construct a logger object.
 
     Args:
