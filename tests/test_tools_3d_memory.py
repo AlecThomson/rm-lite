@@ -61,6 +61,12 @@ FITS_TARGET_CHUNK_MB = 4.0
 # Pinned so the Faraday-depth axis stays a sane length for this narrow
 # synthetic band; left to the defaults it lands near 10x n_freq.
 FITS_PHI_MAX_RADM2 = 200.0
+# Peak RSS does grow a little with cube size at a fixed chunk target: 4x the
+# pixels is 4x the blocks, so the graph and the zarr metadata grow with it.
+# Measured 1.3-1.5x across this 4x size step, so the bar is half the cube's
+# own growth: clear of the real number, and well under the ~3-4x a cube-sized
+# read would give. A flat 1.5x bar sat right on the true value and flaked.
+MAX_RSS_GROWTH_FRACTION = 0.5
 
 
 def _cube_mb(side: int) -> float:
@@ -122,11 +128,13 @@ def test_fits_path_memory_scales_with_chunk_size_not_cube_size(qu_fits_cubes):
     small = _fits_peak_rss_mb(qu_fits_cubes[small_side])
     large = _fits_peak_rss_mb(qu_fits_cubes[large_side])
 
-    assert large < 1.5 * small, (
-        f"peak RSS should not follow cube size: {small:.0f} MB on a "
+    cube_growth = _cube_mb(large_side) / _cube_mb(small_side)
+    assert large < MAX_RSS_GROWTH_FRACTION * cube_growth * small, (
+        f"peak RSS should grow far slower than cube size: {small:.0f} MB on a "
         f"{_cube_mb(small_side):.0f} MB cube vs {large:.0f} MB on a "
-        f"{_cube_mb(large_side):.0f} MB cube, at the same "
-        f"{FITS_TARGET_CHUNK_MB} MB chunk target"
+        f"{_cube_mb(large_side):.0f} MB cube, {large / small:.2g}x for a "
+        f"{cube_growth:.0f}x cube, at the same {FITS_TARGET_CHUNK_MB} MB "
+        "chunk target"
     )
     assert large < _cube_mb(large_side), (
         f"peak RSS ({large:.0f} MB) exceeds one whole cube "

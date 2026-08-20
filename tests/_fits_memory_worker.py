@@ -49,9 +49,13 @@ def main() -> None:
     d_phi_radm2 = float(sys.argv[4])
     phi_max_radm2 = float(sys.argv[5])
 
-    # Fixed thread count: peak RSS is roughly (threads x per-task footprint),
-    # so leaving it to the host's core count makes the number machine-dependent.
-    dask.config.set(scheduler="threads", num_workers=2)
+    # Synchronous: peak RSS is roughly (threads x per-task footprint), so any
+    # threaded scheduler makes the peak depend on how tasks happen to overlap.
+    # That jitter was ~50% of the small-cube number here, which swamped the
+    # cube-size effect the caller is measuring. The thread multiplier is a
+    # documented property of `read_fits_cube_dask`, not something this scaling
+    # test needs to measure through.
+    dask.config.set(scheduler="synchronous")
 
     pre_compute_rss = _current_rss_kb()
 
