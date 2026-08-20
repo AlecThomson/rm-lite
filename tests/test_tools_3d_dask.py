@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import rm_lite.tools_3d.rmclean as rmclean3d_mod
 import zarr
+from astropy.io import fits
 from astropy.io.fits import Header
 from dask.base import compute
 from numpy.typing import NDArray
@@ -17,8 +18,11 @@ from rm_lite.tools_3d.rmclean import run_rmclean, run_rmclean_from_synth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
 from rm_lite.utils.dask_io import (
+    channel_chunk_size,
     estimate_channel_noise_mad,
     freq_arr_hz_from_header,
+    read_fits_cube_channel_chunks,
+    read_fits_cube_dask,
     spatial_chunk_size,
     write_zarr_group,
 )
@@ -338,16 +342,34 @@ def test_freq_arr_hz_from_header_reads_spectral_wcs():
     np.testing.assert_allclose(freq_arr_hz, [1.000e9, 1.001e9, 1.002e9, 1.003e9])
 
 
-def test_spatial_chunk_size_respects_target_and_bounds():
+def test_spatial_chunk_size_gives_full_width_bands_within_target():
     cy, cx = spatial_chunk_size(
-        n_freq=100, ny=1000, nx=1000, itemsize=16, target_chunk_mb=1
+        n_freq=100, ny=1000, nx=1000, itemsize=16, target_chunk_mb=32
     )
-    assert cy * cx * 100 * 16 <= 1024**2 * 1.1
+    # Full image width, so each channel's slice of a block is contiguous on disk.
+    assert cx == 1000
+    assert cy * cx * 100 * 16 <= 32 * 1024**2
     # Clipped to image dims when the target budget exceeds the whole image.
-    cy, cx = spatial_chunk_size(
+    assert spatial_chunk_size(
         n_freq=10, ny=5, nx=5, itemsize=16, target_chunk_mb=1024
+    ) == (5, 5)
+    # Never below one row, even when a single band overshoots the target.
+    assert spatial_chunk_size(
+        n_freq=100, ny=50, nx=1000, itemsize=16, target_chunk_mb=1e-6
+    ) == (1, 1000)
+
+
+def test_channel_chunk_size_respects_target_and_bounds():
+    n_chan = channel_chunk_size(
+        n_freq=100, ny=500, nx=500, itemsize=4, target_chunk_mb=4
     )
-    assert (cy, cx) == (5, 5)
+    assert n_chan * 500 * 500 * 4 <= 4 * 1024**2
+    # Clipped to the spectral axis, and never below one channel.
+    assert channel_chunk_size(n_freq=7, ny=4, nx=4, itemsize=4, target_chunk_mb=99) == 7
+    assert (
+        channel_chunk_size(n_freq=7, ny=400, nx=400, itemsize=4, target_chunk_mb=1e-6)
+        == 1
+    )
 
 
 def test_estimate_channel_noise_mad_recovers_true_noise():
@@ -445,3 +467,159 @@ def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
     mom0, mom1 = compute(clean.mom0_map, clean.mom1_map)
     assert (mom0 > 0).any()
     assert np.isfinite(mom1).any()
+
+
+def _write_cube(path, data: NDArray[np.float64]) -> None:
+    """Write a cube to FITS in FITS-native big-endian float32."""
+    fits.PrimaryHDU(data.astype(">f4")).writeto(path, overwrite=True)
+
+
+def _memmap_read(path, y0: int, y1: int) -> NDArray[np.float32]:
+    """The pre-fix reader: squeeze a memmap and slice out a spatial block."""
+    with fits.open(path, memmap=True) as hdul:
+        return np.array(np.squeeze(hdul[0].data)[:, y0:y1, :])
+
+
+@pytest.mark.parametrize("degenerate_axis", [False, True])
+def test_read_fits_cube_dask_matches_memmap_read(tmp_path, degenerate_axis: bool):
+    """New section-based reader is bit-identical to the old memmap path."""
+    n_freq, ny, nx = 6, 13, 5
+    cube = RNG.normal(0, 1, (n_freq, ny, nx))
+    path = tmp_path / "cube.fits"
+    _write_cube(path, cube[np.newaxis] if degenerate_axis else cube)
+
+    # A band height of 4 leaves a short final band (13 % 4 == 1).
+    target_chunk_mb = n_freq * 4 * nx * 4 / 1024**2
+    arr, _ = read_fits_cube_dask(path, target_chunk_mb=target_chunk_mb)
+
+    assert arr.chunks[1] == (4, 4, 4, 1)
+    np.testing.assert_array_equal(arr.compute(), _memmap_read(path, 0, ny))
+
+
+def test_read_fits_cube_dask_single_row_bands(tmp_path):
+    """A one-row band (cy == 1) survives rather than being squeezed away."""
+    cube = RNG.normal(0, 1, (4, 3, 5))
+    path = tmp_path / "cube.fits"
+    _write_cube(path, cube[np.newaxis])
+
+    arr, _ = read_fits_cube_dask(path, target_chunk_mb=1e-9)
+
+    assert arr.chunks == ((4,), (1, 1, 1), (5,))
+    np.testing.assert_array_equal(arr.compute(), _memmap_read(path, 0, 3))
+
+
+def test_read_fits_cube_dask_has_no_astype_layer(tmp_path):
+    """Blocks come back native-endian, so dask inserts no astype layer.
+
+    FITS is big-endian on disk; declaring that dtype made `da.concatenate`
+    graft an `astype` onto every block, which then absorbed the whole cost of
+    materialising the read and showed up as the culprit in worker kills.
+    """
+    path = tmp_path / "cube.fits"
+    _write_cube(path, RNG.normal(0, 1, (4, 8, 5)))
+
+    arr, _ = read_fits_cube_dask(path, target_chunk_mb=1e-9)
+
+    assert arr.dtype.byteorder in ("=", "|")
+    assert arr.dtype == np.float32
+    prefixes = {str(key[0]).split("-")[0] for key in arr.__dask_graph__()}
+    assert not any("astype" in prefix for prefix in prefixes), prefixes
+
+
+def test_read_fits_cube_channel_chunks_matches_spatial_read(tmp_path):
+    """Channel-chunked reader returns the same cube, chunked along frequency."""
+    n_freq, ny, nx = 7, 6, 5
+    path = tmp_path / "cube.fits"
+    _write_cube(path, RNG.normal(0, 1, (n_freq, ny, nx))[np.newaxis])
+
+    spatial, _ = read_fits_cube_dask(path)
+    channels, _ = read_fits_cube_channel_chunks(
+        path, target_chunk_mb=2 * ny * nx * 4 / 1024**2
+    )
+
+    assert channels.chunks == ((2, 2, 2, 1), (ny,), (nx,))
+    np.testing.assert_array_equal(channels.compute(), spatial.compute())
+
+
+def test_channel_noise_from_channel_chunks_matches_whole_cube(tmp_path):
+    """Per-channel noise off a channel-chunked read matches a whole-cube reduction."""
+    n_freq, ny, nx = 8, 16, 16
+    stokes_q = RNG.normal(0, 1, (n_freq, ny, nx))
+    stokes_u = RNG.normal(0, 1, (n_freq, ny, nx))
+    q_path, u_path = tmp_path / "q.fits", tmp_path / "u.fits"
+    _write_cube(q_path, stokes_q)
+    _write_cube(u_path, stokes_u)
+
+    q_chunked, _ = read_fits_cube_channel_chunks(
+        q_path, target_chunk_mb=2 * ny * nx * 4 / 1024**2
+    )
+    u_chunked, _ = read_fits_cube_channel_chunks(
+        u_path, target_chunk_mb=2 * ny * nx * 4 / 1024**2
+    )
+    chunked_noise = estimate_channel_noise_mad(q_chunked, u_chunked)
+
+    whole_cube_noise = estimate_channel_noise_mad(
+        _chunked(stokes_q, -1, -1),
+        _chunked(stokes_u, -1, -1),
+    )
+    np.testing.assert_allclose(chunked_noise, whole_cube_noise, rtol=1e-6)
+
+
+def test_channel_noise_warns_on_spatially_chunked_input(caplog):
+    """Spatially chunked input still works, but says it is gathering the cube."""
+    stokes_q = RNG.normal(0, 1, (4, 8, 8))
+    stokes_u = RNG.normal(0, 1, (4, 8, 8))
+
+    with caplog.at_level("WARNING"):
+        estimate_channel_noise_mad(_chunked(stokes_q, 4, 4), _chunked(stokes_u, 4, 4))
+
+    assert "read_fits_cube_channel_chunks" in caplog.text
+
+
+def test_rmsynth_3d_output_chunks_stay_within_the_input_chunk_budget():
+    """Spatial chunks shrink so an FDF chunk costs what the input chunk costs.
+
+    The Faraday-depth axis is longer than the frequency axis and complex128
+    rather than float32, so keeping the caller's spatial chunking would make
+    every output chunk a large multiple of the input chunk they sized.
+    """
+    n_freq, ny, nx = 128, 64, 32
+    freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
+    stokes_q = RNG.normal(0, 1, (n_freq, ny, nx))
+    stokes_u = RNG.normal(0, 1, (n_freq, ny, nx))
+
+    q_dask = _chunked(stokes_q, 32, nx)
+    u_dask = _chunked(stokes_u, 32, nx)
+    input_chunk_bytes = np.prod(q_dask.chunksize) * q_dask.dtype.itemsize
+
+    synth = rmsynth_3d(
+        q_dask, u_dask, freq_arr_hz, phi_max_radm2=100.0, d_phi_radm2=2.0
+    )
+
+    for cube in (synth.fdf_dirty_cube, synth.rmsf_cube):
+        assert np.prod(cube.chunksize) * cube.dtype.itemsize <= input_chunk_bytes
+    # Shrunk along y only, so each block is still one contiguous read.
+    assert synth.fdf_dirty_cube.chunksize[2] == nx
+    # And the result is unchanged by the rechunking.
+    np.testing.assert_allclose(
+        synth.fdf_dirty_cube.compute(),
+        rmsynth_3d(
+            _chunked(stokes_q, 1, nx),
+            _chunked(stokes_u, 1, nx),
+            freq_arr_hz,
+            phi_max_radm2=100.0,
+            d_phi_radm2=2.0,
+        ).fdf_dirty_cube.compute(),
+    )
+
+
+def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger():
+    """Coarse chunks survive when the output is no larger than the input."""
+    n_freq, ny, nx = 400, 8, 8
+    freq_arr_hz = np.linspace(8.0e8, 1.4e9, n_freq)
+    q_dask = _chunked(RNG.normal(0, 1, (n_freq, ny, nx)), 4, nx)
+    u_dask = _chunked(RNG.normal(0, 1, (n_freq, ny, nx)), 4, nx)
+
+    synth = rmsynth_3d(q_dask, u_dask, freq_arr_hz, d_phi_radm2=200.0)
+
+    assert synth.fdf_dirty_cube.chunksize[1] == 4
