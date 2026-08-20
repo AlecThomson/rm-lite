@@ -5,6 +5,12 @@ Runs the pipeline in a fresh subprocess per configuration so
 output via `write_zarr_group` rather than `.compute()`, since `.compute()`
 always assembles the full result in memory regardless of chunk size. See
 `tests/_dask_memory_worker.py` for the worker itself.
+
+The array-path test below compares two chunkings of one cube, so it can use
+peak RSS: allocator retention inflates both sides alike. The FITS-path test
+compares two cube sizes, where that retention grows with the number of blocks
+read and swamps the effect being measured, so it uses the `tracemalloc` peak
+instead. See `tests/_fits_memory_worker.py`.
 """
 
 from __future__ import annotations
@@ -61,12 +67,17 @@ FITS_TARGET_CHUNK_MB = 4.0
 # Pinned so the Faraday-depth axis stays a sane length for this narrow
 # synthetic band; left to the defaults it lands near 10x n_freq.
 FITS_PHI_MAX_RADM2 = 200.0
-# Peak RSS does grow a little with cube size at a fixed chunk target: 4x the
-# pixels is 4x the blocks, so the graph and the zarr metadata grow with it.
-# Measured 1.3-1.5x across this 4x size step, so the bar is half the cube's
-# own growth: clear of the real number, and well under the ~3-4x a cube-sized
-# read would give. A flat 1.5x bar sat right on the true value and flaked.
-MAX_RSS_GROWTH_FRACTION = 0.5
+# Peak live data does grow a little with cube size at a fixed chunk target: 4x
+# the pixels is 4x the blocks, so the graph and the zarr metadata grow with it.
+# Measured 34 MB at side 512 and 39 MB at side 1024, so 1.15x for a 4x cube.
+# The bar is half the cube's own growth, which sits between that and the 3.03x
+# a whole-cube read per block measures.
+MAX_PEAK_GROWTH_FRACTION = 0.5
+# And an absolute bound, since a ratio alone would pass if both sizes blew up
+# together: peak live data is set by `target_chunk_mb`, not by the cube. The
+# measurements above are 8.5x and 9.75x the target (a per-task multiple, plus
+# the graph); a whole-cube read per block measures 18x and 56x.
+MAX_PEAK_PER_TARGET_MB = 20
 
 
 def _cube_mb(side: int) -> float:
@@ -96,7 +107,7 @@ def qu_fits_cubes(tmp_path_factory) -> dict[int, tuple[pathlib.Path, pathlib.Pat
     return cubes
 
 
-def _fits_peak_rss_mb(paths: tuple[pathlib.Path, pathlib.Path]) -> float:
+def _fits_peak_mb(paths: tuple[pathlib.Path, pathlib.Path]) -> float:
     result = subprocess.run(
         [
             sys.executable,
@@ -115,7 +126,7 @@ def _fits_peak_rss_mb(paths: tuple[pathlib.Path, pathlib.Path]) -> float:
 
 
 def test_fits_path_memory_scales_with_chunk_size_not_cube_size(qu_fits_cubes):
-    """`rmsynth_3d_from_fits` peak memory is flat in cube size at a fixed chunk target.
+    """`rmsynth_3d_from_fits` peak memory is near-flat in cube size at a fixed target.
 
     Guards both FITS-path blowups at once. The reader used to hand dask lazy
     memmap views, so the whole cube faulted in when something downstream
@@ -125,18 +136,20 @@ def test_fits_path_memory_scales_with_chunk_size_not_cube_size(qu_fits_cubes):
     both are invisible to `_dask_memory_worker`, which never reads a FITS file.
     """
     small_side, large_side = FITS_SIDES
-    small = _fits_peak_rss_mb(qu_fits_cubes[small_side])
-    large = _fits_peak_rss_mb(qu_fits_cubes[large_side])
+    small = _fits_peak_mb(qu_fits_cubes[small_side])
+    large = _fits_peak_mb(qu_fits_cubes[large_side])
 
     cube_growth = _cube_mb(large_side) / _cube_mb(small_side)
-    assert large < MAX_RSS_GROWTH_FRACTION * cube_growth * small, (
-        f"peak RSS should grow far slower than cube size: {small:.0f} MB on a "
-        f"{_cube_mb(small_side):.0f} MB cube vs {large:.0f} MB on a "
+    assert large < MAX_PEAK_GROWTH_FRACTION * cube_growth * small, (
+        f"peak live data should grow far slower than cube size: {small:.0f} MB "
+        f"on a {_cube_mb(small_side):.0f} MB cube vs {large:.0f} MB on a "
         f"{_cube_mb(large_side):.0f} MB cube, {large / small:.2g}x for a "
         f"{cube_growth:.0f}x cube, at the same {FITS_TARGET_CHUNK_MB} MB "
         "chunk target"
     )
-    assert large < _cube_mb(large_side), (
-        f"peak RSS ({large:.0f} MB) exceeds one whole cube "
-        f"({_cube_mb(large_side):.0f} MB) at a {FITS_TARGET_CHUNK_MB} MB chunk target"
+    assert large < MAX_PEAK_PER_TARGET_MB * FITS_TARGET_CHUNK_MB, (
+        f"peak live data ({large:.0f} MB) should be set by the "
+        f"{FITS_TARGET_CHUNK_MB} MB chunk target, not the "
+        f"{_cube_mb(large_side):.0f} MB cube: that is "
+        f"{large / FITS_TARGET_CHUNK_MB:.0f}x the target"
     )
