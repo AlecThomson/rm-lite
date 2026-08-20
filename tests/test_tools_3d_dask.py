@@ -15,7 +15,11 @@ from dask.base import compute
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmclean import run_rmclean, run_rmclean_from_synth
-from rm_lite.tools_3d.rmsynth import rmsynth_3d
+from rm_lite.tools_3d.rmsynth import (
+    _match_chunks_to_fdf,
+    rmsynth_3d,
+    rmsynth_3d_from_fits,
+)
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
 from rm_lite.utils.dask_io import (
     channel_chunk_size,
@@ -541,6 +545,107 @@ def test_read_fits_cube_channel_chunks_matches_spatial_read(tmp_path):
     np.testing.assert_array_equal(channels.compute(), spatial.compute())
 
 
+# (n_freq, ny, nx) of the squeezed cube used by the degenerate-axis matrix.
+DEGEN_NF, DEGEN_NY, DEGEN_NX = 13, 17, 11
+
+DEGENERATE_SHAPES = {
+    "plain-3d": (DEGEN_NF, DEGEN_NY, DEGEN_NX),
+    "leading": (1, DEGEN_NF, DEGEN_NY, DEGEN_NX),
+    # The ASKAP/CASA dummy-Stokes layout.
+    "middle": (DEGEN_NF, 1, DEGEN_NY, DEGEN_NX),
+    "trailing": (DEGEN_NF, DEGEN_NY, DEGEN_NX, 1),
+    "several": (1, DEGEN_NF, 1, DEGEN_NY, DEGEN_NX, 1),
+}
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [read_fits_cube_dask, read_fits_cube_channel_chunks],
+    ids=["spatial", "channel"],
+)
+@pytest.mark.parametrize(
+    "target_chunk_mb", [1e-9, 256], ids=["many-chunks", "one-chunk"]
+)
+@pytest.mark.parametrize(
+    "disk_shape", list(DEGENERATE_SHAPES.values()), ids=list(DEGENERATE_SHAPES)
+)
+def test_readers_drop_degenerate_axes(tmp_path, reader, target_chunk_mb, disk_shape):
+    """Both readers return the squeezed cube whatever the degenerate-axis layout.
+
+    A single chunk covering the whole array is the case that regressed: an
+    `int` index only squeezes its axis when the request doesn't span the full
+    array, so a whole-array read came back un-squeezed.
+    """
+    expected = np.arange(DEGEN_NF * DEGEN_NY * DEGEN_NX, dtype=">f4").reshape(
+        DEGEN_NF, DEGEN_NY, DEGEN_NX
+    )
+    path = tmp_path / "cube.fits"
+    fits.PrimaryHDU(expected.reshape(disk_shape)).writeto(path)
+
+    arr, _ = reader(path, target_chunk_mb=target_chunk_mb)
+
+    assert arr.shape == (DEGEN_NF, DEGEN_NY, DEGEN_NX)
+    # Both halves of the matrix have to bite: one block for the big target,
+    # many for the small one.
+    assert (int(np.prod(arr.numblocks)) == 1) == (target_chunk_mb == 256)
+    np.testing.assert_array_equal(arr.compute(), expected)
+
+
+@pytest.mark.parametrize("dtype", [">f4", ">f8", ">i2"])
+def test_readers_agree_byte_for_byte_across_dtypes(tmp_path, dtype: str):
+    """Each on-disk dtype survives the read natively, and both readers agree."""
+    expected = (
+        np.arange(DEGEN_NF * DEGEN_NY * DEGEN_NX)
+        .reshape(DEGEN_NF, DEGEN_NY, DEGEN_NX)
+        .astype(dtype)
+    )
+    path = tmp_path / "cube.fits"
+    fits.PrimaryHDU(expected.reshape(DEGEN_NF, 1, DEGEN_NY, DEGEN_NX)).writeto(path)
+
+    spatial, _ = read_fits_cube_dask(path, target_chunk_mb=1e-9)
+    channels, _ = read_fits_cube_channel_chunks(path, target_chunk_mb=1e-9)
+
+    assert spatial.dtype == np.dtype(dtype).newbyteorder("=")
+    np.testing.assert_array_equal(spatial.compute(), expected)
+    np.testing.assert_array_equal(channels.compute(), spatial.compute())
+
+
+def test_rmsynth_3d_from_fits_on_a_dummy_stokes_axis(
+    tmp_path, synthetic_cube: SyntheticCube
+):
+    """End-to-end on the ASKAP (n_freq, 1, ny, nx) layout with noise weighting.
+
+    The composition is where the degenerate-axis bug actually surfaced: the
+    default `weight_type="variance"` pulls in the channel-chunked reader too,
+    which asks for full y and full x on every block.
+    """
+    freq_arr_hz = synthetic_cube.freq_arr_hz
+    header = Header()
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = freq_arr_hz[0]
+    header["CDELT3"] = freq_arr_hz[1] - freq_arr_hz[0]
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+
+    for name, data in (("q", synthetic_cube.stokes_q), ("u", synthetic_cube.stokes_u)):
+        fits.PrimaryHDU(data[:, np.newaxis].astype(">f4"), header=header).writeto(
+            tmp_path / f"{name}.fits"
+        )
+
+    synth = rmsynth_3d_from_fits(
+        tmp_path / "q.fits",
+        tmp_path / "u.fits",
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=250.0,
+    )
+    fdf_cube = synth.fdf_dirty_cube.compute()
+
+    peak_rm = synth.phi_arr_radm2[np.abs(fdf_cube).argmax(axis=0)]
+    np.testing.assert_allclose(
+        peak_rm, synthetic_cube.rm_map, atol=2 * synth.fwhm_rmsf_radm2
+    )
+
+
 def test_channel_noise_from_channel_chunks_matches_whole_cube(tmp_path):
     """Per-channel noise off a channel-chunked read matches a whole-cube reduction."""
     n_freq, ny, nx = 8, 16, 16
@@ -611,6 +716,20 @@ def test_rmsynth_3d_output_chunks_stay_within_the_input_chunk_budget():
             d_phi_radm2=2.0,
         ).fdf_dirty_cube.compute(),
     )
+
+
+def test_rmsynth_3d_says_so_when_one_row_overshoots_the_budget(caplog):
+    """One FDF row is the chunking floor, so an overshoot is logged, not silent."""
+    wide = da.zeros((100, 8, 4000), chunks=(-1, 8, 4000), dtype=np.float32)
+    narrow = da.zeros((100, 64, 32), chunks=(-1, 64, 32), dtype=np.float32)
+
+    with caplog.at_level("WARNING"):
+        _match_chunks_to_fdf(narrow, narrow, n_phi_double=1000)
+    assert "One row of FDF output" not in caplog.text
+
+    with caplog.at_level("WARNING"):
+        _match_chunks_to_fdf(wide, wide, n_phi_double=1000)
+    assert "One row of FDF output" in caplog.text
 
 
 def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger():
