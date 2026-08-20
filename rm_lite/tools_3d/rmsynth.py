@@ -17,6 +17,7 @@ from rm_lite.utils.dask_io import (
     estimate_channel_noise_mad,
     estimate_stokes_i_channel_noise,
     freq_arr_hz_from_header,
+    read_fits_cube_channel_chunks,
     read_fits_cube_dask,
 )
 from rm_lite.utils.fitting import (
@@ -379,6 +380,40 @@ def _stokes_i_model_cube(
     return model, alpha, order, error, alpha_error
 
 
+def _match_chunks_to_fdf(
+    stokes_q: da.Array,
+    stokes_u: da.Array,
+    n_phi_double: int,
+) -> tuple[da.Array, da.Array]:
+    """Shrink spatial chunks so an FDF chunk costs what an input chunk costs.
+
+    A chunk's output axis is `n_phi_double` long, not `n_freq`, and complex128
+    rather than float32, so an FDF/RMSF chunk is `(n_phi_double / n_freq) * 4`
+    times its input chunk, often a factor of tens. Peak memory follows the
+    output, so the caller's input chunking is only a memory budget if the
+    spatial chunk shrinks by that same factor here.
+
+    Only ever shrinks: a caller who chunked coarsely on purpose keeps their
+    chunks when the FDF is no larger than the input.
+    """
+    n_freq = stokes_q.shape[0]
+    cy = stokes_q.chunksize[1]
+    cx = stokes_q.chunksize[2]
+    budget_bytes = n_freq * cy * cx * stokes_q.dtype.itemsize
+    out_bytes_per_pixel = n_phi_double * np.dtype(np.complex128).itemsize
+    new_cy = max(1, int(budget_bytes // (out_bytes_per_pixel * cx)))
+    if new_cy >= cy:
+        return stokes_q, stokes_u
+
+    logger.info(
+        f"Shrinking spatial chunks from {cy} to {new_cy} rows: {n_phi_double} "
+        f"Faraday depths in complex128 against {n_freq} channels in "
+        f"{stokes_q.dtype} would otherwise make each output chunk "
+        f"{cy / new_cy:.3g}x the input chunk it was sized from."
+    )
+    return stokes_q.rechunk({1: new_cy}), stokes_u.rechunk({1: new_cy})
+
+
 def rmsynth_3d(
     stokes_q: da.Array,
     stokes_u: da.Array,
@@ -408,7 +443,10 @@ def rmsynth_3d(
     frequency; otherwise the FDF stays in Q/U flux.
 
     Args:
-        stokes_q (da.Array): Stokes Q cube (n_freq, ny, nx), chunked spatially only.
+        stokes_q (da.Array): Stokes Q cube (n_freq, ny, nx), chunked spatially
+            only. Its chunking is taken as the per-chunk memory budget, and
+            spatial chunks are shrunk where the complex128 FDF output would
+            otherwise outgrow it.
         stokes_u (da.Array): Stokes U cube, same shape/chunks as `stokes_q`.
         freq_arr_hz (NDArray[np.float64]): Frequency array in Hz.
         weight_arr (NDArray[np.float64] | None, optional): Per-channel (not
@@ -489,6 +527,8 @@ def rmsynth_3d(
     phi_double_arr_radm2 = make_double_phi_arr(rmsynth_params.phi_arr_radm2)
     n_phi_double = phi_double_arr_radm2.shape[0]
     fwhm_rmsf_radm2 = get_fwhm_rmsf(rmsynth_params.lambda_sq_arr_m2).fwhm_rmsf_radm2
+
+    stokes_q, stokes_u = _match_chunks_to_fdf(stokes_q, stokes_u, n_phi_double)
 
     pol_cube = complex_pol_dask(stokes_q, stokes_u)
 
@@ -696,7 +736,16 @@ def rmsynth_3d_from_fits(
         "uniform_lsq",
         "briggs",
     ):
-        noise_arr = estimate_channel_noise_mad(stokes_q, stokes_u)
+        # Per-channel noise needs whole image planes, so it gets its own
+        # frequency-chunked read of the same files rather than a gather of the
+        # spatially chunked cubes above.
+        q_planes, _ = read_fits_cube_channel_chunks(
+            stokes_q_file, target_chunk_mb=target_chunk_mb
+        )
+        u_planes, _ = read_fits_cube_channel_chunks(
+            stokes_u_file, target_chunk_mb=target_chunk_mb
+        )
+        noise_arr = estimate_channel_noise_mad(q_planes, u_planes)
         weight_arr = 1.0 / noise_arr**2
 
     stokes_i = None
@@ -714,6 +763,12 @@ def rmsynth_3d_from_fits(
             stokes_i_error, _ = read_fits_cube_dask(
                 stokes_i_error_file, target_chunk_mb=target_chunk_mb
             )
+        elif estimate_stokes_i_noise:
+            # Same reason as the Q/U noise above: a frequency-chunked read.
+            i_planes, _ = read_fits_cube_channel_chunks(
+                stokes_i_file, target_chunk_mb=target_chunk_mb
+            )
+            stokes_i_error = estimate_stokes_i_channel_noise(i_planes)
 
     return rmsynth_3d(
         stokes_q=stokes_q,
