@@ -100,14 +100,17 @@ def _section_index(
     disk_shape: tuple[int, ...],
     freq_bounds: tuple[int, int],
     y_bounds: tuple[int, int],
-) -> tuple[int | slice, ...]:
-    """Index into a HDU's on-disk shape, dropping degenerate length-1 axes.
+) -> tuple[slice, ...]:
+    """Index into a HDU's on-disk shape, keeping degenerate length-1 axes.
 
-    An `int` drops an axis the way `np.squeeze` would; the three surviving
-    axes get the real (freq, y, x) slices, in that order.
+    Degenerate axes get `slice(0, 1)` rather than an `int`, and are dropped by
+    the reshape in `_read_fits_block`. An `int` looks like it squeezes the
+    axis, but astropy only does that when the request doesn't span the whole
+    array; a full-extent read comes back un-squeezed instead. The three
+    non-degenerate axes get the real (freq, y, x) slices, in that order.
     """
     data_slices = iter((slice(*freq_bounds), slice(*y_bounds), slice(None)))
-    return tuple(0 if size == 1 else next(data_slices) for size in disk_shape)
+    return tuple(slice(0, 1) if size == 1 else next(data_slices) for size in disk_shape)
 
 
 def _read_fits_block(
@@ -115,6 +118,7 @@ def _read_fits_block(
     freq_bounds: tuple[int, int],
     y_bounds: tuple[int, int],
 ) -> NDArray[Any]:
+    """Read one (freq, y) block of a cube, always shaped (n_freq, cy, nx)."""
     # Reopens the file per block rather than closing over one shared memmap:
     # dask.array.from_array unconditionally does `x = x.copy()` on anything
     # array-like (including a memmap-backed ndarray), and its default
@@ -128,6 +132,12 @@ def _read_fits_block(
     # block when something finally touches it.
     with fits.open(path, memmap=False) as hdul:
         block = hdul[0].section[_section_index(hdul[0].shape, freq_bounds, y_bounds)]
+    # Guaranteed 3D whatever the on-disk axis count, so callers never depend on
+    # astropy's index-dependent squeeze semantics. Free view when the block is
+    # already that shape.
+    block = block.reshape(
+        freq_bounds[1] - freq_bounds[0], y_bounds[1] - y_bounds[0], -1
+    )
     # Native byte order: FITS is big-endian on disk, and leaving the block
     # that way makes dask insert an `astype` layer on top of every read.
     return block.astype(block.dtype.newbyteorder("="), copy=False)
@@ -171,6 +181,10 @@ def read_fits_cube_dask(
     cap: a block is copied when it is materialised, and again when it is
     written out. `rm_lite.tools_3d.rmsynth.rmsynth_3d` shrinks these chunks
     further where its complex128 output would otherwise outgrow them.
+
+    That multiplier is per task, so the process peak is roughly the multiplier
+    times the number of scheduler threads. Budget for that, or run the
+    synchronous scheduler if you want the single-task number.
 
     Args:
         path (str | Path): Path to the FITS cube. Assumed axis order
@@ -315,8 +329,11 @@ def write_zarr_group(
 
 
 def _channel_mad_std_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
-    n_freq_block = block.shape[0]
-    return mad_std(block.reshape(n_freq_block, -1), axis=1, ignore_nan=True)
+    # One plane at a time rather than one `mad_std(..., axis=1)` over the whole
+    # block: `nanmedian` copies its input, so the vectorised form peaked at
+    # ~2x the block where this peaks at ~2x a single plane, for the same
+    # result and the same wall-clock.
+    return np.array([mad_std(plane, ignore_nan=True) for plane in block])
 
 
 def _channel_mad_lazy(cube: da.Array) -> da.Array:

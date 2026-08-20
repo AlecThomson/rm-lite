@@ -395,6 +395,10 @@ def _match_chunks_to_fdf(
 
     Only ever shrinks: a caller who chunked coarsely on purpose keeps their
     chunks when the FDF is no larger than the input.
+
+    One row is the floor, the same caveat `rm_lite.utils.dask_io.spatial_chunk_size`
+    carries for one band, so a wide cube with a deep Faraday-depth axis can
+    still overshoot the budget. That is logged when it happens.
     """
     n_freq = stokes_q.shape[0]
     cy = stokes_q.chunksize[1]
@@ -402,6 +406,15 @@ def _match_chunks_to_fdf(
     budget_bytes = n_freq * cy * cx * stokes_q.dtype.itemsize
     out_bytes_per_pixel = n_phi_double * np.dtype(np.complex128).itemsize
     new_cy = max(1, int(budget_bytes // (out_bytes_per_pixel * cx)))
+    row_bytes = out_bytes_per_pixel * cx
+    if row_bytes > budget_bytes:
+        logger.warning(
+            f"One row of FDF output is {row_bytes / 1024**2:.3g} MiB, "
+            f"{row_bytes / budget_bytes:.3g}x the {budget_bytes / 1024**2:.3g} MiB "
+            "input chunk it was sized from. One row is the floor, so output "
+            "chunks overshoot that budget; narrow the cube in x or coarsen "
+            "d_phi_radm2 to bring it back under."
+        )
     if new_cy >= cy:
         return stokes_q, stokes_u
 
