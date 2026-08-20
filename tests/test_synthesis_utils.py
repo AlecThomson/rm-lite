@@ -5,7 +5,7 @@ from __future__ import annotations
 import dask.array as da
 import numpy as np
 import pytest
-from matplotlib.pylab import Generator
+from numpy.random import Generator
 from numpy.typing import NDArray
 from rm_lite.utils.fitting import gaussian, gaussian_integrand
 from rm_lite.utils.synthesis import (

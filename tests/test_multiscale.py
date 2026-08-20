@@ -394,14 +394,14 @@ def test_default_scales_degeneration_warning(caplog: pytest.LogCaptureFixture) -
     The silent collapse to single-scale was the original wheel-spin; the warning
     is the shippable signal, so guard that it fires exactly when it should.
     """
-    with caplog.at_level(logging.WARNING, logger="rmtools-lite"):
+    with caplog.at_level(logging.WARNING, logger="rm-lite"):
         degenerate = _coverage_grid(744e6, 1032e6, quiet=False)  # racs_low
     assert degenerate.tolist() == [0.0]
     assert "degenerated to [0.0]" in caplog.text
     assert "multiscale_scales" in caplog.text  # names the escape hatch
 
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="rmtools-lite"):
+    with caplog.at_level(logging.WARNING, logger="rm-lite"):
         wideband = _coverage_grid(300e6, 1800e6, quiet=False)  # gmims
     assert len(wideband) > 1
     assert "degenerated" not in caplog.text
