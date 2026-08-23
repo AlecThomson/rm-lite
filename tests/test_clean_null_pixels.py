@@ -66,7 +66,9 @@ def _make_cube(*, with_blanks: bool) -> Cube:
     )
     source = amps[:, np.newaxis] * np.exp(2j * (0.3 + 25.0 * lsq))[np.newaxis, :]
     spectra = (
-        source + rng.normal(0, NOISE, source.shape) + 1j * rng.normal(0, NOISE, source.shape)
+        source
+        + rng.normal(0, NOISE, source.shape)
+        + 1j * rng.normal(0, NOISE, source.shape)
     ).astype(np.complex128)
     if with_blanks:
         spectra[:N_BLANK] = np.nan + 1j * np.nan
@@ -143,9 +145,14 @@ def _reference(
     Skipping is the only behaviour the screen changes, so this is an exact
     stand-in for the unpatched loop.
     """
-    empty = lambda arr, *args: np.zeros(arr.shape[1], dtype=bool)  # noqa: E731
-    monkeypatch.setattr(clean_mod, "_null_clean_pixels", empty)
-    monkeypatch.setattr(clean_mod, "_blank_pixels", empty)
+
+    def _screen_nothing(
+        dirty_fdf_arr_2d: NDArray[np.complex128], *_args: float
+    ) -> NDArray[np.bool_]:
+        return np.zeros(dirty_fdf_arr_2d.shape[1], dtype=bool)
+
+    monkeypatch.setattr(clean_mod, "_null_clean_pixels", _screen_nothing)
+    monkeypatch.setattr(clean_mod, "_blank_pixels", _screen_nothing)
     return _run(cube, adaptive=adaptive, multiscale=multiscale)
 
 
@@ -178,7 +185,9 @@ def test_null_pixel_screen_is_bit_identical_with_blanks(
         monkeypatch, cube, adaptive=adaptive, multiscale=multiscale
     )
     _assert_identical(screened, every_pixel, label)
-    assert np.isnan(screened.clean_fdf_arr.reshape(screened.clean_fdf_arr.shape[0], -1)[:, :N_BLANK]).all()
+    assert np.isnan(
+        screened.clean_fdf_arr.reshape(screened.clean_fdf_arr.shape[0], -1)[:, :N_BLANK]
+    ).all()
 
 
 def test_null_pixel_screen_actually_skips() -> None:
@@ -214,9 +223,9 @@ def test_blank_spectrum_does_not_crash(
         rmsf=cube.rmsf.reshape(cube.rmsf.shape[0], -1)[:, :N_BLANK][:, np.newaxis, :],
     )
     result = _run(blank_only, adaptive=adaptive, multiscale=multiscale)
-    assert np.isnan(result.clean_fdf_arr).all()
-    assert not result.clean_iter_arr.any()
-    assert not np.asarray(result.model_fdf_arr).any()
+    assert np.isnan(result.clean_fdf_arr).all(), label
+    assert not result.clean_iter_arr.any(), label
+    assert not np.asarray(result.model_fdf_arr).any(), label
 
 
 def test_multiscale_blank_spectrum_crashes_without_the_screen(
