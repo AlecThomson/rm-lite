@@ -526,6 +526,7 @@ def rmsynth_3d(
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     nufft_nthreads: int = 1,
+    reuse_rmsf: bool = True,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis on chunked Stokes Q/U cubes.
@@ -577,6 +578,12 @@ def rmsynth_3d(
             to 1 so dask parallelises across chunks without oversubscribing finufft's
             own threads (the fast config on many chunks). Set to 0 (finufft default,
             all cores) only when computing with few chunks on the synchronous scheduler.
+        reuse_rmsf (bool, optional): Within each chunk, compute one RMSF and
+            reuse it for every pixel when they all share the same channel
+            flagging, rather than running the NUFFT once per pixel for the same
+            answer. Checked per chunk, so a chunk with blanked pixels mixed in
+            still gets per-pixel RMSFs. Bit-identical at the default
+            `nufft_nthreads=1`. Defaults to True.
         log_level (int, optional): `rm_lite` logger level while chunks run;
             defaults to WARNING to silence per-chunk noise.
 
@@ -717,6 +724,7 @@ def rmsynth_3d(
                 lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
                 mask_arr=~np.isfinite(block),
                 do_fit_rmsf=False,
+                reuse_rmsf=reuse_rmsf,
                 nthreads=nufft_nthreads,
             )
         # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is
@@ -766,6 +774,7 @@ def rmsynth_3d_from_fits(
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     nufft_nthreads: int = 1,
+    reuse_rmsf: bool = True,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
@@ -804,6 +813,7 @@ def rmsynth_3d_from_fits(
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
         n_error_samples (int, optional): See `rmsynth_3d`. Defaults to 1000.
         nufft_nthreads (int, optional): See `rmsynth_3d`. Defaults to 1.
+        reuse_rmsf (bool, optional): See `rmsynth_3d`. Defaults to True.
         target_chunk_mb (float, optional): Target per-chunk memory footprint
             in MB, see `read_fits_cube_dask`. Defaults to 256.
         log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
@@ -882,5 +892,6 @@ def rmsynth_3d_from_fits(
         compute_model_error=compute_model_error,
         n_error_samples=n_error_samples,
         nufft_nthreads=nufft_nthreads,
+        reuse_rmsf=reuse_rmsf,
         log_level=log_level,
     )
