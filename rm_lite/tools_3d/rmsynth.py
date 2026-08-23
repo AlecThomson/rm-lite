@@ -93,6 +93,60 @@ class RMSynth3DResults(NamedTuple):
     cube was fitted (a supplied model has no fitted order)."""
 
 
+# A fitted Stokes I model is the denominator of the fractional-polarisation
+# correction, so a model that dips towards zero anywhere in the band multiplies
+# Q/U there by an arbitrarily large factor. A power law fitted to a spectrum
+# with no real signal does exactly that: over the 800-1800 MHz RACS band, a
+# second-order log fit to pure noise reaches a minimum of ~1e-10 for half of
+# such pixels (and can underflow to zero), giving an infinite FDF that then
+# drives RM-CLEAN to `max_iter` on that pixel.
+#
+# A genuine radio spectrum cannot vary by this much across one band: measured
+# over that range, real sources give max(model)/min(model) of ~2, and pixels
+# scraping past a 5-sigma SNR cut still stay under ~60. A model exceeding this
+# is a fit pathology rather than a spectrum, so the pixel falls back to the flat
+# model (no correction) instead.
+#
+# The span alone is not enough. A log fit to a spectrum with no signal often
+# converges on a *flat* model many orders of magnitude below the data (constant
+# term ~ -11 in log10, so ~1e-11 Jy across the band): its span is exactly 1, but
+# it is still a catastrophic divisor. Measured on the same 400 noise pixels, that
+# shape accounted for 197 of them and amplified Q/U by up to 1e13, against 4e4
+# for the flat fallback the pixel would otherwise take. So the model is also
+# required to sit within the same cap of the pixel's own mean Stokes I, which is
+# the value that fallback uses.
+#
+# This is a backstop: the primary defence is `stokes_i_snr_cut`, which needs a
+# real Stokes I error to work at all (see `rm_lite.utils.fitting.stokes_i_snr`).
+MAX_STOKES_I_MODEL_DYNAMIC_RANGE = 1.0e3
+
+
+def _model_is_usable(model: NDArray[np.float64], mean_flux: float) -> bool:
+    """Whether a fitted Stokes I model can safely divide Q/U.
+
+    Requires the model to be finite and strictly positive across the band, its
+    dynamic range to stay under `MAX_STOKES_I_MODEL_DYNAMIC_RANGE`, and its
+    level to stay within that same factor of `mean_flux`, the pixel's own mean
+    Stokes I (and the value the flat fallback would use).
+    """
+    if not np.all(np.isfinite(model)):
+        return False
+    model_min = float(np.min(model))
+    model_max = float(np.max(model))
+    if model_min <= 0.0:
+        return False
+    if model_max / model_min > MAX_STOKES_I_MODEL_DYNAMIC_RANGE:
+        return False
+    if not np.isfinite(mean_flux) or mean_flux <= 0.0:
+        # No positive flux to compare against, so no way to tell a real model
+        # from a fit that ran away. Take the fallback.
+        return False
+    return (
+        model_max / mean_flux <= MAX_STOKES_I_MODEL_DYNAMIC_RANGE
+        and mean_flux / model_min <= MAX_STOKES_I_MODEL_DYNAMIC_RANGE
+    )
+
+
 def _compute_global_params(
     freq_arr_hz: NDArray[np.float64],
     weight_arr: NDArray[np.float64],
@@ -228,7 +282,8 @@ def _fit_stokes_i_block(
     channels or SNR below `fit_options.snr_cut`; see `fit_stokes_i_model`) falls
     back to a flat model at its mean Stokes I, so it gets no spectral correction
     (its FDF is the plain Q/U FDF), and its alpha, order and errors stay NaN. A
-    pixel with no finite channels stays NaN throughout.
+    pixel whose fit produced an unusable model (see `_model_is_usable`) takes
+    that same fallback. A pixel with no finite channels stays NaN throughout.
     """
     compute_error = fit_options.compute_model_error
     i_block = arrays[0]
@@ -237,6 +292,7 @@ def _fit_stokes_i_block(
     x_arr = freq_arr_hz / ref_freq_hz
     n_out = n_freq + 2 + (n_freq + 1 if compute_error else 0)
     out = np.full((n_out, cy, cx), np.nan, dtype=np.float64)
+    n_rejected = 0
     # The 1D fitter logs per fit and per failure. At cube scale that floods, so
     # quiet it to at least ERROR whatever the caller's log_level.
     with quiet_logs(max(log_level, logging.ERROR)):
@@ -248,29 +304,52 @@ def _fit_stokes_i_block(
             ref_freq_hz,
             fit_options,
         ):
+            flat_fallback = fit is None
             if fit is not None:
                 model = fit.stokes_i_model_func(x_arr, *np.asarray(fit.popt))
-                out[:n_freq, y, x] = model
-                out[n_freq, y, x] = _alpha_at_ref(model, freq_arr_hz, ref_freq_hz)
-                out[n_freq + 1, y, x] = np.asarray(fit.popt).size - 1
-                if compute_error:
-                    # One MC draw feeds both the per-channel model error and the
-                    # alpha error (alpha of each realisation at the ref freq).
-                    samples = draw_model_samples(
-                        fit, x_arr, fit_options.n_error_samples
-                    )
-                    low, high = np.nanpercentile(samples, [16, 84], axis=0)
-                    model_error = np.abs(high - low)
-                    model_error[model_error > 1e99] = np.nan
-                    out[n_freq + 2 : 2 * n_freq + 2, y, x] = model_error
-                    alpha_samples = np.array(
-                        [_alpha_at_ref(m, freq_arr_hz, ref_freq_hz) for m in samples]
-                    )
-                    a_low, a_high = np.nanpercentile(alpha_samples, [16, 84])
-                    out[2 * n_freq + 2, y, x] = abs(a_high - a_low)
-            elif good.any():
+                mean_flux = float(np.mean(i_spec[good])) if good.any() else np.nan
+                if _model_is_usable(model, mean_flux):
+                    out[:n_freq, y, x] = model
+                    out[n_freq, y, x] = _alpha_at_ref(model, freq_arr_hz, ref_freq_hz)
+                    out[n_freq + 1, y, x] = np.asarray(fit.popt).size - 1
+                    if compute_error:
+                        # One MC draw feeds both the per-channel model error and
+                        # the alpha error (alpha of each realisation at the ref
+                        # freq).
+                        samples = draw_model_samples(
+                            fit, x_arr, fit_options.n_error_samples
+                        )
+                        low, high = np.nanpercentile(samples, [16, 84], axis=0)
+                        model_error = np.abs(high - low)
+                        model_error[model_error > 1e99] = np.nan
+                        out[n_freq + 2 : 2 * n_freq + 2, y, x] = model_error
+                        alpha_samples = np.array(
+                            [
+                                _alpha_at_ref(m, freq_arr_hz, ref_freq_hz)
+                                for m in samples
+                            ]
+                        )
+                        a_low, a_high = np.nanpercentile(alpha_samples, [16, 84])
+                        out[2 * n_freq + 2, y, x] = abs(a_high - a_low)
+                else:
+                    # An unusable model is treated as an unfitted pixel: the flat
+                    # fallback is a no-op correction, which is the right answer
+                    # for a spectrum the model could not describe.
+                    n_rejected += 1
+                    flat_fallback = True
+            if flat_fallback and good.any():
                 # Flat fallback: no correction, and alpha/order stay NaN (masked).
                 out[:n_freq, y, x] = float(np.mean(i_spec[good]))
+    if n_rejected:
+        logger.warning(
+            f"{n_rejected} of {cy * cx} pixels in this chunk fitted a Stokes I "
+            "model that was not strictly positive, spanned more than "
+            f"{MAX_STOKES_I_MODEL_DYNAMIC_RANGE:g}x across the band, or sat more "
+            "than that factor away from the pixel's own mean Stokes I; they fell "
+            "back to a flat model. Expect this when fitting pixels with no real "
+            "Stokes I signal, i.e. when `stokes_i_snr_cut` is None or has no "
+            "Stokes I error to work with."
+        )
     return out
 
 
