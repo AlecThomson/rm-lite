@@ -742,3 +742,24 @@ def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger():
     synth = rmsynth_3d(q_dask, u_dask, freq_arr_hz, d_phi_radm2=200.0)
 
     assert synth.fdf_dirty_cube.chunksize[1] == 4
+
+
+def test_write_zarr_group_rechunks_irregular_arrays(tmp_path, caplog):
+    """Irregular dask chunks must be rechunked, not silently written wrong.
+
+    A zarr array has one chunk size per axis, so writing an array whose chunks
+    differ mid-axis against `chunks[0]` would misplace every later chunk.
+    `dask.array.Array.to_zarr` guards against this; so must we, since we build
+    the zarr arrays ourselves.
+    """
+    data = np.arange(60.0).reshape(10, 6)
+    irregular = da.from_array(data, chunks=(10, 6)).rechunk(((3, 5, 2), (6,)))
+    regular = da.from_array(data, chunks=(4, 6))
+
+    store = tmp_path / "irregular.zarr"
+    with caplog.at_level("WARNING", logger="rm-lite"):
+        write_zarr_group(store, {"odd": irregular, "even": regular})
+
+    assert "irregular chunk sizes" in caplog.text
+    assert np.array_equal(np.asarray(zarr.open_array(store, path="odd")), data)
+    assert np.array_equal(np.asarray(zarr.open_array(store, path="even")), data)
