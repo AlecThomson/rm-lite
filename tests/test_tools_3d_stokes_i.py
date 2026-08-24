@@ -843,7 +843,7 @@ def test_stokes_i_coeff_cube_pads_orders_the_aic_dropped():
     coeffs = _require(result.stokes_i_coeff_cube).compute()
     order = _require(result.stokes_i_model_order_map).compute()
     assert coeffs.shape[0] == 4
-    assert result.stokes_i_coeff_names == ("flux", "alpha", "beta", "gamma")
+    assert result.stokes_i_coeff_names == ("flux", "alpha", "beta", "p3")
     # AIC chose fewer than the maximum somewhere, which is the case being tested.
     assert (order < 3).any()
     ny, nx = cube.rm_map.shape
@@ -927,12 +927,12 @@ def test_linear_fit_terms_are_named_as_polynomial_coefficients():
     [
         (1, "log", ("flux",)),
         (3, "log", ("flux", "alpha", "beta")),
-        (7, "log", ("flux", "alpha", "beta", "gamma", "delta", "p5", "p6")),
+        (5, "log", ("flux", "alpha", "beta", "p3", "p4")),
         (3, "linear", ("c0", "c1", "c2")),
     ],
 )
 def test_coefficient_names(n_coeff, fit_function, expected):
-    """Power-law terms get the radio names (falling back to p5, p6 past delta);
+    """Power-law terms get the radio names as far as they go, then p3 up;
     polynomial coefficients get neutral ones."""
     assert coefficient_names(n_coeff, fit_function) == expected
 

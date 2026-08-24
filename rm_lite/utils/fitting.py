@@ -434,25 +434,20 @@ def model_is_usable(model: NDArray[np.float64]) -> bool:
     return bool(np.all(np.isfinite(model)) and np.min(model) > 0.0)
 
 
-STOKES_I_TERM_NAMES = ("flux", "alpha", "beta", "gamma", "delta")
-"""Names of the leading power-law terms, in `popt` order."""
-
-
 def coefficient_names(
     n_coeff: int, fit_function: Literal["log", "linear"]
 ) -> tuple[str, ...]:
     """Names for `n_coeff` Stokes I model terms, in `popt` order.
 
     The power law is `I = flux * 10**(alpha*log10(x) + beta*log10(x)**2 + ...)`
-    at `x = nu/nu_ref`, so its terms are the usual radio ones. A polynomial's are
-    `c0..cN`, which are coefficients of `x**i` and not spectral indices.
+    at `x = nu/nu_ref`, so its first three terms get the usual radio names and the
+    rest are `p3` up. A polynomial's are `c0..cN`, coefficients of `x**i` rather
+    than spectral indices.
     """
     if fit_function == "linear":
         return tuple(f"c{i}" for i in range(n_coeff))
-    return tuple(
-        STOKES_I_TERM_NAMES[i] if i < len(STOKES_I_TERM_NAMES) else f"p{i}"
-        for i in range(n_coeff)
-    )
+    named = ("flux", "alpha", "beta")
+    return tuple(named[i] if i < len(named) else f"p{i}" for i in range(n_coeff))
 
 
 def pad_coefficients(coeffs: ArrayLike, n_coeff: int) -> NDArray[np.float64]:
