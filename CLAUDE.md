@@ -17,8 +17,13 @@ Use `uv run` for everything — never call `pytest`/`mypy`/`ruff` bare.
 
 ```
 uv run pytest
-uv run prek run --all-files
+uv run prek run --hook-stage manual --all-files
 ```
+
+`--hook-stage manual` because that is what CI passes
+(`.github/workflows/ci.yml`, the `prek` job). Today it runs the same hooks as
+the bare invocation, so match it rather than discover the difference the first
+time a manual-stage hook is added.
 
 Full test suite every time, not just touched modules — dask/zarr tests are slow
 but regressions there are easy to miss with partial runs.
