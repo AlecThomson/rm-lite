@@ -847,21 +847,40 @@ def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
     np.testing.assert_allclose(shared_fdf, per_pixel_fdf, atol=1e-10)
 
 
-def test_rmclean_rejects_a_2d_rmsf(synthetic_cube: SyntheticCube):
-    """Only a shared spectrum or a per-pixel cube make sense; anything else is a
-    mistake worth catching before the graph is built."""
+def test_rmclean_rejects_an_rmsf_it_cannot_use(synthetic_cube: SyntheticCube):
+    """Only a shared spectrum or a matching per-pixel cube make sense. The rest are
+    caught before the graph is built, not part-way through a CLEAN run."""
     q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
-        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
     )
-    with pytest.raises(ValueError, match="must be 1D"):
-        run_rmclean(
+    rmsf_cube = _require_cube(synth.rmsf_cube)
+
+    def clean_with(rmsf):
+        return run_rmclean(
             synth.fdf_dirty_cube,
-            synth.rmsf_arr[:, np.newaxis],
+            rmsf,
             synth.phi_arr_radm2,
             synth.phi_double_arr_radm2,
             synth.fwhm_rmsf_radm2,
             mask=MASK_THRESHOLD,
             threshold=CLEAN_THRESHOLD,
         )
+
+    # Neither one spectrum nor a cube.
+    with pytest.raises(ValueError, match="must be 1D"):
+        clean_with(synth.rmsf_arr[:, np.newaxis])
+
+    # A computed cube: the right shape, but the blocks have to stay lazy.
+    with pytest.raises(TypeError, match="must be a dask array"):
+        clean_with(rmsf_cube.compute())
+
+    # Chunked differently from the FDF, so block N of each would be different
+    # pixels.
+    with pytest.raises(ValueError, match="identical .*spatial chunking"):
+        clean_with(rmsf_cube.rechunk({1: 1, 2: 1}))
