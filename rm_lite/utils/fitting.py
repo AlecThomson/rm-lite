@@ -48,8 +48,8 @@ class StokesIFitOptions:
     n_error_samples: int = 1000
     """Monte-Carlo samples for the model error"""
     max_model_ratio: float | None = 1.0e3
-    """Largest factor a usable model may span across the band, and may sit away
-    from the spectrum's own mean; None accepts any fit. See `model_is_usable`."""
+    """Largest factor a usable model may sit away from the data in any channel;
+    None keeps only the finite-and-positive test. See `model_is_usable`."""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -405,35 +405,84 @@ def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> fl
     return float(np.mean(i_spec) * np.sqrt(n) / rms_err)
 
 
+def check_snr_cut_has_error(
+    options: StokesIFitOptions,
+    stokes_i_error_arr: NDArray[np.float64] | None,
+) -> None:
+    """Raise if `snr_cut` is set but there is no error to measure SNR against.
+
+    `stokes_i_snr` returns inf without one, so the cut silently passes every
+    spectrum and noise gets fitted as if it were signal. This is a property of
+    the call rather than of any one spectrum, so it is checked once up front:
+    a cube fails in seconds instead of an hour in.
+    """
+    if options.snr_cut is None:
+        return
+    msg = (
+        f"snr_cut={options.snr_cut} needs a Stokes I error to measure SNR "
+        "against, and none was given (or it is all zero). Pass an error, or "
+        "set snr_cut=None to fit every spectrum."
+    )
+    if stokes_i_error_arr is None:
+        raise ValueError(msg)
+    err = np.asarray(stokes_i_error_arr, dtype=np.float64)
+    if not bool(np.any(np.isfinite(err) & (err > 0))):
+        raise ValueError(msg)
+
+
 def model_is_usable(
     model: NDArray[np.float64],
-    mean_flux: float,
+    stokes_i_arr: NDArray[np.float64],
+    stokes_i_error_arr: NDArray[np.float64],
     max_ratio: float | None,
 ) -> bool:
     """Whether a fitted Stokes I model can safely divide Q/U.
 
-    Q/U are divided by the model, so a model that reaches zero anywhere in the
-    band, or that sits orders of magnitude off the data it was fitted to, blows
-    the fractional polarisation up instead of correcting it. Requires the model
-    to be finite and positive, and to stay within `max_ratio` both across the
-    band and of `mean_flux` (the spectrum's own mean, which is what the caller's
-    flat fallback uses). `max_ratio=None` skips the ratio tests.
+    Q/U are divided by the model, so a model that reaches zero, goes negative,
+    or dives orders of magnitude away from the data it was fitted to blows the
+    fractional polarisation up instead of correcting it. Each channel is
+    compared against the data in that channel, floored by the noise so channels
+    the data says nothing about stay conditioned. Comparing per channel keeps
+    this independent of how wide the band is: a real power law tracks its own
+    data at every frequency however far the spectrum falls across the band.
+    `max_ratio=None` keeps only the finite-and-positive test.
     """
-    if not np.all(np.isfinite(model)):
-        return False
-    model_min = float(np.min(model))
-    model_max = float(np.max(model))
-    if model_min <= 0.0:
+    if not np.all(np.isfinite(model)) or float(np.min(model)) <= 0.0:
         return False
     if max_ratio is None:
         return True
-    if not np.isfinite(mean_flux) or mean_flux <= 0.0:
-        # Nothing trustworthy to compare against, so the fit cannot be vetted.
+    # Below the noise the data cannot say where the model should sit, so floor
+    # by it. The residual covers an unweighted fit, where the error is all zero.
+    sigma = max(
+        float(np.sqrt(np.mean(stokes_i_error_arr**2))),
+        float(np.std(stokes_i_arr - model)),
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = model / np.maximum(np.abs(stokes_i_arr), sigma)
+    ratio = ratio[np.isfinite(ratio)]
+    if ratio.size == 0:
         return False
-    return (
-        model_max / model_min <= max_ratio
-        and model_max / mean_flux <= max_ratio
-        and mean_flux / model_min <= max_ratio
+    return bool(ratio.max() <= max_ratio and ratio.min() >= 1.0 / max_ratio)
+
+
+def flat_fit_result(
+    mean_flux: float,
+    fit_order: int,
+    fit_function: Literal["log", "linear"],
+) -> FitResult:
+    """A `FitResult` holding a flat model at `mean_flux`, with zero covariance.
+
+    With only params[0] set both `power_law` and `polynomial` give that
+    constant, so a caller that cannot use a fitted model still gets a valid one.
+    """
+    fit_func = power_law(fit_order) if fit_function == "log" else polynomial(fit_order)
+    popt = np.zeros(fit_order + 1)
+    popt[0] = mean_flux
+    return FitResult(
+        popt=popt,
+        pcov=np.zeros((fit_order + 1, fit_order + 1)),
+        stokes_i_model_func=fit_func,
+        aic=np.inf,
     )
 
 

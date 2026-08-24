@@ -7,9 +7,11 @@ import numpy as np
 import pytest
 from numpy.random import Generator
 from numpy.typing import NDArray
-from rm_lite.utils.fitting import gaussian, gaussian_integrand
+from rm_lite.utils.fitting import StokesIFitOptions, gaussian, gaussian_integrand
 from rm_lite.utils.synthesis import (
+    StokesData,
     calc_faraday_moments,
+    create_fractional_spectra,
     debias_fdf,
     freq_to_lambda2,
     lambda2_to_freq,
@@ -421,3 +423,66 @@ def test_moments_min_weight_fraction_signed():
         [plain.mom0, plain.mom1, plain.mom2],
         [floored.mom0, floored.mom1, floored.mom2],
     )
+
+
+def _stokes_data(
+    stokes_i: NDArray[np.float64],
+    stokes_i_error: NDArray[np.float64],
+    freq_arr_hz: NDArray[np.float64],
+) -> StokesData:
+    """A StokesData with flat, noiseless Q/U, so only the Stokes I fit matters."""
+    pol = np.full(freq_arr_hz.size, 0.1 + 0.0j, dtype=np.complex128)
+    return StokesData(
+        complex_pol_arr=pol,
+        complex_pol_error=np.full_like(pol, 1e-3),
+        freq_arr_hz=freq_arr_hz,
+        stokes_i_arr=stokes_i,
+        stokes_i_error_arr=stokes_i_error,
+    )
+
+
+def test_fractional_spectra_snr_cut_needs_an_error() -> None:
+    """The 1D path rejects the same silent no-op the cube path does."""
+    freq = np.linspace(800e6, 1800e6, 64)
+    stokes_i = np.full(freq.size, 1.0)
+    data = _stokes_data(stokes_i, np.zeros(freq.size), freq)
+
+    with pytest.raises(ValueError, match="needs a Stokes I error"):
+        create_fractional_spectra(data, float(freq.mean()), StokesIFitOptions())
+
+    # No cut, no requirement: an unweighted fit is fine when nothing depends on SNR.
+    result = create_fractional_spectra(
+        data, float(freq.mean()), StokesIFitOptions(snr_cut=None)
+    )
+    assert result is not None
+
+
+def test_fractional_spectra_falls_back_rather_than_raising() -> None:
+    """An unusable model is a data condition, so 1D warns and carries on.
+
+    Fitting pure noise with no cut runs the model away from the data; dividing
+    Q/U by it would give an infinite FDF, so the flat model stands in.
+    """
+    rng = np.random.default_rng(20260824)
+    freq = np.linspace(800e6, 1800e6, 125)
+    stokes_i = rng.normal(0, 0.05, freq.size) + 0.01
+    data = _stokes_data(stokes_i, np.full(freq.size, 0.05), freq)
+
+    result = create_fractional_spectra(
+        data, float(freq.mean()), StokesIFitOptions(snr_cut=None)
+    )
+    assert result is not None
+    model = result.stokes_data.stokes_i_model_arr
+    assert model is not None
+    assert np.all(np.isfinite(model))
+    assert np.allclose(model, np.mean(stokes_i)), "not the flat fallback"
+    assert np.all(np.isfinite(result.stokes_data.complex_pol_arr))
+
+    # And it is the gate doing it, not a fit that happened to come out flat.
+    ungated = create_fractional_spectra(
+        data, float(freq.mean()), StokesIFitOptions(snr_cut=None, max_model_ratio=None)
+    )
+    assert ungated is not None
+    ungated_model = ungated.stokes_data.stokes_i_model_arr
+    assert ungated_model is not None
+    assert not np.allclose(ungated_model, np.mean(stokes_i))

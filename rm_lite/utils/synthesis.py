@@ -20,10 +20,13 @@ from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
+    check_snr_cut_has_error,
     fit_fdf,
     fit_rmsf,
     fit_stokes_i_model,
+    flat_fit_result,
     gaussian_integrand,
+    model_is_usable,
     sample_model_error,
 )
 from rm_lite.utils.logging import logger
@@ -623,6 +626,8 @@ def create_fractional_spectra(
         msg = "All channels have been masked!"
         raise ValueError(msg)
 
+    check_snr_cut_has_error(fit_options, stokes_data.stokes_i_error_arr[no_nan_idx])
+
     # Apply flagging here since fitting will fail if NaNs are present
     fit_result = fit_stokes_i_model(
         freq_arr_hz=stokes_data.freq_arr_hz[no_nan_idx],
@@ -635,6 +640,28 @@ def create_fractional_spectra(
         msg = "Too few finite Stokes I channels to fit; no fractional polarization."
         logger.warning(msg)
         return None
+
+    i_good = stokes_data.stokes_i_arr[no_nan_idx]
+    model_good = fit_result.stokes_i_model_func(
+        stokes_data.freq_arr_hz[no_nan_idx] / ref_freq_hz,
+        *np.asarray(fit_result.popt),
+    )
+    if not model_is_usable(
+        model_good,
+        i_good,
+        stokes_data.stokes_i_error_arr[no_nan_idx],
+        fit_options.max_model_ratio,
+    ):
+        logger.warning(
+            "The fitted Stokes I model cannot safely divide Q/U (see "
+            "`rm_lite.utils.fitting.model_is_usable`); falling back to a flat "
+            "model at the mean Stokes I, so Q/U get no spectral correction."
+        )
+        fit_result = flat_fit_result(
+            float(np.mean(i_good)),
+            len(np.asarray(fit_result.popt)) - 1,
+            fit_options.fit_function,
+        )
 
     stokes_i_model_arr, stokes_i_model_error = sample_model_error(
         fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples

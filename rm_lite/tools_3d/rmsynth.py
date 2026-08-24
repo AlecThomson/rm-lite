@@ -23,6 +23,7 @@ from rm_lite.utils.dask_io import (
 from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
+    check_snr_cut_has_error,
     draw_model_samples,
     fit_stokes_i_model,
     model_is_usable,
@@ -150,6 +151,8 @@ class PixelFit(NamedTuple):
     x: int
     i_spec: NDArray[np.float64]
     """The pixel's Stokes I spectrum (unmasked), for the flat-model fallback."""
+    e_spec: NDArray[np.float64]
+    """The pixel's Stokes I error spectrum (unmasked), for vetting the model."""
     good: NDArray[np.bool_]
     """Finite-channel mask, for the flat-model fallback."""
     fit: FitResult | None
@@ -201,7 +204,7 @@ def _iter_pixel_fits(
                 stokes_i_error_arr=e_spec,
                 options=fit_options,
             )
-            yield PixelFit(y, x, i_spec, good, fit)
+            yield PixelFit(y, x, i_spec, e_spec, good, fit)
 
 
 def _write_model_planes(
@@ -289,7 +292,7 @@ def _fit_stokes_i_block(
     # The 1D fitter logs per fit and per failure. At cube scale that floods, so
     # quiet it to at least ERROR whatever the caller's log_level.
     with quiet_logs(max(log_level, logging.ERROR)):
-        for y, x, i_spec, good, fit in _iter_pixel_fits(
+        for y, x, i_spec, e_spec, good, fit in _iter_pixel_fits(
             i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options
         ):
             if not good.any():
@@ -300,7 +303,9 @@ def _fit_stokes_i_block(
                 continue
             popt = np.asarray(fit.popt)
             model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *popt)
-            if not model_is_usable(model, mean_flux, fit_options.max_model_ratio):
+            if not model_is_usable(
+                model[good], i_spec[good], e_spec[good], fit_options.max_model_ratio
+            ):
                 n_rejected += 1
                 _write_flat_model(out, y, x, mean_flux, n_freq)
                 continue
@@ -320,8 +325,7 @@ def _fit_stokes_i_block(
             f"{n_rejected} of {cy * cx} pixels in this chunk fitted an unusable "
             "Stokes I model and fell back to a flat one (see "
             "`rm_lite.utils.fitting.model_is_usable`). Expect this on pixels with "
-            "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None or has "
-            "no Stokes I error to work with."
+            "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None."
         )
     return out
 
@@ -370,6 +374,21 @@ def _alpha_from_model_block(
     return alpha
 
 
+def _error_to_check(
+    stokes_i_error: NDArray[np.float64] | da.Array | None,
+) -> NDArray[np.float64] | None:
+    """The part of a Stokes I error that `check_snr_cut_has_error` can inspect.
+
+    A dask cube would have to be computed to look at its values, so only its
+    presence is checked; an all-zero one still falls to the per-pixel path.
+    """
+    if stokes_i_error is None:
+        return None
+    if isinstance(stokes_i_error, da.Array):
+        return np.ones(1, dtype=np.float64)
+    return np.asarray(stokes_i_error, dtype=np.float64)
+
+
 def _split_stokes_i_error(
     stokes_i_error: NDArray[np.float64] | da.Array | None,
     chunks: tuple[tuple[int, ...], ...],
@@ -406,6 +425,7 @@ def _stokes_i_model_cube(
     fitted. `stokes_i_error` is a per-channel 1D array (n_freq,), a per-pixel
     error cube (n_freq, ny, nx), or None.
     """
+    check_snr_cut_has_error(fit_options, _error_to_check(stokes_i_error))
     err_1d, err_cube = _split_stokes_i_error(stokes_i_error, stokes_i.chunks)
 
     compute_error = fit_options.compute_model_error
@@ -526,7 +546,8 @@ def rmsynth_3d(
             Defaults to None (FDF stays in Q/U flux).
         stokes_i_error (NDArray[np.float64] | da.Array | None, optional): Stokes I
             error, per-channel (n_freq,) or per-pixel cube (n_freq, ny, nx), to
-            weight the fit. Defaults to None (unweighted, or estimated if
+            weight the fit, and to measure SNR against for `stokes_i_snr_cut`.
+            Defaults to None (unweighted, or estimated if
             `estimate_stokes_i_noise`).
         stokes_i_model (da.Array | None, optional): Pre-computed Stokes I model
             cube, used directly (no fitting). Takes precedence over `stokes_i`.
@@ -540,6 +561,8 @@ def rmsynth_3d(
         stokes_i_snr_cut (float | None, optional): Below this frequency-averaged
             Stokes I SNR a pixel falls back to a flat model (no spectral
             correction, not blanked). None fits every pixel. Fit path only.
+            Needs a Stokes I error to measure SNR against, so raises unless one
+            of `stokes_i_error` / `estimate_stokes_i_noise` is given.
             Defaults to 5.0.
         compute_model_error (bool, optional): Also compute a per-pixel model error
             cube via Monte-Carlo over the fit covariance, in the same fit pass.

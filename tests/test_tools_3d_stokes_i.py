@@ -264,6 +264,7 @@ def test_stokes_i_output_shapes():
         _chunked(cube.stokes_u),
         cube.freq_arr_hz,
         stokes_i=_chunked(cube.stokes_i),
+        estimate_stokes_i_noise=True,
         d_phi_radm2=D_PHI_RADM2,
         weight_type="uniform",
     )
@@ -608,48 +609,96 @@ def test_stokes_i_model_error_fit_order_zero():
 CAP = StokesIFitOptions().max_model_ratio
 assert CAP is not None
 
+RACS_FREQ = np.arange(800e6, 1800e6, 8e6)
+WIDE_FREQ = np.geomspace(50e6, 10e9, 125)
 
-def test_model_is_usable_accepts_a_real_spectrum() -> None:
-    """A power law over 800-1800 MHz spans ~2x and sits on its own mean."""
-    freq = np.arange(800e6, 1800e6, 8e6)
-    model = 1.0 * (freq / freq.mean()) ** -0.8
-    assert model_is_usable(model, float(model.mean()), CAP)
+
+def _power_law(
+    freq: NDArray[np.float64], alpha: float, amp: float = 1.0
+) -> NDArray[np.float64]:
+    model: NDArray[np.float64] = amp * (freq / freq.mean()) ** alpha
+    return model
 
 
 @pytest.mark.parametrize(
-    ("label", "model", "mean_flux"),
+    ("label", "freq", "alpha"),
     [
-        ("non-finite", np.array([1.0, np.nan, 1.0]), 1.0),
-        ("negative", np.array([1.0, -1.0, 1.0]), 1.0),
-        ("zero", np.array([1.0, 0.0, 1.0]), 1.0),
-        ("spans too far", np.array([1.0, 1.0 / (2 * CAP), 1.0]), 1.0),
-        # The one the dynamic-range check alone misses: a flat model many orders
-        # of magnitude below the data still divides Q/U into nonsense.
-        ("flat but microscopic", np.full(3, 1e-11), 5.0e-3),
-        ("flat but enormous", np.full(3, 1e11), 5.0e-3),
-        ("no positive flux to check against", np.ones(3), -0.01),
-        ("mean flux not finite", np.ones(3), np.nan),
+        ("RACS band, flat", RACS_FREQ, -0.8),
+        ("RACS band, steep", RACS_FREQ, -3.0),
+        # The band-spanning ratio check used to reject these outright: over
+        # 50 MHz-10 GHz a real power law spans thousands, so any cap on how far
+        # the model may travel across the band is really a cap on bandwidth.
+        ("50 MHz-10 GHz, steep", WIDE_FREQ, -1.5),
+        ("50 MHz-10 GHz, steeper", WIDE_FREQ, -2.5),
     ],
 )
-def test_model_is_usable_rejects_unusable_models(
-    label: str, model: NDArray[np.float64], mean_flux: float
+def test_model_is_usable_accepts_real_spectra(
+    label: str, freq: NDArray[np.float64], alpha: float
 ) -> None:
-    assert not model_is_usable(model, mean_flux, CAP), label
+    """A model that tracks its own data is usable however wide the band."""
+    data = _power_law(freq, alpha)
+    err = np.full(freq.size, 0.02)
+    assert model_is_usable(data, data, err, CAP), label
+
+
+def test_model_is_usable_rejects_a_model_that_dives_away_from_the_data() -> None:
+    """The pathology: pure-noise fits converge far below the data they fitted.
+
+    The model stays positive and its residual is unremarkable (it sits near
+    zero, and so does the data), so only comparing it against the data catches
+    it. Left alone it divides Q/U into an infinite FDF.
+    """
+    data = np.full(125, 0.05)
+    err = np.full(125, 0.05)
+    model = np.full(125, 1e-131)
+    assert not model_is_usable(model, data, err, CAP)
+    assert model_is_usable(model, data, err, None), "positivity alone cannot see it"
+
+
+@pytest.mark.parametrize(
+    ("label", "model"),
+    [
+        ("non-finite", np.array([1.0, np.nan, 1.0])),
+        ("negative", np.array([1.0, -1.0, 1.0])),
+        ("zero", np.array([1.0, 0.0, 1.0])),
+    ],
+)
+def test_model_is_usable_rejects_models_that_cannot_divide(
+    label: str, model: NDArray[np.float64]
+) -> None:
+    """Positivity, which no ratio cap can substitute for."""
+    data = np.ones(3)
+    err = np.full(3, 0.1)
+    assert not model_is_usable(model, data, err, CAP), label
+    assert not model_is_usable(model, data, err, None), label
+
+
+def test_model_is_usable_tolerates_a_near_zero_channel_without_errors() -> None:
+    """An unweighted fit still gets a noise floor, from its own residual.
+
+    Without one, a channel that noise happens to land on ~0 makes the
+    model/data ratio explode and rejects a perfectly good fit.
+    """
+    freq = RACS_FREQ
+    data = _power_law(freq, -0.8, amp=0.06)
+    model = data.copy()
+    data[40] = 1e-9
+    assert model_is_usable(model, data, np.zeros(freq.size), CAP)
 
 
 def test_unusable_model_takes_the_flat_fallback() -> None:
     """A rejected pixel gets a flat model at its mean I, so no correction.
 
-    Fitting pure noise with no SNR cut is what produces these: the log fit
+    Fitting near-noise with no SNR cut is what produces these: the log fit
     converges on a model orders of magnitude below the data, which would divide
     Q/U into an infinite FDF.
     """
     rng = np.random.default_rng(20260823)
-    n_freq, ny, nx = 125, 2, 3
+    n_freq, ny, nx = 125, 4, 6
     freq = np.arange(800e6, 1800e6, 8e6)[:n_freq]
-    stokes_i = rng.normal(0, 0.05, (n_freq, ny, nx))
-    # A positive mean, so the flat fallback is well defined for every pixel.
-    stokes_i += 0.2
+    # Just enough offset that every pixel mean stays positive, so the flat
+    # fallback is well defined, while the fits themselves still run away.
+    stokes_i = rng.normal(0, 0.05, (n_freq, ny, nx)) + 0.01
     q = rng.normal(0, 0.02, (n_freq, ny, nx))
     u = rng.normal(0, 0.02, (n_freq, ny, nx))
 
@@ -667,7 +716,45 @@ def test_unusable_model_takes_the_flat_fallback() -> None:
     assert np.all(np.isfinite(model))
     assert np.all(model > 0)
     assert np.all(np.isfinite(fdf))
-    # Every surviving model is commensurate with its own pixel's mean.
+
     mean_i = stokes_i.mean(axis=0)
-    assert np.all(model.max(axis=0) / mean_i <= CAP)
-    assert np.all(mean_i / model.min(axis=0) <= CAP)
+    flat = np.isclose(model.max(axis=0), model.min(axis=0))
+    assert flat.any(), "no pixel took the fallback, so it is not under test"
+    assert np.allclose(model[:, flat], mean_i[flat])
+
+
+def test_snr_cut_without_an_error_is_rejected_up_front() -> None:
+    """An SNR cut with nothing to measure SNR against is a silent no-op.
+
+    `stokes_i_snr` returns inf without an error, so every spectrum passes the
+    cut and pure noise gets fitted as signal. Caught while the graph is built,
+    not per pixel, so a cube fails in seconds.
+    """
+    n_freq, ny, nx = 32, 2, 2
+    freq = np.linspace(800e6, 1800e6, n_freq)
+    shape = (n_freq, ny, nx)
+    kwargs: dict[str, object] = {
+        "freq_arr_hz": freq,
+        "stokes_i": da.ones(shape, chunks=shape),
+        "d_phi_radm2": D_PHI_RADM2,
+        "weight_type": "uniform",
+    }
+    with pytest.raises(ValueError, match="needs a Stokes I error"):
+        rmsynth_3d(da.ones(shape, chunks=shape), da.ones(shape, chunks=shape), **kwargs)  # type: ignore[arg-type]
+
+    # All-zero is the same thing: no weight, so no SNR.
+    with pytest.raises(ValueError, match="needs a Stokes I error"):
+        rmsynth_3d(
+            da.ones(shape, chunks=shape),
+            da.ones(shape, chunks=shape),
+            stokes_i_error=np.zeros(n_freq),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    # And it is the cut that demands one, so switching it off is fine.
+    rmsynth_3d(
+        da.ones(shape, chunks=shape),
+        da.ones(shape, chunks=shape),
+        stokes_i_snr_cut=None,
+        **kwargs,  # type: ignore[arg-type]
+    )
