@@ -47,6 +47,9 @@ class StokesIFitOptions:
     """Also compute the per-pixel model error (3D fit path only)"""
     n_error_samples: int = 1000
     """Monte-Carlo samples for the model error"""
+    max_model_ratio: float | None = 1.0e3
+    """Largest factor a usable model may span across the band, and may sit away
+    from the spectrum's own mean; None accepts any fit. See `model_is_usable`."""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -57,6 +60,9 @@ class StokesIFitOptions:
             raise ValueError(msg)
         if self.n_error_samples < 1:
             msg = f"n_error_samples must be >= 1, got {self.n_error_samples}."
+            raise ValueError(msg)
+        if self.max_model_ratio is not None and self.max_model_ratio <= 1:
+            msg = f"max_model_ratio must be > 1, got {self.max_model_ratio}."
             raise ValueError(msg)
 
 
@@ -397,6 +403,38 @@ def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> fl
     if not np.isfinite(rms_err) or rms_err <= 0:
         return np.inf
     return float(np.mean(i_spec) * np.sqrt(n) / rms_err)
+
+
+def model_is_usable(
+    model: NDArray[np.float64],
+    mean_flux: float,
+    max_ratio: float | None,
+) -> bool:
+    """Whether a fitted Stokes I model can safely divide Q/U.
+
+    Q/U are divided by the model, so a model that reaches zero anywhere in the
+    band, or that sits orders of magnitude off the data it was fitted to, blows
+    the fractional polarisation up instead of correcting it. Requires the model
+    to be finite and positive, and to stay within `max_ratio` both across the
+    band and of `mean_flux` (the spectrum's own mean, which is what the caller's
+    flat fallback uses). `max_ratio=None` skips the ratio tests.
+    """
+    if not np.all(np.isfinite(model)):
+        return False
+    model_min = float(np.min(model))
+    model_max = float(np.max(model))
+    if model_min <= 0.0:
+        return False
+    if max_ratio is None:
+        return True
+    if not np.isfinite(mean_flux) or mean_flux <= 0.0:
+        # Nothing trustworthy to compare against, so the fit cannot be vetted.
+        return False
+    return (
+        model_max / model_min <= max_ratio
+        and model_max / mean_flux <= max_ratio
+        and mean_flux / model_min <= max_ratio
+    )
 
 
 def draw_model_samples(

@@ -14,13 +14,13 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
-from rm_lite.tools_3d.rmsynth import (
-    MAX_STOKES_I_MODEL_DYNAMIC_RANGE,
-    _model_is_usable,
-    rmsynth_3d,
-)
+from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.dask_io import estimate_stokes_i_channel_noise
-from rm_lite.utils.fitting import StokesIFitOptions, fit_stokes_i_model
+from rm_lite.utils.fitting import (
+    StokesIFitOptions,
+    fit_stokes_i_model,
+    model_is_usable,
+)
 from rm_lite.utils.synthesis import freq_to_lambda2
 from scipy import optimize
 
@@ -605,14 +605,15 @@ def test_stokes_i_model_error_fit_order_zero():
     assert (err_cube >= 0).all()
 
 
-CAP = MAX_STOKES_I_MODEL_DYNAMIC_RANGE
+CAP = StokesIFitOptions().max_model_ratio
+assert CAP is not None
 
 
 def test_model_is_usable_accepts_a_real_spectrum() -> None:
     """A power law over 800-1800 MHz spans ~2x and sits on its own mean."""
     freq = np.arange(800e6, 1800e6, 8e6)
     model = 1.0 * (freq / freq.mean()) ** -0.8
-    assert _model_is_usable(model, float(model.mean()))
+    assert model_is_usable(model, float(model.mean()), CAP)
 
 
 @pytest.mark.parametrize(
@@ -633,7 +634,7 @@ def test_model_is_usable_accepts_a_real_spectrum() -> None:
 def test_model_is_usable_rejects_unusable_models(
     label: str, model: NDArray[np.float64], mean_flux: float
 ) -> None:
-    assert not _model_is_usable(model, mean_flux), label
+    assert not model_is_usable(model, mean_flux, CAP), label
 
 
 def test_unusable_model_takes_the_flat_fallback() -> None:

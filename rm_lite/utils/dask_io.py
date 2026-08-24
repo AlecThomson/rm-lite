@@ -321,25 +321,13 @@ def write_zarr_group(
 ) -> None:
     """Write a set of dask arrays lazily/incrementally to a shared zarr store.
 
-    Each array is written chunk-by-chunk, so the full array is never
-    materialised in memory before writing.
-
-    Arrays that share upstream graph nodes -- e.g. the four outputs of
-    `rm_lite.tools_3d.rmclean.run_rmclean`, which all come from one per-chunk
-    `dask.delayed` call -- share that work here, so it runs once rather than
-    once per array. Getting that requires one `dask.array.store` for the whole
-    set, with blockwise fusion off, rather than a `to_zarr` per array:
-    `to_zarr` is `zarr.create` plus its own `store` call, and `store` optimises
-    the graph it captures there and then. The fuse pass inlines the shared task
-    into each consumer branch, so each captured graph carries a private copy
-    under its own key, and computing them together no longer dedupes them.
-    Because the copy is made when the `Delayed` is built, `optimize_graph` at
-    compute time cannot undo it; and re-fusing at compute time re-splits the
-    branches, so fusion has to be off for both.
-
-    Nothing is lost by that: these tasks are a whole spatial chunk of
-    RM-synthesis or RM-CLEAN each, so saving a task boundary is worth far less
-    than not redoing the chunk.
+    Written chunk-by-chunk, so no array is ever fully materialised. One
+    `dask.array.store` for the whole set with fusion off, rather than a
+    `to_zarr` per array, so arrays sharing an upstream task (the four outputs of
+    `run_rmclean` come from one `dask.delayed` call per chunk) compute it once:
+    fusion inlines that task into each consumer branch, and a per-array
+    `to_zarr` bakes the copy in when its `Delayed` is built. The lost task
+    boundary is worth far less than redoing a spatial chunk of RM-CLEAN.
 
     Args:
         store (str | Path): Path to the zarr store (a group containing one
