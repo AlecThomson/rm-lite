@@ -606,18 +606,8 @@ def test_stokes_i_model_error_fit_order_zero():
     assert (err_cube >= 0).all()
 
 
-CAP = StokesIFitOptions().max_model_ratio
-assert CAP is not None
-
 RACS_FREQ = np.arange(800e6, 1800e6, 8e6)
 WIDE_FREQ = np.geomspace(50e6, 10e9, 125)
-
-
-def _power_law(
-    freq: NDArray[np.float64], alpha: float, amp: float = 1.0
-) -> NDArray[np.float64]:
-    model: NDArray[np.float64] = amp * (freq / freq.mean()) ** alpha
-    return model
 
 
 @pytest.mark.parametrize(
@@ -625,9 +615,8 @@ def _power_law(
     [
         ("RACS band, flat", RACS_FREQ, -0.8),
         ("RACS band, steep", RACS_FREQ, -3.0),
-        # The band-spanning ratio check used to reject these outright: over
-        # 50 MHz-10 GHz a real power law spans thousands, so any cap on how far
-        # the model may travel across the band is really a cap on bandwidth.
+        # A real power law spans thousands over 50 MHz-10 GHz, so any cap on how
+        # far the model may travel across the band is really a cap on bandwidth.
         ("50 MHz-10 GHz, steep", WIDE_FREQ, -1.5),
         ("50 MHz-10 GHz, steeper", WIDE_FREQ, -2.5),
     ],
@@ -635,24 +624,8 @@ def _power_law(
 def test_model_is_usable_accepts_real_spectra(
     label: str, freq: NDArray[np.float64], alpha: float
 ) -> None:
-    """A model that tracks its own data is usable however wide the band."""
-    data = _power_law(freq, alpha)
-    err = np.full(freq.size, 0.02)
-    assert model_is_usable(data, data, err, CAP), label
-
-
-def test_model_is_usable_rejects_a_model_that_dives_away_from_the_data() -> None:
-    """The pathology: pure-noise fits converge far below the data they fitted.
-
-    The model stays positive and its residual is unremarkable (it sits near
-    zero, and so does the data), so only comparing it against the data catches
-    it. Left alone it divides Q/U into an infinite FDF.
-    """
-    data = np.full(125, 0.05)
-    err = np.full(125, 0.05)
-    model = np.full(125, 1e-131)
-    assert not model_is_usable(model, data, err, CAP)
-    assert model_is_usable(model, data, err, None), "positivity alone cannot see it"
+    """A positive model is usable however wide the band or steep the spectrum."""
+    assert model_is_usable((freq / freq.mean()) ** alpha), label
 
 
 @pytest.mark.parametrize(
@@ -666,32 +639,15 @@ def test_model_is_usable_rejects_a_model_that_dives_away_from_the_data() -> None
 def test_model_is_usable_rejects_models_that_cannot_divide(
     label: str, model: NDArray[np.float64]
 ) -> None:
-    """Positivity, which no ratio cap can substitute for."""
-    data = np.ones(3)
-    err = np.full(3, 0.1)
-    assert not model_is_usable(model, data, err, CAP), label
-    assert not model_is_usable(model, data, err, None), label
-
-
-def test_model_is_usable_tolerates_a_near_zero_channel_without_errors() -> None:
-    """An unweighted fit still gets a noise floor, from its own residual.
-
-    Without one, a channel that noise happens to land on ~0 makes the
-    model/data ratio explode and rejects a perfectly good fit.
-    """
-    freq = RACS_FREQ
-    data = _power_law(freq, -0.8, amp=0.06)
-    model = data.copy()
-    data[40] = 1e-9
-    assert model_is_usable(model, data, np.zeros(freq.size), CAP)
+    assert not model_is_usable(model), label
 
 
 def test_unusable_model_takes_the_flat_fallback() -> None:
     """A rejected pixel gets a flat model at its mean I, so no correction.
 
-    Fitting near-noise with no SNR cut is what produces these: the log fit
-    converges on a model orders of magnitude below the data, which would divide
-    Q/U into an infinite FDF.
+    Fitting near-noise with no SNR cut is what produces these: a polynomial
+    through noise dips below zero at a band edge, which would flip the sign of
+    the fractional polarisation there rather than correct it.
     """
     rng = np.random.default_rng(20260823)
     n_freq, ny, nx = 125, 4, 6
@@ -708,6 +664,7 @@ def test_unusable_model_takes_the_flat_fallback() -> None:
         freq,
         stokes_i=da.from_array(stokes_i, chunks=(n_freq, ny, nx)),
         stokes_i_snr_cut=None,
+        fit_function="linear",
         d_phi_radm2=D_PHI_RADM2,
         weight_type="uniform",
     )

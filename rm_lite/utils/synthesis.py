@@ -646,12 +646,7 @@ def create_fractional_spectra(
         stokes_data.freq_arr_hz[no_nan_idx] / ref_freq_hz,
         *np.asarray(fit_result.popt),
     )
-    if not model_is_usable(
-        model_good,
-        i_good,
-        stokes_data.stokes_i_error_arr[no_nan_idx],
-        fit_options.max_model_ratio,
-    ):
+    if not model_is_usable(model_good):
         logger.warning(
             "The fitted Stokes I model cannot safely divide Q/U (see "
             "`rm_lite.utils.fitting.model_is_usable`); falling back to a flat "

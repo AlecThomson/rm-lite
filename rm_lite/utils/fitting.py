@@ -47,9 +47,6 @@ class StokesIFitOptions:
     """Also compute the per-pixel model error (3D fit path only)"""
     n_error_samples: int = 1000
     """Monte-Carlo samples for the model error"""
-    max_model_ratio: float | None = 1.0e3
-    """Largest factor a usable model may sit away from the data in any channel;
-    None keeps only the finite-and-positive test. See `model_is_usable`."""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -60,9 +57,6 @@ class StokesIFitOptions:
             raise ValueError(msg)
         if self.n_error_samples < 1:
             msg = f"n_error_samples must be >= 1, got {self.n_error_samples}."
-            raise ValueError(msg)
-        if self.max_model_ratio is not None and self.max_model_ratio <= 1:
-            msg = f"max_model_ratio must be > 1, got {self.max_model_ratio}."
             raise ValueError(msg)
 
 
@@ -430,39 +424,14 @@ def check_snr_cut_has_error(
         raise ValueError(msg)
 
 
-def model_is_usable(
-    model: NDArray[np.float64],
-    stokes_i_arr: NDArray[np.float64],
-    stokes_i_error_arr: NDArray[np.float64],
-    max_ratio: float | None,
-) -> bool:
+def model_is_usable(model: NDArray[np.float64]) -> bool:
     """Whether a fitted Stokes I model can safely divide Q/U.
 
-    Q/U are divided by the model, so a model that reaches zero, goes negative,
-    or dives orders of magnitude away from the data it was fitted to blows the
-    fractional polarisation up instead of correcting it. Each channel is
-    compared against the data in that channel, floored by the noise so channels
-    the data says nothing about stay conditioned. Comparing per channel keeps
-    this independent of how wide the band is: a real power law tracks its own
-    data at every frequency however far the spectrum falls across the band.
-    `max_ratio=None` keeps only the finite-and-positive test.
+    Q/U are divided by the model, so one that reaches zero or goes negative
+    anywhere in the band flips or blows up the fractional polarisation instead
+    of correcting it.
     """
-    if not np.all(np.isfinite(model)) or float(np.min(model)) <= 0.0:
-        return False
-    if max_ratio is None:
-        return True
-    # Below the noise the data cannot say where the model should sit, so floor
-    # by it. The residual covers an unweighted fit, where the error is all zero.
-    sigma = max(
-        float(np.sqrt(np.mean(stokes_i_error_arr**2))),
-        float(np.std(stokes_i_arr - model)),
-    )
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = model / np.maximum(np.abs(stokes_i_arr), sigma)
-    ratio = ratio[np.isfinite(ratio)]
-    if ratio.size == 0:
-        return False
-    return bool(ratio.max() <= max_ratio and ratio.min() >= 1.0 / max_ratio)
+    return bool(np.all(np.isfinite(model)) and np.min(model) > 0.0)
 
 
 def flat_fit_result(

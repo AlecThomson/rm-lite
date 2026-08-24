@@ -151,8 +151,6 @@ class PixelFit(NamedTuple):
     x: int
     i_spec: NDArray[np.float64]
     """The pixel's Stokes I spectrum (unmasked), for the flat-model fallback."""
-    e_spec: NDArray[np.float64]
-    """The pixel's Stokes I error spectrum (unmasked), for vetting the model."""
     good: NDArray[np.bool_]
     """Finite-channel mask, for the flat-model fallback."""
     fit: FitResult | None
@@ -204,7 +202,7 @@ def _iter_pixel_fits(
                 stokes_i_error_arr=e_spec,
                 options=fit_options,
             )
-            yield PixelFit(y, x, i_spec, e_spec, good, fit)
+            yield PixelFit(y, x, i_spec, good, fit)
 
 
 def _write_model_planes(
@@ -292,7 +290,7 @@ def _fit_stokes_i_block(
     # The 1D fitter logs per fit and per failure. At cube scale that floods, so
     # quiet it to at least ERROR whatever the caller's log_level.
     with quiet_logs(max(log_level, logging.ERROR)):
-        for y, x, i_spec, e_spec, good, fit in _iter_pixel_fits(
+        for y, x, i_spec, good, fit in _iter_pixel_fits(
             i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options
         ):
             if not good.any():
@@ -303,9 +301,7 @@ def _fit_stokes_i_block(
                 continue
             popt = np.asarray(fit.popt)
             model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *popt)
-            if not model_is_usable(
-                model[good], i_spec[good], e_spec[good], fit_options.max_model_ratio
-            ):
+            if not model_is_usable(model[good]):
                 n_rejected += 1
                 _write_flat_model(out, y, x, mean_flux, n_freq)
                 continue

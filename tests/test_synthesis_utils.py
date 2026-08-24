@@ -460,17 +460,16 @@ def test_fractional_spectra_snr_cut_needs_an_error() -> None:
 def test_fractional_spectra_falls_back_rather_than_raising() -> None:
     """An unusable model is a data condition, so 1D warns and carries on.
 
-    Fitting pure noise with no cut runs the model away from the data; dividing
-    Q/U by it would give an infinite FDF, so the flat model stands in.
+    A polynomial through noise dips below zero at a band edge; dividing Q/U by
+    it would flip their sign there, so the flat model stands in.
     """
-    rng = np.random.default_rng(20260824)
+    rng = np.random.default_rng(20260826)
     freq = np.linspace(800e6, 1800e6, 125)
     stokes_i = rng.normal(0, 0.05, freq.size) + 0.01
     data = _stokes_data(stokes_i, np.full(freq.size, 0.05), freq)
 
-    result = create_fractional_spectra(
-        data, float(freq.mean()), StokesIFitOptions(snr_cut=None)
-    )
+    options = StokesIFitOptions(snr_cut=None, fit_function="linear")
+    result = create_fractional_spectra(data, float(freq.mean()), options)
     assert result is not None
     model = result.stokes_data.stokes_i_model_arr
     assert model is not None
@@ -478,11 +477,11 @@ def test_fractional_spectra_falls_back_rather_than_raising() -> None:
     assert np.allclose(model, np.mean(stokes_i)), "not the flat fallback"
     assert np.all(np.isfinite(result.stokes_data.complex_pol_arr))
 
-    # And it is the gate doing it, not a fit that happened to come out flat.
-    ungated = create_fractional_spectra(
-        data, float(freq.mean()), StokesIFitOptions(snr_cut=None, max_model_ratio=None)
-    )
+    # And it is the gate doing it, not a fit that happened to come out flat:
+    # the same fit on data shifted clear of zero keeps its spectral shape.
+    lifted = _stokes_data(stokes_i + 1.0, np.full(freq.size, 0.05), freq)
+    ungated = create_fractional_spectra(lifted, float(freq.mean()), options)
     assert ungated is not None
     ungated_model = ungated.stokes_data.stokes_i_model_arr
     assert ungated_model is not None
-    assert not np.allclose(ungated_model, np.mean(stokes_i))
+    assert not np.allclose(ungated_model, np.mean(stokes_i + 1.0))
