@@ -434,6 +434,50 @@ def model_is_usable(model: NDArray[np.float64]) -> bool:
     return bool(np.all(np.isfinite(model)) and np.min(model) > 0.0)
 
 
+def coefficient_names(
+    n_coeff: int, fit_function: Literal["log", "linear"]
+) -> tuple[str, ...]:
+    """Names for `n_coeff` Stokes I model terms, in `popt` order.
+
+    The power law is `I = flux * 10**(alpha*log10(x) + beta*log10(x)**2 + ...)`
+    at `x = nu/nu_ref`, so its first three terms get the usual radio names and the
+    rest are `p3` up. A polynomial's are `c0..cN`, coefficients of `x**i` rather
+    than spectral indices.
+    """
+    if fit_function == "linear":
+        return tuple(f"c{i}" for i in range(n_coeff))
+    named = ("flux", "alpha", "beta")
+    return tuple(named[i] if i < len(named) else f"p{i}" for i in range(n_coeff))
+
+
+def pad_coefficients(coeffs: ArrayLike, n_coeff: int) -> NDArray[np.float64]:
+    """`coeffs` widened to `n_coeff` terms, zero-filling the ones the fit dropped.
+
+    A negative `fit_order` picks each pixel's order by AIC, so pixels come back
+    with different term counts. A term the fit did not use contributes nothing to
+    either model, so zero is its value rather than a gap.
+    """
+    arr = np.asarray(coeffs, dtype=np.float64)
+    if arr.size > n_coeff:
+        msg = f"Got {arr.size} coefficients, more than the {n_coeff} expected."
+        raise ValueError(msg)
+    out = np.zeros(n_coeff, dtype=np.float64)
+    out[: arr.size] = arr
+    return out
+
+
+def coefficient_errors(pcov: ArrayLike, n_coeff: int) -> NDArray[np.float64]:
+    """1-sigma marginal error per coefficient, `sqrt(diag(pcov))`, padded to `n_coeff`.
+
+    Marginal, so it ignores the off-diagonal correlations, which are strong
+    between power-law terms. To propagate the model itself use the full
+    covariance via `draw_model_samples`, not these.
+    """
+    diag = np.diag(np.asarray(pcov, dtype=np.float64))
+    with np.errstate(invalid="ignore"):
+        return pad_coefficients(np.sqrt(diag), n_coeff)
+
+
 def flat_fit_result(
     mean_flux: float,
     fit_order: int,

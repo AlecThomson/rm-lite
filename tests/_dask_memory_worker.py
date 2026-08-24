@@ -93,7 +93,11 @@ def main() -> None:
     u_dask = da.from_array(stokes_u, chunks=(-1, chunk_size, chunk_size))
 
     # rmsynth_3d builds the dask graph lazily; no heavy allocation yet.
-    synth = rmsynth_3d(q_dask, u_dask, freqs, d_phi_radm2=d_phi_radm2)
+    # per_pixel_rmsf: the RMSF cube is the largest thing the graph produces, so
+    # keep measuring the worst case rather than the default that omits it.
+    synth = rmsynth_3d(
+        q_dask, u_dask, freqs, d_phi_radm2=d_phi_radm2, per_pixel_rmsf=True
+    )
 
     # Reset the peak watermark, then snapshot live RSS, so what follows measures
     # the compute phase alone: no setup transient above it, and no interpreter

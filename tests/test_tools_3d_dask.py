@@ -77,6 +77,12 @@ def synthetic_cube() -> SyntheticCube:
     return SyntheticCube(freq_arr_hz, stokes_q, stokes_u, rm_map)
 
 
+def _require_cube(cube: da.Array | None) -> da.Array:
+    """Assert an optional result cube is populated, for the type checker."""
+    assert cube is not None
+    return cube
+
+
 def _chunked(array: NDArray[np.float64], cy: int, cx: int) -> da.Array:
     return da.from_array(array, chunks=(-1, cy, cx))
 
@@ -123,7 +129,7 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
     )
     clean = run_rmclean(
         synth.fdf_dirty_cube,
-        synth.rmsf_cube,
+        synth.rmsf_arr,
         synth.phi_arr_radm2,
         synth.phi_double_arr_radm2,
         synth.fwhm_rmsf_radm2,
@@ -138,7 +144,6 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
     )
 
     dirty_cube = synth.fdf_dirty_cube.compute()
-    rmsf_cube = synth.rmsf_cube.compute()
 
     for j in range(ny):
         for i in range(nx):
@@ -146,7 +151,7 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
                 RMSynthArrays(
                     dirty_fdf_arr=dirty_cube[:, j, i],
                     phi_arr_radm2=synth.phi_arr_radm2,
-                    rmsf_arr=rmsf_cube[:, j, i],
+                    rmsf_arr=synth.rmsf_arr,
                     phi_double_arr_radm2=synth.phi_double_arr_radm2,
                     fwhm_rmsf_arr=np.array(synth.fwhm_rmsf_radm2),
                 ),
@@ -190,7 +195,7 @@ def test_rmclean_3d_block_runs_once_per_chunk(
     )
     clean = rmclean3d_mod.run_rmclean(
         synth.fdf_dirty_cube,
-        synth.rmsf_cube,
+        synth.rmsf_arr,
         synth.phi_arr_radm2,
         synth.phi_double_arr_radm2,
         synth.fwhm_rmsf_radm2,
@@ -239,7 +244,7 @@ def test_write_zarr_group_shares_computation_across_arrays(
     )
     clean = rmclean3d_mod.run_rmclean(
         synth.fdf_dirty_cube,
-        synth.rmsf_cube,
+        synth.rmsf_arr,
         synth.phi_arr_radm2,
         synth.phi_double_arr_radm2,
         synth.fwhm_rmsf_radm2,
@@ -267,11 +272,15 @@ def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
     q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
-        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
     )
     clean = run_rmclean(
         synth.fdf_dirty_cube,
-        synth.rmsf_cube,
+        synth.rmsf_arr,
         synth.phi_arr_radm2,
         synth.phi_double_arr_radm2,
         synth.fwhm_rmsf_radm2,
@@ -310,7 +319,7 @@ def test_rmclean_3d_multiscale_smoke(synthetic_cube: SyntheticCube):
     )
     clean = run_rmclean(
         synth.fdf_dirty_cube,
-        synth.rmsf_cube,
+        synth.rmsf_arr,
         synth.phi_arr_radm2,
         synth.phi_double_arr_radm2,
         synth.fwhm_rmsf_radm2,
@@ -427,7 +436,7 @@ def test_rmclean_3d_moment_maps(synthetic_cube: SyntheticCube):
     moment_threshold = 5.0 * synth.theoretical_noise.fdf_error_noise
     clean = run_rmclean(
         synth.fdf_dirty_cube,
-        synth.rmsf_cube,
+        synth.rmsf_arr,
         synth.phi_arr_radm2,
         synth.phi_double_arr_radm2,
         synth.fwhm_rmsf_radm2,
@@ -698,9 +707,15 @@ def test_rmsynth_3d_output_chunks_stay_within_the_input_chunk_budget():
     input_chunk_bytes = np.prod(q_dask.chunksize) * q_dask.dtype.itemsize
 
     synth = rmsynth_3d(
-        q_dask, u_dask, freq_arr_hz, phi_max_radm2=100.0, d_phi_radm2=2.0
+        q_dask,
+        u_dask,
+        freq_arr_hz,
+        phi_max_radm2=100.0,
+        d_phi_radm2=2.0,
+        per_pixel_rmsf=True,
     )
 
+    assert synth.rmsf_cube is not None
     for cube in (synth.fdf_dirty_cube, synth.rmsf_cube):
         assert np.prod(cube.chunksize) * cube.dtype.itemsize <= input_chunk_bytes
     # Shrunk along y only, so each block is still one contiguous read.
@@ -763,3 +778,109 @@ def test_write_zarr_group_rechunks_irregular_arrays(tmp_path, caplog):
     assert "irregular chunk sizes" in caplog.text
     assert np.array_equal(np.asarray(zarr.open_array(store, path="odd")), data)
     assert np.array_equal(np.asarray(zarr.open_array(store, path="even")), data)
+
+
+def test_shared_rmsf_is_what_the_per_pixel_cube_holds(synthetic_cube: SyntheticCube):
+    """Every pixel of the per-pixel cube is the shared RMSF, which is the whole
+    reason the cube is not returned by default."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+
+    default = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    assert default.rmsf_cube is None
+    assert default.rmsf_arr.shape == default.phi_double_arr_radm2.shape
+
+    per_pixel = rmsynth_3d(
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
+    )
+    cube = _require_cube(per_pixel.rmsf_cube).compute()
+    ny, nx = synthetic_cube.rm_map.shape
+    assert cube.shape == (default.phi_double_arr_radm2.size, ny, nx)
+    # atol, not exact: finufft splits a batched multithreaded type-3 differently
+    # from a single transform.
+    for j in range(ny):
+        for i in range(nx):
+            np.testing.assert_allclose(cube[:, j, i], default.rmsf_arr, atol=1e-12)
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
+    synthetic_cube: SyntheticCube,
+):
+    """Handing RM-CLEAN the one shared spectrum must clean exactly as handing it a
+    cube of copies of that spectrum."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    synth = rmsynth_3d(
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
+    )
+    common = (
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+    )
+    shared = run_rmclean(
+        synth.fdf_dirty_cube,
+        synth.rmsf_arr,
+        *common,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+    )
+    per_pixel = run_rmclean(
+        synth.fdf_dirty_cube,
+        _require_cube(synth.rmsf_cube),
+        *common,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+    )
+    shared_fdf, per_pixel_fdf = compute(shared.clean_fdf_cube, per_pixel.clean_fdf_cube)
+    np.testing.assert_allclose(shared_fdf, per_pixel_fdf, atol=1e-10)
+
+
+def test_rmclean_rejects_an_rmsf_it_cannot_use(synthetic_cube: SyntheticCube):
+    """Only a shared spectrum or a matching per-pixel cube make sense. The rest are
+    caught before the graph is built, not part-way through a CLEAN run."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    synth = rmsynth_3d(
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
+    )
+    rmsf_cube = _require_cube(synth.rmsf_cube)
+
+    def clean_with(rmsf):
+        return run_rmclean(
+            synth.fdf_dirty_cube,
+            rmsf,
+            synth.phi_arr_radm2,
+            synth.phi_double_arr_radm2,
+            synth.fwhm_rmsf_radm2,
+            mask=MASK_THRESHOLD,
+            threshold=CLEAN_THRESHOLD,
+        )
+
+    # Neither one spectrum nor a cube.
+    with pytest.raises(ValueError, match="must be 1D"):
+        clean_with(synth.rmsf_arr[:, np.newaxis])
+
+    # A computed cube: the right shape, but the blocks have to stay lazy.
+    with pytest.raises(TypeError, match="must be a dask array"):
+        clean_with(rmsf_cube.compute())
+
+    # Chunked differently from the FDF, so block N of each would be different
+    # pixels.
+    with pytest.raises(ValueError, match="identical .*spatial chunking"):
+        clean_with(rmsf_cube.rechunk({1: 1, 2: 1}))
