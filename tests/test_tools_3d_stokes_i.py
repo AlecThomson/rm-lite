@@ -680,6 +680,43 @@ def test_unusable_model_takes_the_flat_fallback() -> None:
     assert np.allclose(model[:, flat], mean_i[flat])
 
 
+def test_pixel_with_no_finite_channels_stays_nan() -> None:
+    """A fully blanked Stokes I pixel gets no model at all, not a flat one.
+
+    There is no mean to fall back to, so the model column and the alpha and
+    order maps stay NaN there while its neighbours fit normally.
+    """
+    rng = np.random.default_rng(20260824)
+    n_freq, ny, nx = 64, 2, 3
+    freq = np.linspace(800e6, 1800e6, n_freq)
+    stokes_i = np.broadcast_to(
+        (freq / freq.mean())[:, None, None] ** -0.8, (n_freq, ny, nx)
+    ).copy()
+    stokes_i[:, 0, 0] = np.nan
+    q = rng.normal(0, 0.02, (n_freq, ny, nx))
+    u = rng.normal(0, 0.02, (n_freq, ny, nx))
+
+    result = rmsynth_3d(
+        da.from_array(q, chunks=(n_freq, ny, nx)),
+        da.from_array(u, chunks=(n_freq, ny, nx)),
+        freq,
+        stokes_i=da.from_array(stokes_i, chunks=(n_freq, ny, nx)),
+        stokes_i_error=np.full(n_freq, 1e-3),
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    model = np.asarray(_require(result.stokes_i_model_cube).compute())
+    alpha = np.asarray(_require(result.stokes_i_alpha_map).compute())
+
+    assert np.isnan(model[:, 0, 0]).all()
+    assert np.isnan(alpha[0, 0])
+    # Every other pixel is untouched by its blank neighbour.
+    assert np.isfinite(model[:, 0, 1:]).all()
+    assert np.isfinite(model[:, 1, :]).all()
+    assert np.isfinite(alpha[0, 1:]).all()
+    assert np.isfinite(alpha[1, :]).all()
+
+
 def test_snr_cut_without_an_error_is_rejected_up_front() -> None:
     """An SNR cut with nothing to measure SNR against is a silent no-op.
 

@@ -507,6 +507,42 @@ def test_rmsf_reuse_matches_per_pixel():
     )
 
 
+def test_rmsf_reuse_fits_one_spectrum_for_every_pixel():
+    """With `do_fit_rmsf`, sharing fits one spectrum and fans the fit out.
+
+    The FWHM and status maps still have to be filled for every pixel, and hold
+    what the per-pixel path would have fitted.
+    """
+    fake_data = make_fake_data()
+    n_freq = fake_data.lsq.size
+    ny, nx = 3, 5
+    mask_arr = np.zeros((n_freq, ny, nx), dtype=bool)
+    mask_arr[2] = True
+
+    def _fit(reuse_rmsf: bool) -> tuple[NDArray[Any], NDArray[Any]]:
+        result = get_rmsf_nufft(
+            lambda_sq_arr_m2=fake_data.lsq,
+            phi_arr_radm2=fake_data.phis,
+            weight_arr=fake_data.weights,
+            lam_sq_0_m2=fake_data.lsq_0,
+            mask_arr=mask_arr,
+            do_fit_rmsf=True,
+            reuse_rmsf=reuse_rmsf,
+            nthreads=1,
+        )
+        return np.asarray(result.fwhm_rmsf_arr), np.asarray(result.fit_status_arr)
+
+    reused_fwhm, reused_status = _fit(reuse_rmsf=True)
+    per_pixel_fwhm, per_pixel_status = _fit(reuse_rmsf=False)
+
+    assert reused_fwhm.shape == (ny, nx)
+    assert np.isfinite(reused_fwhm).all()
+    # One value, held by every pixel, and it is the per-pixel answer.
+    assert np.array_equal(reused_fwhm, np.full((ny, nx), reused_fwhm.flat[0]))
+    assert np.array_equal(reused_fwhm, per_pixel_fwhm)
+    assert np.array_equal(reused_status, per_pixel_status)
+
+
 def test_rmsf_reuse_at_default_nthreads_is_within_nufft_tolerance():
     """At finufft's default thread count the two paths agree, but not to the bit.
 
