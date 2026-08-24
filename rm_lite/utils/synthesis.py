@@ -1270,10 +1270,10 @@ def get_rmsf_nufft(
             avoid oversubscription. Defaults to 0.
         reuse_rmsf (bool, optional): Compute one RMSF and reuse it for every
             pixel when they all share the same channel flagging, instead of
-            running the NUFFT per pixel for an identical answer. Only ever takes
-            effect when that is actually true (it is checked, see below), so this
-            is an opt-out for the saving rather than an assertion about the data.
-            Defaults to True.
+            running the NUFFT per pixel for an identical answer. The check below
+            gates this regardless, so the flag can only decline a saving already
+            known to be safe; it exists to get at the per-pixel path for testing
+            and debugging. Defaults to True.
 
     Raises:
         ValueError: If the wavelength^2 and weight arrays are not the same shape.
