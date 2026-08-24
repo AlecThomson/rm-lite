@@ -24,9 +24,12 @@ from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
     check_snr_cut_has_error,
+    coefficient_errors,
+    coefficient_names,
     draw_model_samples,
     fit_stokes_i_model,
     model_is_usable,
+    pad_coefficients,
 )
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import (
@@ -49,8 +52,12 @@ class RMSynth3DResults(NamedTuple):
 
     fdf_dirty_cube: da.Array
     """Dirty FDF cube, lazy dask array of shape (n_phi, ny, nx)."""
-    rmsf_cube: da.Array
-    """RMSF cube, lazy dask array of shape (n_phi_double, ny, nx)."""
+    rmsf_arr: NDArray[np.complex128]
+    """The RMSF every pixel shares, shape (n_phi_double,), built from the
+    per-channel weights. A pixel's RMSF depends only on which channels it has
+    flagged, and flagging is per-channel rather than per-pixel, so one spectrum
+    describes the whole cube. Per-pixel blanking that `weight_arr` does not carry
+    is the exception: `per_pixel_rmsf=True` gets the exact cube for that."""
     phi_arr_radm2: NDArray[np.float64]
     """Faraday depth values in rad/m^2."""
     phi_double_arr_radm2: NDArray[np.float64]
@@ -93,6 +100,34 @@ class RMSynth3DResults(NamedTuple):
     pixel; with a fixed order it is uniform on fitted pixels. NaN where a pixel
     was not fitted (below the SNR cut or flat fallback). None unless a Stokes I
     cube was fitted (a supplied model has no fitted order)."""
+    stokes_i_coeff_cube: da.Array | None = None
+    """Fitted Stokes I model terms, shape (n_coeff, ny, nx) with
+    `n_coeff = abs(fit_order) + 1`, in `popt` order and named plane by plane in
+    `stokes_i_coeff_names`. Together with `stokes_i_ref_freq_hz` these are the
+    whole model, so it can be evaluated at any frequency without the model cube.
+    A pixel the AIC gave fewer terms than `n_coeff` has zeros in the rest, since
+    a dropped term contributes nothing (`stokes_i_model_order_map` says how many
+    were fitted). NaN where a pixel was not fitted. None unless a Stokes I cube
+    was fitted (a supplied model has no terms to report)."""
+    stokes_i_coeff_error_cube: da.Array | None = None
+    """1-sigma marginal error on each term, `sqrt(diag(pcov))`, shaped like
+    `stokes_i_coeff_cube`. Marginal, so it ignores the correlations between
+    terms, which are strong; use `compute_model_error` to propagate the model
+    itself. None on the same terms as `stokes_i_coeff_cube`."""
+    stokes_i_coeff_names: tuple[str, ...] | None = None
+    """Name of each plane of `stokes_i_coeff_cube`: ("flux", "alpha", "beta", ...)
+    for `fit_function="log"`, ("c0", "c1", ...) for "linear". None on the same
+    terms as `stokes_i_coeff_cube`."""
+    stokes_i_ref_freq_hz: float | None = None
+    """Frequency the Stokes I model terms are defined at, in Hz (the FDF's own
+    reference frequency, `lambda2_to_freq(lam_sq_0_m2)`). With `fit_function="log"`
+    the model is `flux * 10**(alpha*log10(nu/nu_ref) + beta*log10(nu/nu_ref)**2
+    + ...)`; with "linear" it is `sum(c_i * (nu/nu_ref)**i)`. None unless a Stokes
+    I cube or model was supplied."""
+    rmsf_cube: da.Array | None = None
+    """Per-pixel RMSF cube, lazy, shape (n_phi_double, ny, nx). None unless
+    `per_pixel_rmsf=True`, since it is `2 * n_phi_double / n_phi` times the FDF
+    cube and holds `rmsf_arr` in every pixel whenever flagging is per-channel."""
 
 
 def _compute_global_params(
@@ -205,54 +240,101 @@ def _iter_pixel_fits(
             yield PixelFit(y, x, i_spec, good, fit)
 
 
+class BlockPlanes(NamedTuple):
+    """Where each output of `_fit_stokes_i_block` sits in its stacked block."""
+
+    model: slice
+    alpha: int
+    order: int
+    coeff: slice
+    coeff_error: slice
+    model_error: slice | None
+    """None unless the Monte-Carlo error pass ran."""
+    alpha_error: int | None
+    """None unless the Monte-Carlo error pass ran."""
+    n_out: int
+    """Total planes in the block."""
+
+
+def _block_planes(n_freq: int, n_coeff: int, with_error: bool) -> BlockPlanes:
+    """Lay out the block `_fit_stokes_i_block` stacks its outputs into.
+
+    Everything the fit hands over for free comes first, so those planes sit in the
+    same place whether or not the Monte-Carlo error pass was asked for.
+    """
+    coeff = slice(n_freq + 2, n_freq + 2 + n_coeff)
+    coeff_error = slice(coeff.stop, coeff.stop + n_coeff)
+    model_error = (
+        slice(coeff_error.stop, coeff_error.stop + n_freq) if with_error else None
+    )
+    return BlockPlanes(
+        model=slice(0, n_freq),
+        alpha=n_freq,
+        order=n_freq + 1,
+        coeff=coeff,
+        coeff_error=coeff_error,
+        model_error=model_error,
+        alpha_error=None if model_error is None else model_error.stop,
+        n_out=coeff_error.stop if model_error is None else model_error.stop + 1,
+    )
+
+
 def _write_model_planes(
     out: NDArray[np.float64],
     y: int,
     x: int,
+    planes: BlockPlanes,
+    fit: FitResult,
     model: NDArray[np.float64],
-    n_popt: int,
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
 ) -> None:
-    """Model cube, alpha at the reference frequency, and fitted order."""
-    n_freq = freq_arr_hz.size
-    out[:n_freq, y, x] = model
-    out[n_freq, y, x] = _alpha_at_ref(model, freq_arr_hz, ref_freq_hz)
-    out[n_freq + 1, y, x] = n_popt - 1
+    """Model cube, alpha at the reference frequency, fitted order, and the fit's
+    own terms with their marginal errors."""
+    n_coeff = planes.coeff.stop - planes.coeff.start
+    popt = np.asarray(fit.popt)
+    out[planes.model, y, x] = model
+    out[planes.alpha, y, x] = _alpha_at_ref(model, freq_arr_hz, ref_freq_hz)
+    out[planes.order, y, x] = popt.size - 1
+    out[planes.coeff, y, x] = pad_coefficients(popt, n_coeff)
+    out[planes.coeff_error, y, x] = coefficient_errors(fit.pcov, n_coeff)
 
 
 def _write_error_planes(
     out: NDArray[np.float64],
     y: int,
     x: int,
+    planes: BlockPlanes,
     fit: FitResult,
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
     n_error_samples: int,
 ) -> None:
     """Per-channel model error and alpha error, from one Monte-Carlo draw."""
-    n_freq = freq_arr_hz.size
+    assert planes.model_error is not None
+    assert planes.alpha_error is not None
     samples = draw_model_samples(fit, freq_arr_hz / ref_freq_hz, n_error_samples)
     low, high = np.nanpercentile(samples, [16, 84], axis=0)
     model_error = np.abs(high - low)
     model_error[model_error > 1e99] = np.nan
-    out[n_freq + 2 : 2 * n_freq + 2, y, x] = model_error
+    out[planes.model_error, y, x] = model_error
     alpha_samples = np.array(
         [_alpha_at_ref(m, freq_arr_hz, ref_freq_hz) for m in samples]
     )
     a_low, a_high = np.nanpercentile(alpha_samples, [16, 84])
-    out[2 * n_freq + 2, y, x] = abs(a_high - a_low)
+    out[planes.alpha_error, y, x] = abs(a_high - a_low)
 
 
 def _write_flat_model(
     out: NDArray[np.float64],
     y: int,
     x: int,
+    planes: BlockPlanes,
     mean_flux: float,
-    n_freq: int,
 ) -> None:
-    """Flat model at the pixel's mean Stokes I: no correction, alpha/order NaN."""
-    out[:n_freq, y, x] = mean_flux
+    """Flat model at the pixel's mean Stokes I: no correction, everything the fit
+    would have said (alpha, order, terms, errors) stays NaN."""
+    out[planes.model, y, x] = mean_flux
 
 
 def _fit_stokes_i_block(
@@ -265,13 +347,11 @@ def _fit_stokes_i_block(
 ) -> NDArray[np.float64]:
     """Fit a Stokes I model per pixel over one spatial chunk, in a single pass.
 
-    Returns a stacked block of shape (n_out, cy, cx). Without error: planes
-    0..n_freq-1 are the model cube, plane n_freq is the fitted spectral index
-    alpha at the reference frequency, and plane n_freq+1 is the fitted polynomial
-    order (`len(popt) - 1`; `n_out = n_freq + 2`). With
-    `fit_options.compute_model_error`: planes n_freq+2..2*n_freq+1 are the 1-sigma
-    model error and plane 2*n_freq+2 is the 1-sigma alpha error
-    (`n_out = 2*n_freq + 3`). Both errors come from one Monte-Carlo over the same
+    Returns a stacked block of shape (n_out, cy, cx), laid out by `_block_planes`:
+    the model cube, the fitted spectral index alpha at the reference frequency,
+    the fitted polynomial order (`len(popt) - 1`), and the fit's own terms and
+    their marginal errors. With `fit_options.compute_model_error` a per-channel
+    model error and an alpha error follow, both from one Monte-Carlo over the same
     per-pixel fit covariance, so they cost no extra fit.
 
     `arrays` is `(i_block,)` or `(i_block, err_block)`; the error cube is
@@ -279,13 +359,15 @@ def _fit_stokes_i_block(
     finite channels or SNR below `fit_options.snr_cut`) or whose model is
     unusable (see `rm_lite.utils.fitting.model_is_usable`) falls back to a flat
     model at its mean Stokes I, so it gets no spectral correction and its alpha,
-    order and errors stay NaN. A pixel with no finite channels stays NaN.
+    order, terms and errors stay NaN. A pixel with no finite channels stays NaN.
     """
     i_block = arrays[0]
     err_block = arrays[1] if len(arrays) > 1 else None
     n_freq, cy, cx = i_block.shape
-    n_out = n_freq + 2 + (n_freq + 1 if fit_options.compute_model_error else 0)
-    out = np.full((n_out, cy, cx), np.nan, dtype=np.float64)
+    planes = _block_planes(
+        n_freq, abs(fit_options.fit_order) + 1, fit_options.compute_model_error
+    )
+    out = np.full((planes.n_out, cy, cx), np.nan, dtype=np.float64)
     n_rejected = 0
     # The 1D fitter logs per fit and per failure. At cube scale that floods, so
     # quiet it to at least ERROR whatever the caller's log_level.
@@ -297,20 +379,22 @@ def _fit_stokes_i_block(
                 continue
             mean_flux = float(np.mean(i_spec[good]))
             if fit is None:
-                _write_flat_model(out, y, x, mean_flux, n_freq)
+                _write_flat_model(out, y, x, planes, mean_flux)
                 continue
-            popt = np.asarray(fit.popt)
-            model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *popt)
+            model = fit.stokes_i_model_func(
+                freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt)
+            )
             if not model_is_usable(model[good]):
                 n_rejected += 1
-                _write_flat_model(out, y, x, mean_flux, n_freq)
+                _write_flat_model(out, y, x, planes, mean_flux)
                 continue
-            _write_model_planes(out, y, x, model, popt.size, freq_arr_hz, ref_freq_hz)
+            _write_model_planes(out, y, x, planes, fit, model, freq_arr_hz, ref_freq_hz)
             if fit_options.compute_model_error:
                 _write_error_planes(
                     out,
                     y,
                     x,
+                    planes,
                     fit,
                     freq_arr_hz,
                     ref_freq_hz,
@@ -402,6 +486,25 @@ def _split_stokes_i_error(
     return np.asarray(stokes_i_error, dtype=np.float64), None
 
 
+class StokesIFitCubes(NamedTuple):
+    """Lazy outputs of the per-pixel Stokes I fit pass, all from one `map_blocks`."""
+
+    model_cube: da.Array
+    """Model cube (n_freq, ny, nx), chunked like the Stokes I cube."""
+    alpha_map: da.Array
+    """Spectral index at the reference frequency, (ny, nx)."""
+    order_map: da.Array
+    """Fitted polynomial order, (ny, nx)."""
+    coeff_cube: da.Array
+    """Fitted model terms, (n_coeff, ny, nx)."""
+    coeff_error_cube: da.Array
+    """Marginal 1-sigma error per term, (n_coeff, ny, nx)."""
+    model_error_cube: da.Array | None
+    """Monte-Carlo model error (n_freq, ny, nx); None without `compute_model_error`."""
+    alpha_error_map: da.Array | None
+    """Monte-Carlo alpha error (ny, nx); None without `compute_model_error`."""
+
+
 def _stokes_i_model_cube(
     stokes_i: da.Array,
     stokes_i_error: NDArray[np.float64] | da.Array | None,
@@ -409,43 +512,73 @@ def _stokes_i_model_cube(
     ref_freq_hz: float,
     fit_options: StokesIFitOptions,
     log_level: int,
-) -> tuple[da.Array, da.Array, da.Array, da.Array | None, da.Array | None]:
-    """Lazy per-pixel Stokes I model cube, spectral-index map, fitted-order map,
-    and (optional) model-error cube and alpha-error map.
+) -> StokesIFitCubes:
+    """Lazy per-pixel Stokes I model cube, maps and fitted terms.
 
-    All come from one per-pixel fit pass (`_fit_stokes_i_block`): the model cube
-    is chunked like `stokes_i`; the alpha and order maps are (ny, nx); and the
-    error cube (n_freq, ny, nx) plus the alpha-error map (ny, nx) -- returned only
-    when `fit_options.compute_model_error`, else None -- reuse the same fit, so
-    they cost no extra fit. Alpha and order are NaN for pixels that were not
-    fitted. `stokes_i_error` is a per-channel 1D array (n_freq,), a per-pixel
-    error cube (n_freq, ny, nx), or None.
+    All come from one per-pixel fit pass (`_fit_stokes_i_block`), so the terms and
+    their marginal errors cost nothing beyond the fit already being run, and the
+    optional Monte-Carlo error cube and alpha error reuse the same fit rather than
+    refitting. Alpha, order and the terms are NaN for pixels that were not fitted.
+    `stokes_i_error` is a per-channel 1D array (n_freq,), a per-pixel error cube
+    (n_freq, ny, nx), or None.
     """
     check_snr_cut_has_error(fit_options, _error_to_check(stokes_i_error))
     err_1d, err_cube = _split_stokes_i_error(stokes_i_error, stokes_i.chunks)
 
-    compute_error = fit_options.compute_model_error
     n_freq = int(stokes_i.shape[0])
-    n_out = n_freq + 2 + (n_freq + 1 if compute_error else 0)
+    planes = _block_planes(
+        n_freq, abs(fit_options.fit_order) + 1, fit_options.compute_model_error
+    )
     stacked = da.map_blocks(
         _fit_stokes_i_block,
         *((stokes_i,) if err_cube is None else (stokes_i, err_cube)),
         dtype=np.float64,
-        chunks=((n_out,), stokes_i.chunks[1], stokes_i.chunks[2]),
+        chunks=((planes.n_out,), stokes_i.chunks[1], stokes_i.chunks[2]),
         freq_arr_hz=freq_arr_hz,
         ref_freq_hz=ref_freq_hz,
         err_1d=err_1d,
         fit_options=fit_options,
         log_level=log_level,
     )
-    model = stacked[:n_freq]
-    alpha = stacked[n_freq]
-    order = stacked[n_freq + 1]
-    if not compute_error:
-        return model, alpha, order, None, None
-    error = stacked[n_freq + 2 : 2 * n_freq + 2]
-    alpha_error = stacked[2 * n_freq + 2]
-    return model, alpha, order, error, alpha_error
+    return StokesIFitCubes(
+        model_cube=stacked[planes.model],
+        alpha_map=stacked[planes.alpha],
+        order_map=stacked[planes.order],
+        coeff_cube=stacked[planes.coeff],
+        coeff_error_cube=stacked[planes.coeff_error],
+        model_error_cube=(
+            None if planes.model_error is None else stacked[planes.model_error]
+        ),
+        alpha_error_map=(
+            None if planes.alpha_error is None else stacked[planes.alpha_error]
+        ),
+    )
+
+
+def _shared_rmsf(
+    rmsynth_params: RMSynthParams,
+    nthreads: int,
+    log_level: int,
+) -> NDArray[np.complex128]:
+    """The single RMSF the whole cube shares, from the per-channel weights.
+
+    Every pixel whose flagged channels are the cube's flagged channels has this
+    RMSF, and for the noise-based `weight_type`s a channel blank across the cube
+    already carries a zero weight here. It is one spectrum, so it is computed up
+    front rather than lazily per chunk.
+    """
+    with quiet_logs(log_level):
+        rmsf_result = get_rmsf_nufft(
+            lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
+            phi_arr_radm2=rmsynth_params.phi_arr_radm2,
+            weight_arr=rmsynth_params.weight_arr,
+            lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+            do_fit_rmsf=False,
+            nthreads=nthreads,
+        )
+    # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is complex128 at
+    # runtime (built from a finufft complex output).
+    return np.asarray(rmsf_result.rmsf_cube, dtype=np.complex128)
 
 
 def _match_chunks_to_fdf(
@@ -456,10 +589,11 @@ def _match_chunks_to_fdf(
     """Shrink spatial chunks so an FDF chunk costs what an input chunk costs.
 
     A chunk's output axis is `n_phi_double` long, not `n_freq`, and complex128
-    rather than float32, so an FDF/RMSF chunk is `(n_phi_double / n_freq) * 4`
-    times its input chunk, often a factor of tens. Peak memory follows the
-    output, so the caller's input chunking is only a memory budget if the
-    spatial chunk shrinks by that same factor here.
+    rather than float32, so a chunk of RMSF is `(n_phi_double / n_freq) * 4` times
+    its input chunk, often a factor of tens. That is the sizing case even without
+    `per_pixel_rmsf`, since RM-CLEAN broadcasts the shared RMSF to the same shape
+    per chunk. Peak memory follows the output, so the caller's input chunking is
+    only a memory budget if the spatial chunk shrinks by that same factor here.
 
     Only ever shrinks: a caller who chunked coarsely on purpose keeps their
     chunks when the FDF is no larger than the input.
@@ -514,6 +648,7 @@ def rmsynth_3d(
     stokes_i_snr_cut: float | None = 5.0,
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
+    per_pixel_rmsf: bool = False,
     nufft_nthreads: int = 1,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
@@ -565,6 +700,12 @@ def rmsynth_3d(
             Logs a warning about the compute coupling when enabled. Defaults to False.
         n_error_samples (int, optional): Monte-Carlo samples per pixel for
             `compute_model_error`. Defaults to 1000.
+        per_pixel_rmsf (bool, optional): Also return the per-pixel RMSF cube
+            (`rmsf_cube`) alongside the shared `rmsf_arr`. Only worth it when
+            pixels within the cube have different channels flagged and the
+            per-channel `weight_arr` does not already say so; otherwise every
+            pixel of it holds `rmsf_arr` at `2 * n_phi_double / n_phi` times the
+            cost of the FDF cube. Defaults to False.
         nufft_nthreads (int, optional): finufft OpenMP threads per chunk. Defaults
             to 1 so dask parallelises across chunks without oversubscribing finufft's
             own threads (the fast config on many chunks). Set to 0 (finufft default,
@@ -573,8 +714,9 @@ def rmsynth_3d(
             defaults to WARNING to silence per-chunk noise.
 
     Returns:
-        RMSynth3DResults: Lazy FDF cube, RMSF cube, and parameters. With a Stokes I
-            model, also the model cube and the 2D reference-flux/spectral-index maps.
+        RMSynth3DResults: Lazy FDF cube, the shared RMSF, and parameters. With a
+            Stokes I model, also the model cube, the 2D reference-flux and
+            spectral-index maps, and the fitted model terms.
     """
     if stokes_q.shape != stokes_u.shape:
         msg = f"Stokes Q and U must have the same shape. Got {stokes_q.shape} and {stokes_u.shape}."
@@ -611,6 +753,7 @@ def rmsynth_3d(
     phi_double_arr_radm2 = make_double_phi_arr(rmsynth_params.phi_arr_radm2)
     n_phi_double = phi_double_arr_radm2.shape[0]
     fwhm_rmsf_radm2 = get_fwhm_rmsf(rmsynth_params.lambda_sq_arr_m2).fwhm_rmsf_radm2
+    rmsf_arr = _shared_rmsf(rmsynth_params, nufft_nthreads, log_level)
 
     stokes_q, stokes_u = _match_chunks_to_fdf(stokes_q, stokes_u, n_phi_double)
 
@@ -627,6 +770,9 @@ def rmsynth_3d(
     alpha_map: da.Array | None = None
     alpha_error_map: da.Array | None = None
     order_map: da.Array | None = None
+    coeff_cube: da.Array | None = None
+    coeff_error_cube: da.Array | None = None
+    coeff_names: tuple[str, ...] | None = None
     if stokes_i_model is not None:
         stokes_i_model_cube = stokes_i_model.rechunk(stokes_q.chunks)
         alpha_map = da.map_blocks(
@@ -648,13 +794,7 @@ def rmsynth_3d(
                 "Monte-Carlo error sampling. Compute the error cube together with "
                 "the model/FDF in one pass to avoid recomputing the fit."
             )
-        (
-            stokes_i_model_cube,
-            alpha_map,
-            order_map,
-            stokes_i_model_error_cube,
-            alpha_error_map,
-        ) = _stokes_i_model_cube(
+        fit_cubes = _stokes_i_model_cube(
             stokes_i=stokes_i,
             stokes_i_error=stokes_i_error,
             freq_arr_hz=freq_arr_hz,
@@ -662,6 +802,14 @@ def rmsynth_3d(
             fit_options=fit_options,
             log_level=log_level,
         )
+        stokes_i_model_cube = fit_cubes.model_cube
+        alpha_map = fit_cubes.alpha_map
+        order_map = fit_cubes.order_map
+        coeff_cube = fit_cubes.coeff_cube
+        coeff_error_cube = fit_cubes.coeff_error_cube
+        coeff_names = coefficient_names(int(coeff_cube.shape[0]), fit_function)
+        stokes_i_model_error_cube = fit_cubes.model_error_cube
+        alpha_error_map = fit_cubes.alpha_error_map
 
     if stokes_i_model_cube is not None:
         pol_cube = pol_cube / stokes_i_model_cube
@@ -699,32 +847,35 @@ def rmsynth_3d(
         # Rescale fractional FDF to absolute polarised flux per pixel.
         fdf_dirty_cube = fdf_dirty_cube * ref_flux_map[np.newaxis, :, :]
 
-    def _rmsf_block(block: NDArray[np.complex128]) -> NDArray[np.complex128]:
-        _, cy, cx = block.shape
-        with quiet_logs(log_level):
-            rmsf_result = get_rmsf_nufft(
-                lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
-                phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-                weight_arr=rmsynth_params.weight_arr,
-                lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
-                mask_arr=~np.isfinite(block),
-                do_fit_rmsf=False,
-                nthreads=nufft_nthreads,
-            )
-        # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is
-        # actually complex128 at runtime (built from a finufft complex output).
-        return rmsf_result.rmsf_cube.reshape(n_phi_double, cy, cx)  # type: ignore[return-value]
+    rmsf_cube: da.Array | None = None
+    if per_pixel_rmsf:
 
-    rmsf_cube = da.map_blocks(
-        _rmsf_block,
-        pol_cube,
-        chunks=((n_phi_double,), pol_cube.chunks[1], pol_cube.chunks[2]),
-        dtype=np.complex128,
-    )
+        def _rmsf_block(block: NDArray[np.complex128]) -> NDArray[np.complex128]:
+            _, cy, cx = block.shape
+            with quiet_logs(log_level):
+                rmsf_result = get_rmsf_nufft(
+                    lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
+                    phi_arr_radm2=rmsynth_params.phi_arr_radm2,
+                    weight_arr=rmsynth_params.weight_arr,
+                    lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+                    mask_arr=~np.isfinite(block),
+                    do_fit_rmsf=False,
+                    nthreads=nufft_nthreads,
+                )
+            # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is
+            # actually complex128 at runtime (built from a finufft complex output).
+            return rmsf_result.rmsf_cube.reshape(n_phi_double, cy, cx)  # type: ignore[return-value]
+
+        rmsf_cube = da.map_blocks(
+            _rmsf_block,
+            pol_cube,
+            chunks=((n_phi_double,), pol_cube.chunks[1], pol_cube.chunks[2]),
+            dtype=np.complex128,
+        )
 
     return RMSynth3DResults(
         fdf_dirty_cube=fdf_dirty_cube,
-        rmsf_cube=rmsf_cube,
+        rmsf_arr=rmsf_arr,
         phi_arr_radm2=rmsynth_params.phi_arr_radm2,
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
@@ -736,6 +887,11 @@ def rmsynth_3d(
         stokes_i_alpha_map=alpha_map,
         stokes_i_alpha_error_map=alpha_error_map,
         stokes_i_model_order_map=order_map,
+        stokes_i_coeff_cube=coeff_cube,
+        stokes_i_coeff_error_cube=coeff_error_cube,
+        stokes_i_coeff_names=coeff_names,
+        stokes_i_ref_freq_hz=(ref_freq_hz if stokes_i_model_cube is not None else None),
+        rmsf_cube=rmsf_cube,
     )
 
 
@@ -757,6 +913,7 @@ def rmsynth_3d_from_fits(
     stokes_i_snr_cut: float | None = 5.0,
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
+    per_pixel_rmsf: bool = False,
     nufft_nthreads: int = 1,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     log_level: int = logging.WARNING,
@@ -795,13 +952,15 @@ def rmsynth_3d_from_fits(
         stokes_i_snr_cut (float | None, optional): See `rmsynth_3d`. Defaults to 5.0.
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
         n_error_samples (int, optional): See `rmsynth_3d`. Defaults to 1000.
+        per_pixel_rmsf (bool, optional): See `rmsynth_3d`. Defaults to False.
         nufft_nthreads (int, optional): See `rmsynth_3d`. Defaults to 1.
         target_chunk_mb (float, optional): Target per-chunk memory footprint
             in MB, see `read_fits_cube_dask`. Defaults to 256.
         log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
 
     Returns:
-        RMSynth3DResults: Lazy dirty FDF cube, RMSF cube, and associated parameters.
+        RMSynth3DResults: Lazy dirty FDF cube, the shared RMSF, and associated
+            parameters.
     """
     stokes_q, header_q = read_fits_cube_dask(
         stokes_q_file, target_chunk_mb=target_chunk_mb
@@ -873,6 +1032,7 @@ def rmsynth_3d_from_fits(
         stokes_i_snr_cut=stokes_i_snr_cut,
         compute_model_error=compute_model_error,
         n_error_samples=n_error_samples,
+        per_pixel_rmsf=per_pixel_rmsf,
         nufft_nthreads=nufft_nthreads,
         log_level=log_level,
     )

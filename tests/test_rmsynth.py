@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
+from rm_lite.utils.fitting import power_law
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FWHM,
@@ -291,3 +292,68 @@ def test_real_data_bad_zero(test_data_path):
         n_samples=50,
         complex_pol_error=complex_noise,
     )
+
+
+def test_stokes_i_terms_describe_the_fitted_model():
+    """The 1D `stokes_i_terms` frame is the whole Stokes I model: evaluating it at
+    the frequencies reproduces the model array the fit used."""
+    freq_arr_hz = (np.arange(744, 1032, 1) * 1e6).astype(np.float64)
+    lsq = freq_to_lambda2(freq_arr_hz)
+    ref_freq_hz = float(lambda2_to_freq(float(np.mean(lsq))))
+    flux, alpha = 3.4, -0.9
+    stokes_i = flux * (freq_arr_hz / ref_freq_hz) ** alpha
+    complex_pol = 0.4 * stokes_i * np.exp(2j * (60.0 * lsq + 0.3))
+
+    results = run_rmsynth(
+        freq_arr_hz=freq_arr_hz,
+        complex_pol_arr=complex_pol,
+        complex_pol_error=((1 + 1j) * np.full_like(freq_arr_hz, 1e-3)).astype(
+            np.complex128
+        ),
+        stokes_i_arr=stokes_i,
+        stokes_i_error_arr=np.full_like(freq_arr_hz, 1e-3),
+        fit_order=1,
+    )
+    terms = results.stokes_i_terms
+    assert terms["term_name"].to_list() == ["flux", "alpha"]
+    assert terms["fit_function"].to_list() == ["log", "log"]
+    # A pure power law, so the fitted flux and index are the input ones.
+    np.testing.assert_allclose(terms["term_value"].to_numpy(), [flux, alpha], rtol=1e-4)
+    assert (terms["term_error"].to_numpy() >= 0).all()
+
+    # ref_freq_hz is the FDF's own reference frequency, and the terms rebuild the
+    # model the fractional spectra were divided by.
+    term_ref_freq = float(terms["ref_freq_hz"][0])
+    assert np.isclose(term_ref_freq, ref_freq_hz, rtol=1e-6)
+    rebuilt = power_law(len(terms) - 1)(
+        freq_arr_hz / term_ref_freq, *terms["term_value"].to_numpy()
+    )
+    np.testing.assert_allclose(
+        rebuilt, results.stokes_i_arrs["stokes_i_model_arr"].to_numpy(), rtol=1e-3
+    )
+
+
+def test_stokes_i_terms_empty_for_a_supplied_model():
+    """Nothing was fitted when the model is handed in, so there are no terms."""
+    freq_arr_hz = (np.arange(744, 1032, 4) * 1e6).astype(np.float64)
+    lsq = freq_to_lambda2(freq_arr_hz)
+    stokes_i_model = np.full_like(freq_arr_hz, 2.0)
+    complex_pol = 0.4 * stokes_i_model * np.exp(2j * (30.0 * lsq))
+
+    results = run_rmsynth(
+        freq_arr_hz=freq_arr_hz,
+        complex_pol_arr=complex_pol,
+        complex_pol_error=((1 + 1j) * np.full_like(freq_arr_hz, 1e-3)).astype(
+            np.complex128
+        ),
+        stokes_i_model_arr=stokes_i_model,
+        stokes_i_model_error=np.full_like(freq_arr_hz, 1e-3),
+    )
+    assert results.stokes_i_terms.is_empty()
+    assert results.stokes_i_terms.columns == [
+        "term_name",
+        "term_value",
+        "term_error",
+        "ref_freq_hz",
+        "fit_function",
+    ]

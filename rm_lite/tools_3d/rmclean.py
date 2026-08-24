@@ -59,6 +59,14 @@ def _clean_block(
     log_level: int,
     multiscale_options: MultiscaleOptions | None = None,
 ) -> _RMCleanBlockResult:
+    """CLEAN one spatial chunk. `rmsf_block` is either the block's own RMSF cube
+    or the 1D RMSF every pixel shares, which is broadcast to the block here since
+    `rmclean` wants the RMSF and FDF on the same axes."""
+    if rmsf_block.ndim == 1:
+        rmsf_block = np.broadcast_to(
+            rmsf_block[:, np.newaxis, np.newaxis],
+            (rmsf_block.shape[0], *dirty_fdf_block.shape[1:]),
+        )
     with quiet_logs(log_level):
         result = rmclean(
             RMSynthArrays(
@@ -81,7 +89,7 @@ def _clean_block(
 
 def run_rmclean(
     fdf_dirty_cube: da.Array,
-    rmsf_cube: da.Array,
+    rmsf: NDArray[np.complex128] | da.Array,
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
@@ -106,8 +114,11 @@ def run_rmclean(
     Args:
         fdf_dirty_cube (da.Array): Dirty FDF cube, shape (n_phi, ny, nx),
             chunked spatially only (as produced by `rm_lite.tools_3d.rmsynth.rmsynth_3d`).
-        rmsf_cube (da.Array): RMSF cube, shape (n_phi_double, ny, nx), with the
-            same spatial chunking as `fdf_dirty_cube`.
+        rmsf (NDArray[np.complex128] | da.Array): Either the RMSF every pixel
+            shares, shape (n_phi_double,) (`RMSynth3DResults.rmsf_arr`), or a
+            per-pixel RMSF cube, shape (n_phi_double, ny, nx) with the same
+            spatial chunking as `fdf_dirty_cube` (`rmsf_cube`, only produced with
+            `per_pixel_rmsf=True`).
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-length Faraday depth
             values in rad/m^2, for the RMSF.
@@ -148,8 +159,20 @@ def run_rmclean(
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
     """
-    if fdf_dirty_cube.chunks[1:] != rmsf_cube.chunks[1:]:
-        msg = "fdf_dirty_cube and rmsf_cube must have identical spatial chunking."
+    rmsf_cube: da.Array | None = None
+    if rmsf.ndim == 3:
+        if not isinstance(rmsf, da.Array):
+            msg = "A per-pixel rmsf must be a dask array, chunked like fdf_dirty_cube."
+            raise TypeError(msg)
+        if fdf_dirty_cube.chunks[1:] != rmsf.chunks[1:]:
+            msg = (
+                "fdf_dirty_cube and a per-pixel rmsf must have identical "
+                "spatial chunking."
+            )
+            raise ValueError(msg)
+        rmsf_cube = rmsf
+    elif rmsf.ndim != 1:
+        msg = f"rmsf must be 1D (shared) or 3D (per-pixel), got {rmsf.ndim}D."
         raise ValueError(msg)
 
     clean_options = RMCleanOptions(
@@ -178,7 +201,13 @@ def run_rmclean(
     numblocks = fdf_dirty_cube.numblocks
 
     dirty_delayed = fdf_dirty_cube.to_delayed()
-    rmsf_delayed = rmsf_cube.to_delayed()
+    # A shared RMSF becomes one graph key that every block points at, rather than
+    # the same spectrum re-embedded per block or a cube holding ny*nx copies.
+    rmsf_delayed = (
+        rmsf_cube.to_delayed()
+        if rmsf_cube is not None
+        else np.full(numblocks, delayed(rmsf, pure=True), dtype=object)
+    )
 
     clean_blocks = np.empty(numblocks, dtype=object)
     model_blocks = np.empty(numblocks, dtype=object)
@@ -292,7 +321,11 @@ def run_rmclean_from_synth(
 
     return run_rmclean(
         fdf_dirty_cube=rm_synth_3d_results.fdf_dirty_cube,
-        rmsf_cube=rm_synth_3d_results.rmsf_cube,
+        rmsf=(
+            rm_synth_3d_results.rmsf_arr
+            if rm_synth_3d_results.rmsf_cube is None
+            else rm_synth_3d_results.rmsf_cube
+        ),
         phi_arr_radm2=rm_synth_3d_results.phi_arr_radm2,
         phi_double_arr_radm2=rm_synth_3d_results.phi_double_arr_radm2,
         fwhm_rmsf_radm2=rm_synth_3d_results.fwhm_rmsf_radm2,

@@ -10,7 +10,12 @@ import polars as pl
 from numpy.typing import NDArray
 from scipy import interpolate
 
-from rm_lite.utils.fitting import StokesIFitOptions
+from rm_lite.utils.fitting import (
+    FitResult,
+    StokesIFitOptions,
+    coefficient_errors,
+    coefficient_names,
+)
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FDFOptions,
@@ -38,6 +43,8 @@ class RMSynth1DResults(NamedTuple):
     """ RMSF arrays """
     stokes_i_arrs: pl.DataFrame
     """ Stokes I arrays """
+    stokes_i_terms: pl.DataFrame
+    """ Fitted Stokes I model terms, one row per term """
 
 
 rmsyth_arrs_schema = pl.Schema(
@@ -66,6 +73,45 @@ stokes_i_arrs_schema = pl.Schema(
     }
 )
 stokes_i_arrs_schema_df = stokes_i_arrs_schema.to_frame(eager=True)
+stokes_i_terms_schema = pl.Schema(
+    {
+        "term_name": pl.String,
+        "term_value": pl.Float64,
+        "term_error": pl.Float64,
+        "ref_freq_hz": pl.Float64,
+        "fit_function": pl.String,
+    }
+)
+stokes_i_terms_schema_df = stokes_i_terms_schema.to_frame(eager=True)
+
+
+def _stokes_i_terms(
+    fit_result: FitResult | None,
+    ref_freq_hz: float,
+    fit_function: Literal["log", "linear"],
+) -> pl.DataFrame:
+    """The fitted Stokes I model as one row per term.
+
+    With `fit_function="log"` the terms are the usual radio ones and the model is
+    `flux * 10**(alpha*log10(nu/nu_ref) + beta*log10(nu/nu_ref)**2 + ...)`; with
+    "linear" they are `c0..cN` of `sum(c_i * (nu/nu_ref)**i)`. `ref_freq_hz` and
+    `fit_function` ride along on every row so the frame describes the whole model
+    on its own. Empty when nothing was fitted (a supplied model, or no Stokes I).
+    """
+    if fit_result is None:
+        return stokes_i_terms_schema_df
+    popt = np.asarray(fit_result.popt, dtype=np.float64)
+    return stokes_i_terms_schema_df.vstack(
+        pl.DataFrame(
+            {
+                "term_name": list(coefficient_names(popt.size, fit_function)),
+                "term_value": popt,
+                "term_error": coefficient_errors(fit_result.pcov, popt.size),
+                "ref_freq_hz": np.full(popt.size, ref_freq_hz),
+                "fit_function": [fit_function] * popt.size,
+            }
+        )
+    )
 
 
 def run_rmsynth(
@@ -114,6 +160,9 @@ def run_rmsynth(
             fdf_parameters (pl.DataFrame): FDF parameters
             fdf_arrs (pl.DataFrame): RMSynth arrays
             rmsf_arrs (pl.DataFrame): RMSF arrays
+            stokes_i_arrs (pl.DataFrame): Stokes I arrays
+            stokes_i_terms (pl.DataFrame): Fitted Stokes I model terms, empty when
+                a model was supplied rather than fitted
     """
     stokes_data = StokesData(
         freq_arr_hz=freq_arr_hz,
@@ -181,6 +230,8 @@ def _run_rmsynth(
             fdf_parameters (pl.DataFrame): FDF parameters
             fdf_arrs (pl.DataFrame): RMSynth arrays
             rmsf_arrs (pl.DataFrame): RMSF arrays
+            stokes_i_arrs (pl.DataFrame): Stokes I arrays
+            stokes_i_terms (pl.DataFrame): Fitted Stokes I model terms
     """
 
     rmsynth_params = compute_rmsynth_params(
@@ -192,15 +243,18 @@ def _run_rmsynth(
 
     no_nan_idx = get_mask_index(stokes_data=stokes_data)
 
+    ref_freq_hz = float(lambda2_to_freq(rmsynth_params.lam_sq_0_m2))
+    fit_result: FitResult | None = None
     if not ignore_stokes_i:
         fractional_stokes_data = create_fractional_spectra(
             stokes_data=stokes_data,
-            ref_freq_hz=lambda2_to_freq(rmsynth_params.lam_sq_0_m2),
+            ref_freq_hz=ref_freq_hz,
             fit_options=fit_options,
         )
         if fractional_stokes_data is not None:
             stokes_data = fractional_stokes_data.stokes_data
             no_nan_idx = fractional_stokes_data.no_nan_idx
+            fit_result = fractional_stokes_data.fit_result
 
     # Compute after any fractional spectra have been created
     tick = time.time()
@@ -248,9 +302,7 @@ def _run_rmsynth(
                 stokes_data.stokes_i_model_arr[no_nan_idx],
             )
 
-            stokes_i_reference_flux = float(
-                stokes_i_model(lambda2_to_freq(rmsynth_params.lam_sq_0_m2))
-            )
+            stokes_i_reference_flux = float(stokes_i_model(ref_freq_hz))
         else:
             logger.warning("Using mean as reference flux")
             stokes_i_reference_flux = float(np.nanmean(stokes_data.stokes_i_model_arr))
@@ -313,4 +365,10 @@ def _run_rmsynth(
         )
     )
 
-    return RMSynth1DResults(fdf_parameters, rmsyth_arrs, rmsf_arrs, stokes_i_arrs)
+    return RMSynth1DResults(
+        fdf_parameters,
+        rmsyth_arrs,
+        rmsf_arrs,
+        stokes_i_arrs,
+        _stokes_i_terms(fit_result, ref_freq_hz, fit_options.fit_function),
+    )

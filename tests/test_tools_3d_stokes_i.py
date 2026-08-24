@@ -18,8 +18,13 @@ from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.dask_io import estimate_stokes_i_channel_noise
 from rm_lite.utils.fitting import (
     StokesIFitOptions,
+    coefficient_errors,
+    coefficient_names,
     fit_stokes_i_model,
     model_is_usable,
+    pad_coefficients,
+    polynomial,
+    power_law,
 )
 from rm_lite.utils.synthesis import freq_to_lambda2
 from scipy import optimize
@@ -186,17 +191,15 @@ def _single_pixel_fdf_and_rmsf_fwhm(
     fdf_fwhm = _half_max_fwhm(
         np.abs(result.fdf_dirty_cube.compute()[:, 0, 0]), result.phi_arr_radm2
     )
-    rmsf_fwhm = _half_max_fwhm(
-        np.abs(result.rmsf_cube.compute()[:, 0, 0]), result.phi_double_arr_radm2
-    )
+    rmsf_fwhm = _half_max_fwhm(np.abs(result.rmsf_arr), result.phi_double_arr_radm2)
     return fdf_fwhm, rmsf_fwhm
 
 
 def test_stokes_i_correction_keeps_fdf_consistent_with_rmsf():
     """A Stokes I spectral index is equivalent to reweighting the data by
     ``I(lambda^2)``, so the uncorrected FDF's *effective* RMSF is not the
-    reported ``rmsf_cube`` (which is built from the per-channel weights alone).
-    RM-CLEAN and the moments deconvolve against ``rmsf_cube``, so that mismatch
+    reported ``rmsf_arr`` (which is built from the per-channel weights alone).
+    RM-CLEAN and the moments deconvolve against ``rmsf_arr``, so that mismatch
     biases them.
 
     Dividing by the Stokes I model removes the reweighting, so the corrected FDF
@@ -752,3 +755,198 @@ def test_snr_cut_without_an_error_is_rejected_up_front() -> None:
         stokes_i_snr_cut=None,
         **kwargs,  # type: ignore[arg-type]
     )
+
+
+def test_stokes_i_coeff_cube_recovers_the_input_power_law():
+    """The fitted terms are the power law that made the cube: plane 0 is the flux
+    at the reference frequency and plane 1 is the spectral index."""
+    alpha = -1.4
+    cube = _make_cube(alpha=alpha)
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i=_chunked(cube.stokes_i),
+        stokes_i_snr_cut=None,
+        fit_order=1,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    assert result.stokes_i_coeff_names == ("flux", "alpha")
+    coeffs = _require(result.stokes_i_coeff_cube).compute()
+    ny, nx = cube.rm_map.shape
+    assert coeffs.shape == (2, ny, nx)
+
+    # The reference frequency is the FDF's, not the one the cube was built at, so
+    # the expected flux is the cube interpolated there.
+    ref_freq_hz = result.stokes_i_ref_freq_hz
+    assert ref_freq_hz is not None
+    expected_flux = np.array(
+        [
+            [
+                np.interp(ref_freq_hz, cube.freq_arr_hz, cube.stokes_i[:, j, i])
+                for i in range(nx)
+            ]
+            for j in range(ny)
+        ]
+    )
+    np.testing.assert_allclose(coeffs[0], expected_flux, rtol=1e-3)
+    np.testing.assert_allclose(coeffs[1], alpha, atol=1e-4)
+
+    errors = _require(result.stokes_i_coeff_error_cube).compute()
+    assert errors.shape == coeffs.shape
+    assert (errors >= 0).all()
+
+
+def test_stokes_i_coeff_cube_reconstructs_the_model_cube():
+    """The terms plus the reference frequency are the whole model: evaluating them
+    gives back the model cube, so the cube need never be written out."""
+    cube = _make_cube(alpha=-0.7, noise=0.01)
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i=_chunked(cube.stokes_i),
+        estimate_stokes_i_noise=True,
+        fit_order=2,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    coeffs = _require(result.stokes_i_coeff_cube).compute()
+    model = _require(result.stokes_i_model_cube).compute()
+    ref_freq_hz = result.stokes_i_ref_freq_hz
+    assert ref_freq_hz is not None
+    assert coeffs.shape[0] == 3
+
+    x = cube.freq_arr_hz / ref_freq_hz
+    ny, nx = cube.rm_map.shape
+    for j in range(ny):
+        for i in range(nx):
+            rebuilt = power_law(coeffs.shape[0] - 1)(x, *coeffs[:, j, i])
+            np.testing.assert_allclose(rebuilt, model[:, j, i], rtol=1e-8)
+
+
+def test_stokes_i_coeff_cube_pads_orders_the_aic_dropped():
+    """A negative `fit_order` picks each pixel's order, so the cube is always
+    `abs(fit_order) + 1` planes deep and dropped terms are zero, not gaps."""
+    cube = _make_cube(alpha=-1.0, noise=0.02)
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i=_chunked(cube.stokes_i),
+        estimate_stokes_i_noise=True,
+        fit_order=-3,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    coeffs = _require(result.stokes_i_coeff_cube).compute()
+    order = _require(result.stokes_i_model_order_map).compute()
+    assert coeffs.shape[0] == 4
+    assert result.stokes_i_coeff_names == ("flux", "alpha", "beta", "gamma")
+    # AIC chose fewer than the maximum somewhere, which is the case being tested.
+    assert (order < 3).any()
+    ny, nx = cube.rm_map.shape
+    for j in range(ny):
+        for i in range(nx):
+            n_fitted = int(order[j, i]) + 1
+            assert np.isfinite(coeffs[:n_fitted, j, i]).all()
+            np.testing.assert_array_equal(coeffs[n_fitted:, j, i], 0.0)
+
+
+def test_stokes_i_coeff_cube_is_nan_where_no_fit_happened():
+    """Pixels that fell back to a flat model report no terms, like their alpha."""
+    faint = [(0, 0), (2, 3)]
+    q, u, i_obs, err, freq = _cube_with_faint_pixels(faint)
+    result = rmsynth_3d(
+        _chunked(q),
+        _chunked(u),
+        freq,
+        stokes_i=_chunked(i_obs),
+        stokes_i_error=_chunked(err),
+        stokes_i_snr_cut=5.0,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+        phi_max_radm2=200.0,
+    )
+    coeffs = _require(result.stokes_i_coeff_cube).compute()
+    errors = _require(result.stokes_i_coeff_error_cube).compute()
+    faint_mask = np.zeros(coeffs.shape[1:], dtype=bool)
+    for j, i in faint:
+        faint_mask[j, i] = True
+    assert np.isnan(coeffs[:, faint_mask]).all()
+    assert np.isnan(errors[:, faint_mask]).all()
+    assert np.isfinite(coeffs[:, ~faint_mask]).all()
+
+
+def test_supplied_stokes_i_model_reports_no_terms():
+    """A model handed in was not fitted, so there is nothing to report but the
+    reference frequency it is now tied to."""
+    cube = _make_cube()
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i_model=_chunked(cube.stokes_i),
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    assert result.stokes_i_coeff_cube is None
+    assert result.stokes_i_coeff_error_cube is None
+    assert result.stokes_i_coeff_names is None
+    assert result.stokes_i_ref_freq_hz is not None
+
+
+def test_linear_fit_terms_are_named_as_polynomial_coefficients():
+    """A polynomial's terms are not spectral indices, so they are not named as if
+    they were."""
+    cube = _make_cube(alpha=-0.5)
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i=_chunked(cube.stokes_i),
+        stokes_i_snr_cut=None,
+        fit_function="linear",
+        fit_order=2,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    assert result.stokes_i_coeff_names == ("c0", "c1", "c2")
+    coeffs = _require(result.stokes_i_coeff_cube).compute()
+    model = _require(result.stokes_i_model_cube).compute()
+    ref_freq_hz = result.stokes_i_ref_freq_hz
+    assert ref_freq_hz is not None
+    x = cube.freq_arr_hz / ref_freq_hz
+    rebuilt = polynomial(2)(x, *coeffs[:, 0, 0])
+    np.testing.assert_allclose(rebuilt, model[:, 0, 0], rtol=1e-8)
+
+
+@pytest.mark.parametrize(
+    ("n_coeff", "fit_function", "expected"),
+    [
+        (1, "log", ("flux",)),
+        (3, "log", ("flux", "alpha", "beta")),
+        (7, "log", ("flux", "alpha", "beta", "gamma", "delta", "p5", "p6")),
+        (3, "linear", ("c0", "c1", "c2")),
+    ],
+)
+def test_coefficient_names(n_coeff, fit_function, expected):
+    """Power-law terms get the radio names (falling back to p5, p6 past delta);
+    polynomial coefficients get neutral ones."""
+    assert coefficient_names(n_coeff, fit_function) == expected
+
+
+def test_pad_coefficients_zero_fills_and_rejects_overflow():
+    """Dropped terms pad with zero; more terms than planes is a caller bug."""
+    np.testing.assert_array_equal(
+        pad_coefficients([2.0, -1.0], 4), [2.0, -1.0, 0.0, 0.0]
+    )
+    with pytest.raises(ValueError, match="more than the 2 expected"):
+        pad_coefficients([1.0, 2.0, 3.0], 2)
+
+
+def test_coefficient_errors_are_the_covariance_diagonal():
+    """The reported per-term error is sqrt(diag(pcov)), padded like the terms."""
+    pcov = np.array([[4.0, 1.5], [1.5, 9.0]])
+    np.testing.assert_allclose(coefficient_errors(pcov, 3), [2.0, 3.0, 0.0])
