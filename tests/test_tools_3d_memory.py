@@ -1,16 +1,18 @@
 """Peak-memory scaling test for the dask-chunked 3D RM-synthesis pipeline.
 
-Runs the pipeline in a fresh subprocess per configuration so
-`resource.getrusage(...).ru_maxrss` reports a clean per-run peak, and writes
-output via `write_zarr_group` rather than `.compute()`, since `.compute()`
-always assembles the full result in memory regardless of chunk size. See
+Runs the pipeline in a fresh subprocess per configuration, and writes output via
+`write_zarr_group` rather than `.compute()`, since `.compute()` always assembles
+the full result in memory regardless of chunk size. See
 `tests/_dask_memory_worker.py` for the worker itself.
 
-The array-path test below compares two chunkings of one cube, so it can use
-peak RSS: allocator retention inflates both sides alike. The FITS-path test
-compares two cube sizes, where that retention grows with the number of blocks
-read and swamps the effect being measured, so it uses the `tracemalloc` peak
-instead. See `tests/_fits_memory_worker.py`.
+The array-path test below compares two chunkings of one cube, so it can use peak
+RSS: allocator retention inflates both sides alike. It measures the compute
+phase specifically, via the kernel's resettable `VmHWM` watermark, since a
+process-lifetime peak also carries the setup transient and that swamps the
+small-chunk arm (see the worker's docstring). The FITS-path test compares two
+cube sizes, where retention grows with the number of blocks read and swamps the
+effect being measured, so it uses the `tracemalloc` peak instead. See
+`tests/_fits_memory_worker.py`.
 """
 
 from __future__ import annotations
