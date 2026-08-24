@@ -399,6 +399,62 @@ def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> fl
     return float(np.mean(i_spec) * np.sqrt(n) / rms_err)
 
 
+def check_snr_cut_has_error(
+    options: StokesIFitOptions,
+    stokes_i_error_arr: NDArray[np.float64] | None,
+) -> None:
+    """Raise if `snr_cut` is set but there is no error to measure SNR against.
+
+    `stokes_i_snr` returns inf without one, so the cut silently passes every
+    spectrum and noise gets fitted as if it were signal. This is a property of
+    the call rather than of any one spectrum, so it is checked once up front:
+    a cube fails in seconds instead of an hour in.
+    """
+    if options.snr_cut is None:
+        return
+    msg = (
+        f"snr_cut={options.snr_cut} needs a Stokes I error to measure SNR "
+        "against, and none was given (or it is all zero). Pass an error, or "
+        "set snr_cut=None to fit every spectrum."
+    )
+    if stokes_i_error_arr is None:
+        raise ValueError(msg)
+    err = np.asarray(stokes_i_error_arr, dtype=np.float64)
+    if not bool(np.any(np.isfinite(err) & (err > 0))):
+        raise ValueError(msg)
+
+
+def model_is_usable(model: NDArray[np.float64]) -> bool:
+    """Whether a fitted Stokes I model can safely divide Q/U.
+
+    Q/U are divided by the model, so one that reaches zero or goes negative
+    anywhere in the band flips or blows up the fractional polarisation instead
+    of correcting it.
+    """
+    return bool(np.all(np.isfinite(model)) and np.min(model) > 0.0)
+
+
+def flat_fit_result(
+    mean_flux: float,
+    fit_order: int,
+    fit_function: Literal["log", "linear"],
+) -> FitResult:
+    """A `FitResult` holding a flat model at `mean_flux`, with zero covariance.
+
+    With only params[0] set both `power_law` and `polynomial` give that
+    constant, so a caller that cannot use a fitted model still gets a valid one.
+    """
+    fit_func = power_law(fit_order) if fit_function == "log" else polynomial(fit_order)
+    popt = np.zeros(fit_order + 1)
+    popt[0] = mean_flux
+    return FitResult(
+        popt=popt,
+        pcov=np.zeros((fit_order + 1, fit_order + 1)),
+        stokes_i_model_func=fit_func,
+        aic=np.inf,
+    )
+
+
 def draw_model_samples(
     fit: FitResult,
     x_arr: NDArray[np.float64],

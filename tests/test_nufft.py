@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from time import time
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -437,3 +437,126 @@ def test_rmsf():
                 msg = f"{new=},{old=}"
                 logger.info(msg)
                 assert np.allclose(new, old, rtol=eps * 2, atol=eps * 2)
+
+
+def _rmsf_for_mask(
+    fake_data: FakeData,
+    mask_arr: NDArray[np.bool_],
+    reuse_rmsf: bool,
+    nthreads: int = 1,
+) -> NDArray[Any]:
+    # NDArray[Any]: RMSFResults.rmsf_cube is annotated float64 but is complex128
+    # at runtime, a mismatch this test has no business asserting either way.
+    #
+    # nthreads=1 by default, which is what the dask path uses: finufft's
+    # multithreaded type-3 splits the work differently for one transform than
+    # for many, so at nthreads=0 (all cores) the one-spectrum and per-pixel
+    # answers differ in the last couple of bits. See the tolerance case below.
+    return get_rmsf_nufft(
+        lambda_sq_arr_m2=fake_data.lsq,
+        phi_arr_radm2=fake_data.phis,
+        weight_arr=fake_data.weights,
+        lam_sq_0_m2=fake_data.lsq_0,
+        mask_arr=mask_arr,
+        reuse_rmsf=reuse_rmsf,
+        nthreads=nthreads,
+    ).rmsf_cube
+
+
+def test_rmsf_reuse_matches_per_pixel():
+    """Reusing one RMSF must give exactly the per-pixel answer, and only when
+    every pixel really does share the same channel flagging.
+
+    A pixel's RMSF depends only on which channels that pixel has flagged, so
+    when the flagging is uniform -- the normal case, since real flagging is
+    per-channel -- there is one distinct RMSF in the cube. Mix in a fully
+    blanked pixel and that stops being true, and the per-pixel path has to come
+    back.
+    """
+    fake_data = make_fake_data()
+    n_freq = fake_data.lsq.size
+    ny, nx = 4, 6
+
+    # Uniform flagging: same channels flagged in every pixel
+    uniform = np.zeros((n_freq, ny, nx), dtype=bool)
+    uniform[2] = True
+    uniform[7] = True
+
+    # Same, but one pixel is blanked in every channel (a mosaic edge)
+    mixed = uniform.copy()
+    mixed[:, 0, 0] = True
+
+    for label, mask_arr, expect_shared in (
+        ("uniform", uniform, True),
+        ("one blank pixel", mixed, False),
+    ):
+        flat = mask_arr.reshape(n_freq, -1)
+        shared = bool(np.array_equal(flat.all(axis=1), flat.any(axis=1)))
+        assert shared is expect_shared, label
+
+        per_pixel = _rmsf_for_mask(fake_data, mask_arr, reuse_rmsf=False)
+        reused = _rmsf_for_mask(fake_data, mask_arr, reuse_rmsf=True)
+        assert reused.shape == per_pixel.shape, label
+        assert np.array_equal(reused, per_pixel, equal_nan=True), label
+
+    # And the reuse really is a single spectrum repeated, not a coincidence
+    reused = _rmsf_for_mask(fake_data, uniform, reuse_rmsf=True)
+    flat_reused = reused.reshape(reused.shape[0], -1)
+    assert np.array_equal(
+        flat_reused, np.repeat(flat_reused[:, :1], flat_reused.shape[1], axis=1)
+    )
+
+
+def test_rmsf_reuse_fits_one_spectrum_for_every_pixel():
+    """With `do_fit_rmsf`, sharing fits one spectrum and fans the fit out.
+
+    The FWHM and status maps still have to be filled for every pixel, and hold
+    what the per-pixel path would have fitted.
+    """
+    fake_data = make_fake_data()
+    n_freq = fake_data.lsq.size
+    ny, nx = 3, 5
+    mask_arr = np.zeros((n_freq, ny, nx), dtype=bool)
+    mask_arr[2] = True
+
+    def _fit(reuse_rmsf: bool) -> tuple[NDArray[Any], NDArray[Any]]:
+        result = get_rmsf_nufft(
+            lambda_sq_arr_m2=fake_data.lsq,
+            phi_arr_radm2=fake_data.phis,
+            weight_arr=fake_data.weights,
+            lam_sq_0_m2=fake_data.lsq_0,
+            mask_arr=mask_arr,
+            do_fit_rmsf=True,
+            reuse_rmsf=reuse_rmsf,
+            nthreads=1,
+        )
+        return np.asarray(result.fwhm_rmsf_arr), np.asarray(result.fit_status_arr)
+
+    reused_fwhm, reused_status = _fit(reuse_rmsf=True)
+    per_pixel_fwhm, per_pixel_status = _fit(reuse_rmsf=False)
+
+    assert reused_fwhm.shape == (ny, nx)
+    assert np.isfinite(reused_fwhm).all()
+    # One value, held by every pixel, and it is the per-pixel answer.
+    assert np.array_equal(reused_fwhm, np.full((ny, nx), reused_fwhm.flat[0]))
+    assert np.array_equal(reused_fwhm, per_pixel_fwhm)
+    assert np.array_equal(reused_status, per_pixel_status)
+
+
+def test_rmsf_reuse_at_default_nthreads_is_within_nufft_tolerance():
+    """At finufft's default thread count the two paths agree, but not to the bit.
+
+    finufft splits a multithreaded type-3 differently for one transform than for
+    a batch of them, so the reduction order changes and the one-spectrum answer
+    lands a few ulp from the per-pixel one. That is finufft's own rounding, not
+    the reuse: nthreads=1, which is what `rmsynth_3d` uses, is exact (above).
+    The gap here is many orders of magnitude below the requested `eps` of 1e-6.
+    """
+    fake_data = make_fake_data()
+    n_freq = fake_data.lsq.size
+    uniform = np.zeros((n_freq, 4, 6), dtype=bool)
+    uniform[2] = True
+
+    per_pixel = _rmsf_for_mask(fake_data, uniform, reuse_rmsf=False, nthreads=0)
+    reused = _rmsf_for_mask(fake_data, uniform, reuse_rmsf=True, nthreads=0)
+    assert np.abs(reused - per_pixel).max() < 1e-9

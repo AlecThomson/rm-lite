@@ -23,8 +23,10 @@ from rm_lite.utils.dask_io import (
 from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
+    check_snr_cut_has_error,
     draw_model_samples,
     fit_stokes_i_model,
+    model_is_usable,
 )
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import (
@@ -203,6 +205,56 @@ def _iter_pixel_fits(
             yield PixelFit(y, x, i_spec, good, fit)
 
 
+def _write_model_planes(
+    out: NDArray[np.float64],
+    y: int,
+    x: int,
+    model: NDArray[np.float64],
+    n_popt: int,
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: float,
+) -> None:
+    """Model cube, alpha at the reference frequency, and fitted order."""
+    n_freq = freq_arr_hz.size
+    out[:n_freq, y, x] = model
+    out[n_freq, y, x] = _alpha_at_ref(model, freq_arr_hz, ref_freq_hz)
+    out[n_freq + 1, y, x] = n_popt - 1
+
+
+def _write_error_planes(
+    out: NDArray[np.float64],
+    y: int,
+    x: int,
+    fit: FitResult,
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: float,
+    n_error_samples: int,
+) -> None:
+    """Per-channel model error and alpha error, from one Monte-Carlo draw."""
+    n_freq = freq_arr_hz.size
+    samples = draw_model_samples(fit, freq_arr_hz / ref_freq_hz, n_error_samples)
+    low, high = np.nanpercentile(samples, [16, 84], axis=0)
+    model_error = np.abs(high - low)
+    model_error[model_error > 1e99] = np.nan
+    out[n_freq + 2 : 2 * n_freq + 2, y, x] = model_error
+    alpha_samples = np.array(
+        [_alpha_at_ref(m, freq_arr_hz, ref_freq_hz) for m in samples]
+    )
+    a_low, a_high = np.nanpercentile(alpha_samples, [16, 84])
+    out[2 * n_freq + 2, y, x] = abs(a_high - a_low)
+
+
+def _write_flat_model(
+    out: NDArray[np.float64],
+    y: int,
+    x: int,
+    mean_flux: float,
+    n_freq: int,
+) -> None:
+    """Flat model at the pixel's mean Stokes I: no correction, alpha/order NaN."""
+    out[:n_freq, y, x] = mean_flux
+
+
 def _fit_stokes_i_block(
     *arrays: NDArray[np.float64],
     freq_arr_hz: NDArray[np.float64],
@@ -220,57 +272,57 @@ def _fit_stokes_i_block(
     `fit_options.compute_model_error`: planes n_freq+2..2*n_freq+1 are the 1-sigma
     model error and plane 2*n_freq+2 is the 1-sigma alpha error
     (`n_out = 2*n_freq + 3`). Both errors come from one Monte-Carlo over the same
-    per-pixel fit covariance, so they cost no extra fit; when `compute_model_error`
-    is False no error work is done at all.
+    per-pixel fit covariance, so they cost no extra fit.
 
     `arrays` is `(i_block,)` or `(i_block, err_block)`; the error cube is
-    optional (see `_pixel_stokes_i_error`). A skipped pixel (too few finite
-    channels or SNR below `fit_options.snr_cut`; see `fit_stokes_i_model`) falls
-    back to a flat model at its mean Stokes I, so it gets no spectral correction
-    (its FDF is the plain Q/U FDF), and its alpha, order and errors stay NaN. A
-    pixel with no finite channels stays NaN throughout.
+    optional (see `_pixel_stokes_i_error`). A pixel that was not fitted (too few
+    finite channels or SNR below `fit_options.snr_cut`) or whose model is
+    unusable (see `rm_lite.utils.fitting.model_is_usable`) falls back to a flat
+    model at its mean Stokes I, so it gets no spectral correction and its alpha,
+    order and errors stay NaN. A pixel with no finite channels stays NaN.
     """
-    compute_error = fit_options.compute_model_error
     i_block = arrays[0]
     err_block = arrays[1] if len(arrays) > 1 else None
     n_freq, cy, cx = i_block.shape
-    x_arr = freq_arr_hz / ref_freq_hz
-    n_out = n_freq + 2 + (n_freq + 1 if compute_error else 0)
+    n_out = n_freq + 2 + (n_freq + 1 if fit_options.compute_model_error else 0)
     out = np.full((n_out, cy, cx), np.nan, dtype=np.float64)
+    n_rejected = 0
     # The 1D fitter logs per fit and per failure. At cube scale that floods, so
     # quiet it to at least ERROR whatever the caller's log_level.
     with quiet_logs(max(log_level, logging.ERROR)):
         for y, x, i_spec, good, fit in _iter_pixel_fits(
-            i_block,
-            err_block,
-            err_1d,
-            freq_arr_hz,
-            ref_freq_hz,
-            fit_options,
+            i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options
         ):
-            if fit is not None:
-                model = fit.stokes_i_model_func(x_arr, *np.asarray(fit.popt))
-                out[:n_freq, y, x] = model
-                out[n_freq, y, x] = _alpha_at_ref(model, freq_arr_hz, ref_freq_hz)
-                out[n_freq + 1, y, x] = np.asarray(fit.popt).size - 1
-                if compute_error:
-                    # One MC draw feeds both the per-channel model error and the
-                    # alpha error (alpha of each realisation at the ref freq).
-                    samples = draw_model_samples(
-                        fit, x_arr, fit_options.n_error_samples
-                    )
-                    low, high = np.nanpercentile(samples, [16, 84], axis=0)
-                    model_error = np.abs(high - low)
-                    model_error[model_error > 1e99] = np.nan
-                    out[n_freq + 2 : 2 * n_freq + 2, y, x] = model_error
-                    alpha_samples = np.array(
-                        [_alpha_at_ref(m, freq_arr_hz, ref_freq_hz) for m in samples]
-                    )
-                    a_low, a_high = np.nanpercentile(alpha_samples, [16, 84])
-                    out[2 * n_freq + 2, y, x] = abs(a_high - a_low)
-            elif good.any():
-                # Flat fallback: no correction, and alpha/order stay NaN (masked).
-                out[:n_freq, y, x] = float(np.mean(i_spec[good]))
+            if not good.any():
+                continue
+            mean_flux = float(np.mean(i_spec[good]))
+            if fit is None:
+                _write_flat_model(out, y, x, mean_flux, n_freq)
+                continue
+            popt = np.asarray(fit.popt)
+            model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *popt)
+            if not model_is_usable(model[good]):
+                n_rejected += 1
+                _write_flat_model(out, y, x, mean_flux, n_freq)
+                continue
+            _write_model_planes(out, y, x, model, popt.size, freq_arr_hz, ref_freq_hz)
+            if fit_options.compute_model_error:
+                _write_error_planes(
+                    out,
+                    y,
+                    x,
+                    fit,
+                    freq_arr_hz,
+                    ref_freq_hz,
+                    fit_options.n_error_samples,
+                )
+    if n_rejected:
+        logger.warning(
+            f"{n_rejected} of {cy * cx} pixels in this chunk fitted an unusable "
+            "Stokes I model and fell back to a flat one (see "
+            "`rm_lite.utils.fitting.model_is_usable`). Expect this on pixels with "
+            "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None."
+        )
     return out
 
 
@@ -318,6 +370,21 @@ def _alpha_from_model_block(
     return alpha
 
 
+def _error_to_check(
+    stokes_i_error: NDArray[np.float64] | da.Array | None,
+) -> NDArray[np.float64] | None:
+    """The part of a Stokes I error that `check_snr_cut_has_error` can inspect.
+
+    A dask cube would have to be computed to look at its values, so only its
+    presence is checked; an all-zero one still falls to the per-pixel path.
+    """
+    if stokes_i_error is None:
+        return None
+    if isinstance(stokes_i_error, da.Array):
+        return np.ones(1, dtype=np.float64)
+    return np.asarray(stokes_i_error, dtype=np.float64)
+
+
 def _split_stokes_i_error(
     stokes_i_error: NDArray[np.float64] | da.Array | None,
     chunks: tuple[tuple[int, ...], ...],
@@ -354,6 +421,7 @@ def _stokes_i_model_cube(
     fitted. `stokes_i_error` is a per-channel 1D array (n_freq,), a per-pixel
     error cube (n_freq, ny, nx), or None.
     """
+    check_snr_cut_has_error(fit_options, _error_to_check(stokes_i_error))
     err_1d, err_cube = _split_stokes_i_error(stokes_i_error, stokes_i.chunks)
 
     compute_error = fit_options.compute_model_error
@@ -474,7 +542,8 @@ def rmsynth_3d(
             Defaults to None (FDF stays in Q/U flux).
         stokes_i_error (NDArray[np.float64] | da.Array | None, optional): Stokes I
             error, per-channel (n_freq,) or per-pixel cube (n_freq, ny, nx), to
-            weight the fit. Defaults to None (unweighted, or estimated if
+            weight the fit, and to measure SNR against for `stokes_i_snr_cut`.
+            Defaults to None (unweighted, or estimated if
             `estimate_stokes_i_noise`).
         stokes_i_model (da.Array | None, optional): Pre-computed Stokes I model
             cube, used directly (no fitting). Takes precedence over `stokes_i`.
@@ -488,6 +557,8 @@ def rmsynth_3d(
         stokes_i_snr_cut (float | None, optional): Below this frequency-averaged
             Stokes I SNR a pixel falls back to a flat model (no spectral
             correction, not blanked). None fits every pixel. Fit path only.
+            Needs a Stokes I error to measure SNR against, so raises unless one
+            of `stokes_i_error` / `estimate_stokes_i_noise` is given.
             Defaults to 5.0.
         compute_model_error (bool, optional): Also compute a per-pixel model error
             cube via Monte-Carlo over the fit covariance, in the same fit pass.

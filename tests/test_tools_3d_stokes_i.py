@@ -16,7 +16,11 @@ from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.dask_io import estimate_stokes_i_channel_noise
-from rm_lite.utils.fitting import StokesIFitOptions, fit_stokes_i_model
+from rm_lite.utils.fitting import (
+    StokesIFitOptions,
+    fit_stokes_i_model,
+    model_is_usable,
+)
 from rm_lite.utils.synthesis import freq_to_lambda2
 from scipy import optimize
 
@@ -260,6 +264,7 @@ def test_stokes_i_output_shapes():
         _chunked(cube.stokes_u),
         cube.freq_arr_hz,
         stokes_i=_chunked(cube.stokes_i),
+        estimate_stokes_i_noise=True,
         d_phi_radm2=D_PHI_RADM2,
         weight_type="uniform",
     )
@@ -599,3 +604,151 @@ def test_stokes_i_model_error_fit_order_zero():
     assert err_cube.shape == cube.stokes_i.shape
     assert np.isfinite(err_cube).all()
     assert (err_cube >= 0).all()
+
+
+RACS_FREQ = np.arange(800e6, 1800e6, 8e6)
+WIDE_FREQ = np.geomspace(50e6, 10e9, 125)
+
+
+@pytest.mark.parametrize(
+    ("label", "freq", "alpha"),
+    [
+        ("RACS band, flat", RACS_FREQ, -0.8),
+        ("RACS band, steep", RACS_FREQ, -3.0),
+        # A real power law spans thousands over 50 MHz-10 GHz, so any cap on how
+        # far the model may travel across the band is really a cap on bandwidth.
+        ("50 MHz-10 GHz, steep", WIDE_FREQ, -1.5),
+        ("50 MHz-10 GHz, steeper", WIDE_FREQ, -2.5),
+    ],
+)
+def test_model_is_usable_accepts_real_spectra(
+    label: str, freq: NDArray[np.float64], alpha: float
+) -> None:
+    """A positive model is usable however wide the band or steep the spectrum."""
+    assert model_is_usable((freq / freq.mean()) ** alpha), label
+
+
+@pytest.mark.parametrize(
+    ("label", "model"),
+    [
+        ("non-finite", np.array([1.0, np.nan, 1.0])),
+        ("negative", np.array([1.0, -1.0, 1.0])),
+        ("zero", np.array([1.0, 0.0, 1.0])),
+    ],
+)
+def test_model_is_usable_rejects_models_that_cannot_divide(
+    label: str, model: NDArray[np.float64]
+) -> None:
+    assert not model_is_usable(model), label
+
+
+def test_unusable_model_takes_the_flat_fallback() -> None:
+    """A rejected pixel gets a flat model at its mean I, so no correction.
+
+    Fitting near-noise with no SNR cut is what produces these: a polynomial
+    through noise dips below zero at a band edge, which would flip the sign of
+    the fractional polarisation there rather than correct it.
+    """
+    rng = np.random.default_rng(20260823)
+    n_freq, ny, nx = 125, 4, 6
+    freq = np.arange(800e6, 1800e6, 8e6)[:n_freq]
+    # Just enough offset that every pixel mean stays positive, so the flat
+    # fallback is well defined, while the fits themselves still run away.
+    stokes_i = rng.normal(0, 0.05, (n_freq, ny, nx)) + 0.01
+    q = rng.normal(0, 0.02, (n_freq, ny, nx))
+    u = rng.normal(0, 0.02, (n_freq, ny, nx))
+
+    result = rmsynth_3d(
+        da.from_array(q, chunks=(n_freq, ny, nx)),
+        da.from_array(u, chunks=(n_freq, ny, nx)),
+        freq,
+        stokes_i=da.from_array(stokes_i, chunks=(n_freq, ny, nx)),
+        stokes_i_snr_cut=None,
+        fit_function="linear",
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    model = np.asarray(_require(result.stokes_i_model_cube).compute())
+    fdf = np.asarray(result.fdf_dirty_cube.compute())
+    assert np.all(np.isfinite(model))
+    assert np.all(model > 0)
+    assert np.all(np.isfinite(fdf))
+
+    mean_i = stokes_i.mean(axis=0)
+    flat = np.isclose(model.max(axis=0), model.min(axis=0))
+    assert flat.any(), "no pixel took the fallback, so it is not under test"
+    assert np.allclose(model[:, flat], mean_i[flat])
+
+
+def test_pixel_with_no_finite_channels_stays_nan() -> None:
+    """A fully blanked Stokes I pixel gets no model at all, not a flat one.
+
+    There is no mean to fall back to, so the model column and the alpha and
+    order maps stay NaN there while its neighbours fit normally.
+    """
+    rng = np.random.default_rng(20260824)
+    n_freq, ny, nx = 64, 2, 3
+    freq = np.linspace(800e6, 1800e6, n_freq)
+    stokes_i = np.broadcast_to(
+        (freq / freq.mean())[:, None, None] ** -0.8, (n_freq, ny, nx)
+    ).copy()
+    stokes_i[:, 0, 0] = np.nan
+    q = rng.normal(0, 0.02, (n_freq, ny, nx))
+    u = rng.normal(0, 0.02, (n_freq, ny, nx))
+
+    result = rmsynth_3d(
+        da.from_array(q, chunks=(n_freq, ny, nx)),
+        da.from_array(u, chunks=(n_freq, ny, nx)),
+        freq,
+        stokes_i=da.from_array(stokes_i, chunks=(n_freq, ny, nx)),
+        stokes_i_error=np.full(n_freq, 1e-3),
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    model = np.asarray(_require(result.stokes_i_model_cube).compute())
+    alpha = np.asarray(_require(result.stokes_i_alpha_map).compute())
+
+    assert np.isnan(model[:, 0, 0]).all()
+    assert np.isnan(alpha[0, 0])
+    # Every other pixel is untouched by its blank neighbour.
+    assert np.isfinite(model[:, 0, 1:]).all()
+    assert np.isfinite(model[:, 1, :]).all()
+    assert np.isfinite(alpha[0, 1:]).all()
+    assert np.isfinite(alpha[1, :]).all()
+
+
+def test_snr_cut_without_an_error_is_rejected_up_front() -> None:
+    """An SNR cut with nothing to measure SNR against is a silent no-op.
+
+    `stokes_i_snr` returns inf without an error, so every spectrum passes the
+    cut and pure noise gets fitted as signal. Caught while the graph is built,
+    not per pixel, so a cube fails in seconds.
+    """
+    n_freq, ny, nx = 32, 2, 2
+    freq = np.linspace(800e6, 1800e6, n_freq)
+    shape = (n_freq, ny, nx)
+    kwargs: dict[str, object] = {
+        "freq_arr_hz": freq,
+        "stokes_i": da.ones(shape, chunks=shape),
+        "d_phi_radm2": D_PHI_RADM2,
+        "weight_type": "uniform",
+    }
+    with pytest.raises(ValueError, match="needs a Stokes I error"):
+        rmsynth_3d(da.ones(shape, chunks=shape), da.ones(shape, chunks=shape), **kwargs)  # type: ignore[arg-type]
+
+    # All-zero is the same thing: no weight, so no SNR.
+    with pytest.raises(ValueError, match="needs a Stokes I error"):
+        rmsynth_3d(
+            da.ones(shape, chunks=shape),
+            da.ones(shape, chunks=shape),
+            stokes_i_error=np.zeros(n_freq),
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    # And it is the cut that demands one, so switching it off is fine.
+    rmsynth_3d(
+        da.ones(shape, chunks=shape),
+        da.ones(shape, chunks=shape),
+        stokes_i_snr_cut=None,
+        **kwargs,  # type: ignore[arg-type]
+    )

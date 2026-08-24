@@ -15,6 +15,7 @@ from rm_lite.utils.clean import (
     MultiscaleOptions,
     RMCleanOptions,
     RMSynthArrays,
+    SelectionType,
     rmclean,
 )
 from rm_lite.utils.logging import logger, quiet_logs
@@ -97,6 +98,7 @@ def run_rmclean(
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
+    multiscale_selection: SelectionType = "hybrid",
     multiscale_selection_margin: float = 0.08,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on chunked dirty FDF and RMSF cubes.
@@ -140,6 +142,7 @@ def run_rmclean(
         multiscale_kernel ("tapered_quad" | "gaussian", optional): Scale kernel. Defaults to "tapered_quad".
         multiscale_max_iter_sub_minor (int, optional): Max sub-minor iterations. Defaults to 10_000.
         multiscale_sub_minor_fraction (float, optional): Sub-minor re-selection fraction. Defaults to 0.5.
+        multiscale_selection ("snr" | "hybrid", optional): Scale-selection strategy. Defaults to "hybrid".
         multiscale_selection_margin (float, optional): Hybrid scale-selection parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points on the delta scale. Defaults to 0.08.
 
     Returns:
@@ -163,6 +166,7 @@ def run_rmclean(
             kernel=multiscale_kernel,
             max_iter_sub_minor=multiscale_max_iter_sub_minor,
             sub_minor_fraction=multiscale_sub_minor_fraction,
+            selection=multiscale_selection,
             selection_margin=multiscale_selection_margin,
         )
         if multiscale
@@ -243,6 +247,7 @@ def run_rmclean_from_synth(
     multiscale_kernel: Literal["tapered_quad", "gaussian"] = "tapered_quad",
     multiscale_max_iter_sub_minor: int = 10_000,
     multiscale_sub_minor_fraction: float = 0.5,
+    multiscale_selection: SelectionType = "hybrid",
     multiscale_selection_margin: float = 0.08,
 ) -> RMClean3DResults:
     """Run RM-CLEAN on the results of `rm_lite.tools_3d.rmsynth.rmsynth_3d`.
@@ -270,7 +275,7 @@ def run_rmclean_from_synth(
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
         scales, n_scales, kernel, max_iter_sub_minor, sub_minor_fraction,
-            selection_margin: Multiscale options, see `run_rmclean`.
+            selection, selection_margin: Multiscale options, see `run_rmclean`.
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
@@ -304,5 +309,6 @@ def run_rmclean_from_synth(
         multiscale_kernel=multiscale_kernel,
         multiscale_max_iter_sub_minor=multiscale_max_iter_sub_minor,
         multiscale_sub_minor_fraction=multiscale_sub_minor_fraction,
+        multiscale_selection=multiscale_selection,
         multiscale_selection_margin=multiscale_selection_margin,
     )

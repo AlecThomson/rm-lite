@@ -1,22 +1,30 @@
 """Subprocess worker for the memory-scaling test.
 
-Run in a fresh process per configuration so `resource.getrusage(...).ru_maxrss`
-(monotonic, process-lifetime peak RSS) gives a clean per-run peak instead of
-carrying over allocations from a previous configuration in the same process.
+Run in a fresh process per configuration so one run's allocations cannot carry
+into the next.
 
 Writes output via `write_zarr_group` (lazy, chunk-by-chunk) rather than
 `.compute()`, since `.compute()` always assembles the full result in memory
 regardless of chunk size. The property under test is that *processing* memory
 (and the write path) is bounded by chunk size, not cube size.
 
-The worker prints the *computation-phase RSS delta* (peak RSS minus the RSS
-snapshot taken just before write_zarr_group is called) so that Python
-interpreter baseline overhead — which varies across Python versions and does
-not depend on chunk size — is excluded from the comparison.
+Prints the compute phase's own peak RSS, above the live RSS just before
+`write_zarr_group`, so interpreter and input-cube overhead (identical across
+chunkings, and varying by Python version) drops out.
+
+Measuring that needs the kernel's resettable peak, `VmHWM`, not
+`resource.getrusage(...).ru_maxrss`. `ru_maxrss` is a process-lifetime peak with
+no way to reset it, so it also carries whatever setup transiently reached; when
+that exceeds the compute peak, both chunkings report the same
+"peak minus current" number and the comparison is meaningless. That made this
+test flaky (~2 runs in 3 on CI) until it moved to `VmHWM` plus a `clear_refs`
+reset. `ru_maxrss` remains the fallback off Linux, where the test is not
+expected to be tight anyway.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import resource
 import sys
@@ -31,25 +39,42 @@ from rm_lite.utils.dask_io import write_zarr_group
 logging.disable(logging.CRITICAL)
 
 
-def _current_rss_kb() -> int:
-    """Return the *current* resident set size in KB.
-
-    Reads /proc/self/status on Linux for an accurate live value.
-    Falls back to resource.getrusage on other platforms (note: ru_maxrss is
-    monotonic/peak there, so the delta approach is less precise, but the test
-    is only expected to be tight on Linux CI).
-    """
+def _status_kb(field: str) -> int | None:
+    """A /proc/self/status memory field in kB, or None if unreadable."""
     try:
         with Path("/proc/self/status").open("r") as fh:
             for line in fh:
-                if line.startswith("VmRSS:"):
+                if line.startswith(field):
                     return int(line.split()[1])  # already in kB
     except OSError:
         pass
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return None
+
+
+def _getrusage_peak_kb() -> int:
+    """Process-lifetime peak RSS in kB, for platforms without /proc."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if sys.platform == "darwin":
-        rss //= 1024  # macOS reports bytes; normalise to kB
-    return rss
+        peak //= 1024  # macOS reports bytes; normalise to kB
+    return peak
+
+
+def _current_rss_kb() -> int:
+    """Live resident set size in kB."""
+    rss = _status_kb("VmRSS:")
+    return rss if rss is not None else _getrusage_peak_kb()
+
+
+def _reset_peak_rss() -> None:
+    """Reset the kernel's peak-RSS watermark (`VmHWM`); Linux 4.0+, else a no-op."""
+    with contextlib.suppress(OSError):
+        Path("/proc/self/clear_refs").write_text("5")
+
+
+def _peak_rss_kb() -> int:
+    """Peak RSS in kB since the last `_reset_peak_rss`, else process lifetime."""
+    hwm = _status_kb("VmHWM:")
+    return hwm if hwm is not None else _getrusage_peak_kb()
 
 
 def main() -> None:
@@ -70,9 +95,10 @@ def main() -> None:
     # rmsynth_3d builds the dask graph lazily; no heavy allocation yet.
     synth = rmsynth_3d(q_dask, u_dask, freqs, d_phi_radm2=d_phi_radm2)
 
-    # Snapshot current RSS before triggering computation.  Subtracting this
-    # removes Python-interpreter and input-data overhead that is identical
-    # across chunk configurations, isolating computation-phase memory.
+    # Reset the peak watermark, then snapshot live RSS, so what follows measures
+    # the compute phase alone: no setup transient above it, and no interpreter
+    # or input-cube baseline below it.
+    _reset_peak_rss()
     pre_compute_rss = _current_rss_kb()
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -81,13 +107,7 @@ def main() -> None:
             {"fdf_dirty": synth.fdf_dirty_cube, "rmsf": synth.rmsf_cube},
         )
 
-    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    if sys.platform == "darwin":
-        peak_rss //= 1024  # bytes → kB
-
-    # ru_maxrss is monotonic; pre_compute_rss is the live value just before
-    # the heavy work, so the delta is the computation-phase peak contribution.
-    print(max(0, peak_rss - pre_compute_rss))
+    print(max(0, _peak_rss_kb() - pre_compute_rss))
 
 
 if __name__ == "__main__":

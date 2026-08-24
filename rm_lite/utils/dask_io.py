@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import astropy.units as u
+import dask
 import dask.array as da
 import numpy as np
+import zarr
 from astropy.io import fits
 from astropy.io.fits import Header
 from astropy.stats import mad_std
@@ -296,6 +298,22 @@ def complex_pol_dask(stokes_q: da.Array, stokes_u: da.Array) -> da.Array:
     return stokes_q + 1j * stokes_u
 
 
+def _regular_chunks(name: str, array: da.Array) -> da.Array:
+    """Rechunk to uniform chunks if needed, as `dask.array.Array.to_zarr` does."""
+    # Regular == every chunk on an axis equal, bar a smaller final one. Matches
+    # `dask.array.core._check_regular_chunks`, which is private.
+    if all(
+        len(axis) == 1 or (len(set(axis[:-1])) == 1 and axis[-1] <= axis[0])
+        for axis in array.chunks
+    ):
+        return array
+    logger.warning(
+        f"Array {name!r} has irregular chunk sizes; rechunking to uniform chunks "
+        "so it can be written safely. Rechunk it yourself to avoid this."
+    )
+    return array.rechunk(tuple(max(axis) for axis in array.chunks))
+
+
 def write_zarr_group(
     store: str | Path,
     arrays: Mapping[str, da.Array],
@@ -303,13 +321,13 @@ def write_zarr_group(
 ) -> None:
     """Write a set of dask arrays lazily/incrementally to a shared zarr store.
 
-    Each array is written chunk-by-chunk via `dask.array.Array.to_zarr`; the
-    full array is never materialised in memory before writing. All arrays are
-    written in a single `dask.compute()` call rather than one `to_zarr()` call
-    per array: if two arrays share upstream graph nodes (e.g. the four outputs
-    of `rm_lite.tools_3d.rmclean.run_rmclean`, which all come from one per-chunk
-    `dask.delayed` call), computing them separately would silently redo that
-    shared work once per array.
+    Written chunk-by-chunk, so no array is ever fully materialised. One
+    `dask.array.store` for the whole set with fusion off, rather than a
+    `to_zarr` per array, so arrays sharing an upstream task (the four outputs of
+    `run_rmclean` come from one `dask.delayed` call per chunk) compute it once:
+    fusion inlines that task into each consumer branch, and a per-array
+    `to_zarr` bakes the copy in when its `Delayed` is built. The lost task
+    boundary is worth far less than redoing a spatial chunk of RM-CLEAN.
 
     Args:
         store (str | Path): Path to the zarr store (a group containing one
@@ -317,15 +335,31 @@ def write_zarr_group(
         arrays (Mapping[str, da.Array]): Name -> dask array to write.
         overwrite (bool, optional): Overwrite existing arrays. Defaults to True.
     """
-    writes = [
-        array.to_zarr(store, component=name, overwrite=overwrite, compute=False)
-        for name, array in arrays.items()
+    names = list(arrays)
+    # `to_zarr` rechunks an irregularly chunked array before writing, because a
+    # zarr array has one chunk size per axis and the leading dask chunk would
+    # silently misplace the rest. Same guard here, since we are making the zarr
+    # arrays ourselves.
+    sources = [_regular_chunks(name, arrays[name]) for name in names]
+    # Same creation arguments `dask.array.to_zarr` builds, so the on-disk layout
+    # is unchanged; only the store call below is batched.
+    sinks = [
+        zarr.create(
+            shape=array.shape,
+            # An empty dask array has chunk size 0, which zarr rejects.
+            chunks=tuple(max(chunk[0], 1) for chunk in array.chunks),
+            dtype=array.dtype,
+            store=str(store),
+            path=name,
+            overwrite=overwrite,
+        )
+        for name, array in zip(names, sources, strict=True)
     ]
     tick = time.time()
-    with ProgressBar():
-        compute(*writes)
+    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
+        compute(da.store(sources, sinks, lock=False, compute=False))
     tock = time.time()
-    logger.info(f"Wrote {list(arrays)} to {store} in {tock - tick:.3g} seconds.")
+    logger.info(f"Wrote {names} to {store} in {tock - tick:.3g} seconds.")
 
 
 def _channel_mad_std_block(block: NDArray[np.float64]) -> NDArray[np.float64]:

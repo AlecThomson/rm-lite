@@ -20,10 +20,13 @@ from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
+    check_snr_cut_has_error,
     fit_fdf,
     fit_rmsf,
     fit_stokes_i_model,
+    flat_fit_result,
     gaussian_integrand,
+    model_is_usable,
     sample_model_error,
 )
 from rm_lite.utils.logging import logger
@@ -623,6 +626,8 @@ def create_fractional_spectra(
         msg = "All channels have been masked!"
         raise ValueError(msg)
 
+    check_snr_cut_has_error(fit_options, stokes_data.stokes_i_error_arr[no_nan_idx])
+
     # Apply flagging here since fitting will fail if NaNs are present
     fit_result = fit_stokes_i_model(
         freq_arr_hz=stokes_data.freq_arr_hz[no_nan_idx],
@@ -635,6 +640,23 @@ def create_fractional_spectra(
         msg = "Too few finite Stokes I channels to fit; no fractional polarization."
         logger.warning(msg)
         return None
+
+    i_good = stokes_data.stokes_i_arr[no_nan_idx]
+    model_good = fit_result.stokes_i_model_func(
+        stokes_data.freq_arr_hz[no_nan_idx] / ref_freq_hz,
+        *np.asarray(fit_result.popt),
+    )
+    if not model_is_usable(model_good):
+        logger.warning(
+            "The fitted Stokes I model cannot safely divide Q/U (see "
+            "`rm_lite.utils.fitting.model_is_usable`); falling back to a flat "
+            "model at the mean Stokes I, so Q/U get no spectral correction."
+        )
+        fit_result = flat_fit_result(
+            float(np.mean(i_good)),
+            len(np.asarray(fit_result.popt)) - 1,
+            fit_options.fit_function,
+        )
 
     stokes_i_model_arr, stokes_i_model_error = sample_model_error(
         fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples
@@ -1251,6 +1273,7 @@ def get_rmsf_nufft(
     do_fit_rmsf_real: bool = False,
     eps: float = 1e-6,
     nthreads: int = 0,
+    reuse_rmsf: bool = True,
 ) -> RMSFResults:
     """Compute the RMSF for a given set of lambda^2 values.
 
@@ -1267,6 +1290,12 @@ def get_rmsf_nufft(
         nthreads (int, optional): finufft OpenMP threads. 0 uses finufft's default
             (all cores). Set to 1 when parallelising across chunks with dask, to
             avoid oversubscription. Defaults to 0.
+        reuse_rmsf (bool, optional): Compute one RMSF and reuse it for every
+            pixel when they all share the same channel flagging, instead of
+            running the NUFFT per pixel for an identical answer. The check below
+            gates this regardless, so the flag can only decline a saving already
+            known to be safe; it exists to get at the per-pixel path for testing
+            and debugging. Defaults to True.
 
     Raises:
         ValueError: If the wavelength^2 and weight arrays are not the same shape.
@@ -1316,11 +1345,37 @@ def get_rmsf_nufft(
     mskPlanes = np.where(flag_xy_sum == num_pixels, 0, 1)
     weight_arr *= mskPlanes
 
+    # A pixel's RMSF depends only on which channels that pixel has flagged, so
+    # when every pixel shares the same flagging there is a single distinct RMSF
+    # in the whole cube. Real flagging is per-channel rather than per-pixel, so
+    # that is the usual case, and computing one spectrum instead of one per pixel
+    # makes this O(1) in pixel count for the same answer -- bit-identical at
+    # nthreads=1 (what the dask path uses), and at finufft's default thread count
+    # within a few ulp, since it splits a multithreaded type-3 differently for one
+    # transform than for a batch.
+    #
+    # The test is one pass over the mask and it is exact: the flagging is shared
+    # if and only if, for every channel, either all pixels are flagged or none
+    # are. A chunk holding fully blanked pixels alongside real ones fails it and
+    # takes the per-pixel path, so correctness never rests on `reuse_rmsf` --
+    # the flag can only decline a saving that is already known to be safe.
+    share_rmsf = (
+        reuse_rmsf
+        and num_pixels > 1
+        and bool(np.array_equal(mask_arr.all(axis=1), mask_arr.any(axis=1)))
+    )
+    if share_rmsf:
+        logger.debug(
+            f"All {num_pixels} pixels share the same channel flagging; "
+            "computing one RMSF instead of one per pixel."
+        )
+    rmsf_mask_arr = mask_arr[:, :1] if share_rmsf else mask_arr
+
     fwhm_rmsf_radm2, _, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
     # Calculate the RMSF at each pixel
     # The K value used to scale each RMSF must take into account
     # isolated flagged voxels data in the datacube
-    weight_cube = np.invert(mask_arr) * weight_arr[:, np.newaxis]
+    weight_cube = np.invert(rmsf_mask_arr) * weight_arr[:, np.newaxis]
     with np.errstate(divide="ignore", invalid="ignore"):
         scale_factor_arr = 1.0 / np.sum(weight_cube, axis=0)
         scale_factor_arr = np.nan_to_num(
@@ -1350,9 +1405,8 @@ def get_rmsf_nufft(
     # Fit the RMSF main lobe
     if do_fit_rmsf:
         logger.info("Fitting main lobe in each RMSF spectrum.")
-        for i in trange(
-            num_pixels, desc="Fitting RMSF by pixel", disable=num_pixels == 1
-        ):
+        n_fitted = rmsf_cube.shape[1]
+        for i in trange(n_fitted, desc="Fitting RMSF by pixel", disable=n_fitted == 1):
             try:
                 fitted_rmsf = fit_rmsf(
                     rmsf_to_fit_arr=(
@@ -1372,6 +1426,17 @@ def get_rmsf_nufft(
 
             fwhm_rmsf_arr[i] = fitted_rmsf
             fit_status_arr[i] = fit_status
+
+        if share_rmsf:
+            # One spectrum was fitted, and it is every pixel's RMSF.
+            fwhm_rmsf_arr[:] = fwhm_rmsf_arr[0]
+            fit_status_arr[:] = fit_status_arr[0]
+
+    if share_rmsf:
+        # Fan the one computed spectrum out to every pixel. `repeat`, not
+        # `broadcast_to`: the reshape below would have to copy a zero-stride
+        # view anyway, and callers get a normal writeable array either way.
+        rmsf_cube = np.repeat(rmsf_cube, num_pixels, axis=1)
 
     # Remove redundant dimensions
     rmsf_cube = np.squeeze(rmsf_cube)

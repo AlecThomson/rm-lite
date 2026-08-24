@@ -248,7 +248,9 @@ def minor_loop(
     """
     resid_fdf_spectrum = minor_loop_arrays.resid_fdf_spectrum_mask.data.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
-    rmsf_spectrum = minor_loop_arrays.rmsf_spectrum.copy()
+    # Read-only here (peak index and `shift_rmsf` gathers), so no copy: this
+    # runs twice per cleaned pixel on a double-length complex array.
+    rmsf_spectrum = minor_loop_arrays.rmsf_spectrum
     # Track the clean region as a plain boolean mask (True = active), not an
     # np.ma.MaskedArray: rebuilding a masked array and taking np.ma.max/argmax
     # each iteration was ~40% of minor_loop runtime. The peak is taken via
@@ -411,6 +413,64 @@ class RMSynthArrays(NamedTuple):
     """Mask of pixels to clean"""
 
 
+def _fdf_peak_abs(
+    dirty_fdf_arr_2d: NDArray[np.complex128],
+) -> NDArray[np.float64]:
+    """Per-pixel max |dirty FDF|; NaN for a fully blanked (all-NaN) pixel."""
+    n_phi, n_pix = dirty_fdf_arr_2d.shape
+    peak_abs_arr = np.empty(n_pix, dtype=np.float64)
+    # Strip-wise, so the temporary |FDF| is a slice rather than a second array
+    # the size of the whole block.
+    strip = max(1, 2**20 // max(1, n_phi))
+    for start in range(0, n_pix, strip):
+        # `fmax.reduce`, not `nanmax`: same NaN-skipping maximum, but an
+        # all-NaN column (a blanked pixel, routine at a mosaic edge) yields
+        # NaN quietly instead of an "All-NaN slice" warning per strip.
+        peak_abs_arr[start : start + strip] = np.fmax.reduce(
+            np.abs(dirty_fdf_arr_2d[:, start : start + strip]), axis=0
+        )
+    return peak_abs_arr
+
+
+def _null_clean_pixels(
+    dirty_fdf_arr_2d: NDArray[np.complex128],
+    mask: float,
+) -> NDArray[np.bool_]:
+    """Pixels whose dirty FDF peak cannot clear `mask`, so CLEAN is a no-op.
+
+    Such a pixel is not an approximation to skip, it is already solved. The
+    initial minor loop's mask is empty for it (the adaptive seed gate and the
+    fixed mask are both `|FDF| > mask`), so that loop breaks at iteration 0
+    with a zero model; the deep loop's mask (`|model| > 0`) is empty too; and
+    `restore_model` of a zero model is zero. `rmclean`'s pre-loop state --
+    zero clean, zero model, residual = dirty, zero iterations -- is exactly
+    that answer, and its post-loop `clean += resid` then gives `clean = dirty`.
+
+    Worth screening for because off-source pixels outnumber detections by
+    orders of magnitude in any real cube, and each one otherwise spends
+    ~200 us of masked-array construction and array copies to rediscover it.
+
+    A fully blanked (all-NaN) spectrum is included: `~(peak > mask)` is True
+    for NaN, and the skipped result (residual = NaN, zero model) is what the
+    loop produces for it as well.
+    """
+    return ~(_fdf_peak_abs(dirty_fdf_arr_2d) > mask)
+
+
+def _blank_pixels(
+    dirty_fdf_arr_2d: NDArray[np.complex128],
+) -> NDArray[np.bool_]:
+    """Fully blanked (all-NaN) pixels, which no CLEAN mode can say anything about.
+
+    Narrower than `_null_clean_pixels`, for non-adaptive multiscale where the
+    general no-op argument does not hold. A blank pixel is still hopeless there,
+    and worse than useless: its RMSF is all zeros, so `compute_scale_kernels`
+    normalises by zero and `fit_rmsf` raises `array must not contain infs or
+    NaNs`. Skipping leaves the NaN residual the pixel came in with.
+    """
+    return np.isnan(_fdf_peak_abs(dirty_fdf_arr_2d))
+
+
 def rmclean(
     rm_synth_arrays: RMSynthArrays,
     clean_options: RMCleanOptions,
@@ -505,6 +565,23 @@ def rmclean(
         )
         logger.info(f"Multiscale scales (RMSF FWHM units): {scales}")
 
+    # Only pixels that can actually clean need the per-pixel loop; the rest are
+    # already in their final state (see `_null_clean_pixels`). Non-adaptive
+    # multiscale gets the narrower blank-pixel screen instead: there a
+    # scale-convolved dirty FDF can clear `mask * peak_response` even when the
+    # raw peak does not, so the general no-op argument does not hold.
+    if not multiscale or clean_options.fdf_noise is not None:
+        skip_arr = _null_clean_pixels(dirty_fdf_arr_2d, clean_options.mask)
+        logger.info(
+            f"Skipping {int(skip_arr.sum())} of {skip_arr.size} pixels with no "
+            f"emission above the {clean_options.mask:0.3g} CLEAN mask."
+        )
+    else:
+        skip_arr = _blank_pixels(dirty_fdf_arr_2d)
+        logger.info(
+            f"Skipping {int(skip_arr.sum())} of {skip_arr.size} fully blanked pixels."
+        )
+
     # Loop through the pixels containing a polarised signal
     for pix_idx in tqdm(
         range(dirty_fdf_arr_2d.shape[1]),
@@ -514,6 +591,8 @@ def rmclean(
         # and so escapes quiet_logs; gate on the logger level to actually mute it.
         disable=not logger.isEnabledFor(logging.INFO),
     ):
+        if skip_arr[pix_idx]:
+            continue
         if multiscale:
             (clean_spec, resid_spec, model_spec, iters, sub_minor_iters) = (
                 multiscale_clean_spectrum(
