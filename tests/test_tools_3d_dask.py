@@ -8,6 +8,7 @@ import dask.array as da
 import numpy as np
 import pytest
 import rm_lite.tools_3d.rmclean as rmclean3d_mod
+import rm_lite.tools_3d.rmsynth as rmsynth3d_mod
 import zarr
 from astropy.io import fits
 from astropy.io.fits import Header
@@ -214,6 +215,99 @@ def test_rmclean_3d_block_runs_once_per_chunk(
         call_count
         == synth.fdf_dirty_cube.numblocks[1] * synth.fdf_dirty_cube.numblocks[2]
     )
+
+
+def _counting(monkeypatch, mod, name: str) -> dict[str, int]:
+    """Patch `mod.name` with a wrapper counting real invocations."""
+    counter = {"calls": 0}
+    original = getattr(mod, name)
+
+    def wrapper(*args, **kwargs):
+        counter["calls"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mod, name, wrapper)
+    return counter
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_mixed_batch_shares_upstream_work(monkeypatch):
+    """A batch mixing clean-derived and synthesis-derived outputs must not refit.
+
+    `run_rmclean` takes its input cubes apart with `to_delayed`, whose default
+    `optimize_graph=True` can fuse an upstream per-block task into the block task
+    RM-CLEAN consumes and drop its key. Anything else in the same `dask.compute`
+    built on the same `RMSynth3DResults` then no longer shares that task: the
+    Stokes I fit and the NUFFT run a second time per chunk. Both are more
+    expensive than the CLEAN loop they feed.
+
+    Whether the fusion happens depends on the dask version -- dask 2025.1.0 fuses
+    here, 2026.6.0 does not -- so this pins the sharing rather than any one
+    dask's optimiser.
+    """
+    # Coarse Faraday depths on purpose: a deep phi axis makes `_match_chunks_to_fdf`
+    # rechunk, and the rechunk layer is itself a fusion barrier that would hide
+    # what this test is checking.
+    phi_max_radm2 = 20.0
+    d_phi_radm2 = 2.0
+
+    freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
+    ny, nx = 6, 8
+    ref_freq_hz = float(np.median(freq_arr_hz))
+    stokes_i = RNG.uniform(1.0, 3.0, size=(ny, nx))[None] * (
+        (freq_arr_hz / ref_freq_hz)[:, None, None] ** -0.8
+    )
+    rm_map = RNG.uniform(-100, 100, size=(ny, nx))
+    angle = 2 * rm_map[None] * freq_to_lambda2(freq_arr_hz)[:, None, None]
+    stokes_q = 0.6 * stokes_i * np.cos(angle)
+    stokes_u = 0.6 * stokes_i * np.sin(angle)
+
+    fit_calls = _counting(monkeypatch, rmsynth3d_mod, "_fit_stokes_i_block")
+    nufft_calls = _counting(monkeypatch, rmsynth3d_mod, "rmsynth_nufft")
+    clean_calls = _counting(monkeypatch, rmclean3d_mod, "_clean_block")
+
+    synth = rmsynth3d_mod.rmsynth_3d(
+        _chunked(stokes_q, 3, 4),
+        _chunked(stokes_u, 3, 4),
+        freq_arr_hz,
+        stokes_i=_chunked(stokes_i, 3, 4),
+        stokes_i_error=np.full(freq_arr_hz.size, 1e-3),
+        phi_max_radm2=phi_max_radm2,
+        d_phi_radm2=d_phi_radm2,
+    )
+    clean = rmclean3d_mod.run_rmclean(
+        synth.fdf_dirty_cube,
+        synth.rmsf_arr,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+    )
+    n_chunks = synth.fdf_dirty_cube.numblocks[1] * synth.fdf_dirty_cube.numblocks[2]
+    assert synth.fdf_dirty_cube.chunks[1] == (3, 3), "rechunked, test premise gone"
+
+    # `map_blocks` probes the block function once with a zero-size block while the
+    # graph is built, to infer its meta. Count from after that, not from zero.
+    for counter in (fit_calls, nufft_calls, clean_calls):
+        counter["calls"] = 0
+
+    compute(
+        clean.mom0_map,
+        clean.mom1_map,
+        clean.mom2_map,
+        synth.fdf_dirty_cube,
+        _require_cube(synth.stokes_i_alpha_map),
+        _require_cube(synth.stokes_i_ref_flux_map),
+        _require_cube(synth.stokes_i_model_order_map),
+        _require_cube(synth.stokes_i_coeff_cube),
+        _require_cube(synth.stokes_i_coeff_error_cube),
+        scheduler="synchronous",
+    )
+
+    assert fit_calls["calls"] == n_chunks
+    assert nufft_calls["calls"] == n_chunks
+    assert clean_calls["calls"] == n_chunks
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")

@@ -200,11 +200,17 @@ def run_rmclean(
     spatial_chunks = fdf_dirty_cube.chunks[1:]
     numblocks = fdf_dirty_cube.numblocks
 
-    dirty_delayed = fdf_dirty_cube.to_delayed()
+    # optimize_graph=False keeps the input graphs' keys. Optimising here can fuse
+    # an upstream per-block task (the Stokes I fit, the NUFFT) into the block task
+    # RM-CLEAN consumes, dropping its key; anything else built on the same
+    # `RMSynth3DResults` then no longer shares that work and recomputes it in the
+    # same `dask.compute`. Nothing is lost by skipping it: the scheduler optimises
+    # at compute time anyway.
+    dirty_delayed = fdf_dirty_cube.to_delayed(optimize_graph=False)
     # A shared RMSF becomes one graph key that every block points at, rather than
     # the same spectrum re-embedded per block or a cube holding ny*nx copies.
     rmsf_delayed = (
-        rmsf_cube.to_delayed()
+        rmsf_cube.to_delayed(optimize_graph=False)
         if rmsf_cube is not None
         else np.full(numblocks, delayed(rmsf, pure=True), dtype=object)
     )
