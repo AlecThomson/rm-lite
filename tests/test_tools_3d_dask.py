@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import NamedTuple
 
 import dask.array as da
@@ -15,7 +16,11 @@ from astropy.io.fits import Header
 from dask.base import compute
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
-from rm_lite.tools_3d.rmclean import run_rmclean, run_rmclean_from_synth
+from rm_lite.tools_3d.rmclean import (
+    RMClean3DResults,
+    run_rmclean,
+    run_rmclean_from_synth,
+)
 from rm_lite.tools_3d.rmsynth import (
     _match_chunks_to_fdf,
     rmsynth_3d,
@@ -631,6 +636,84 @@ def test_read_fits_cube_dask_has_no_astype_layer(tmp_path):
     assert arr.dtype == np.float32
     prefixes = {str(key[0]).split("-")[0] for key in arr.__dask_graph__()}
     assert not any("astype" in prefix for prefix in prefixes), prefixes
+
+
+@pytest.mark.parametrize("reader", [read_fits_cube_dask, read_fits_cube_channel_chunks])
+def test_readers_emit_one_graph_layer_whatever_the_block_count(tmp_path, reader):
+    """The whole block grid is one layer, not a layer per block plus a concatenate."""
+    path = tmp_path / "cube.fits"
+    _write_cube(path, RNG.normal(0, 1, (8, 64, 4)))
+
+    one_block, _ = reader(path, target_chunk_mb=1e3)
+    many_blocks, _ = reader(path, target_chunk_mb=1e-9)
+
+    assert many_blocks.npartitions > one_block.npartitions
+    assert len(one_block.dask.layers) == 1
+    assert len(many_blocks.dask.layers) == 1
+
+
+def _rmclean_graph(
+    path, rows: int, n_freq: int, nx: int
+) -> tuple[float, RMClean3DResults]:
+    """Build the RM-CLEAN graph over a cube read in `rows`-tall bands, and time it.
+
+    A single `map_blocks` stands in for RM-synthesis, so the layer count above
+    the reader is what `rmsynth_3d` contributes and the chunk count is exactly
+    the reader's.
+    """
+    n_phi = 5
+    target_chunk_mb = rows * n_freq * nx * 4 / 1024**2
+    cube, _ = read_fits_cube_dask(path, target_chunk_mb=target_chunk_mb)
+    fdf_dirty_cube = da.map_blocks(
+        lambda block: block.astype(np.complex128)[:n_phi],
+        cube,
+        chunks=((n_phi,), cube.chunks[1], cube.chunks[2]),
+        dtype=np.complex128,
+    )
+    tick = time.perf_counter()
+    results = run_rmclean(
+        fdf_dirty_cube,
+        np.zeros(2 * n_phi - 1, dtype=np.complex128),
+        np.linspace(-6, 6, n_phi),
+        np.linspace(-12, 12, 2 * n_phi - 1),
+        fwhm_rmsf_radm2=1.0,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+    )
+    return time.perf_counter() - tick, results
+
+
+def test_rmclean_graph_build_stays_linear_in_chunk_count(tmp_path):
+    """Quadrupling the chunk count must not blow up graph building.
+
+    Both `read_fits_cube_dask` and `run_rmclean` used to work a layer at a
+    time, so every `HighLevelGraph.from_collections` walked an upstream layer
+    count that itself grew with the chunk count. Graph building alone then went
+    quadratic in `target_chunk_mb`, and on a real cube it took minutes and
+    several GB before a single block had been read.
+    """
+    n_freq, ny, nx = 4, 8192, 8
+    path = tmp_path / "cube.fits"
+    _write_cube(path, np.zeros((n_freq, ny, nx)))
+
+    def best_of(rows: int) -> float:
+        # Min over repeats: a loaded runner inflates individual builds, but
+        # nothing makes one spuriously fast.
+        return min(_rmclean_graph(path, rows, n_freq, nx)[0] for _ in range(5))
+
+    coarse_time = best_of(16)
+    fine_time = best_of(4)
+
+    _, coarse = _rmclean_graph(path, 16, n_freq, nx)
+    _, fine = _rmclean_graph(path, 4, n_freq, nx)
+    assert fine.clean_fdf_cube.npartitions == 4 * coarse.clean_fdf_cube.npartitions
+    # Layers stay flat; only the number of tasks in them grows.
+    assert len(fine.clean_fdf_cube.dask.layers) == len(
+        coarse.clean_fdf_cube.dask.layers
+    )
+    # 4x the chunks is at worst ~4x the tasks to build, so ~5x is generous
+    # headroom. The per-layer version came in around 15x.
+    assert fine_time < 5 * coarse_time, (coarse_time, fine_time)
 
 
 def test_read_fits_cube_channel_chunks_matches_spatial_read(tmp_path):

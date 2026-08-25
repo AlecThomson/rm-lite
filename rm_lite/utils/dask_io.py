@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +16,7 @@ from astropy.io import fits
 from astropy.io.fits import Header
 from astropy.stats import mad_std
 from astropy.wcs import WCS
-from dask import delayed
-from dask.base import compute
+from dask.base import compute, tokenize
 from dask.diagnostics import ProgressBar
 from numpy.typing import NDArray
 
@@ -125,8 +124,8 @@ def _read_fits_block(
     # dask.array.from_array unconditionally does `x = x.copy()` on anything
     # array-like (including a memmap-backed ndarray), and its default
     # tokenizing hashes the full buffer. Both silently force a full-cube
-    # read into memory. Passing only cheap primitives (path, int bounds) to
-    # a `dask.delayed` call sidesteps both.
+    # read into memory. Passing only cheap primitives (path, int bounds) as
+    # the task's arguments sidesteps both.
     #
     # `memmap=False` + `.section` reads exactly the block's bytes and returns
     # a real array. A memmap slice would instead return a lazy view that both
@@ -165,6 +164,35 @@ def _cube_meta(path: str | Path) -> tuple[tuple[int, int, int], np.dtype[Any], H
     return (n_freq, ny, nx), dtype, header
 
 
+def _fits_block_array(
+    path: str | Path,
+    dtype: np.dtype[Any],
+    nx: int,
+    freq_bounds: Sequence[tuple[int, int]],
+    y_bounds: Sequence[tuple[int, int]],
+) -> da.Array:
+    """A dask array over a (freq, y) grid of `_read_fits_block` calls, in one layer.
+
+    One graph layer for the whole grid, not a `dask.array.from_delayed` per
+    block plus a concatenate. Every downstream `HighLevelGraph.from_collections`
+    walks each upstream layer and re-wraps it, so a layer per block makes graph
+    building quadratic in the block count for any consumer that also works
+    block-by-block (`rm_lite.tools_3d.rmclean.run_rmclean`).
+    """
+    name = f"read-fits-block-{tokenize(str(path), dtype, nx, freq_bounds, y_bounds)}"
+    layer = {
+        (name, i, j, 0): (_read_fits_block, path, f_bounds, y_bnds)
+        for i, f_bounds in enumerate(freq_bounds)
+        for j, y_bnds in enumerate(y_bounds)
+    }
+    chunks = (
+        tuple(stop - start for start, stop in freq_bounds),
+        tuple(stop - start for start, stop in y_bounds),
+        (nx,),
+    )
+    return da.Array(layer, name, chunks, dtype=dtype)
+
+
 def read_fits_cube_dask(
     path: str | Path,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
@@ -172,9 +200,9 @@ def read_fits_cube_dask(
     """Lazily read a Stokes FITS cube as a spatially chunked dask array.
 
     Each block is a full-width band of `cy` image rows across all channels,
-    read by its own `dask.delayed` task via `astropy.io.fits`' `.section`, so
-    only that block's bytes are read and resident. Actual reads from disk are
-    deferred until a block is computed.
+    read by its own task via `astropy.io.fits`' `.section`, so only that
+    block's bytes are read and resident. Actual reads from disk are deferred
+    until a block is computed.
 
     Degenerate length-1 axes (e.g. a dummy Stokes axis, common in ASKAP/EMU
     cutout cubes) are dropped.
@@ -208,16 +236,15 @@ def read_fits_cube_dask(
         target_chunk_mb=target_chunk_mb,
     )
 
-    blocks = [
-        da.from_delayed(
-            delayed(_read_fits_block, pure=True)(path, (0, n_freq), y_bounds),
-            shape=(n_freq, y_bounds[1] - y_bounds[0], nx),
-            dtype=dtype,
-        )
-        for y_bounds in _chunk_bounds(ny, cy)
-    ]
+    cube = _fits_block_array(
+        path=path,
+        dtype=dtype,
+        nx=nx,
+        freq_bounds=[(0, n_freq)],
+        y_bounds=_chunk_bounds(ny, cy),
+    )
 
-    return da.concatenate(blocks, axis=1), header
+    return cube, header
 
 
 def read_fits_cube_channel_chunks(
@@ -250,16 +277,15 @@ def read_fits_cube_channel_chunks(
         target_chunk_mb=target_chunk_mb,
     )
 
-    blocks = [
-        da.from_delayed(
-            delayed(_read_fits_block, pure=True)(path, freq_bounds, (0, ny)),
-            shape=(freq_bounds[1] - freq_bounds[0], ny, nx),
-            dtype=dtype,
-        )
-        for freq_bounds in _chunk_bounds(n_freq, n_chan)
-    ]
+    cube = _fits_block_array(
+        path=path,
+        dtype=dtype,
+        nx=nx,
+        freq_bounds=_chunk_bounds(n_freq, n_chan),
+        y_bounds=[(0, ny)],
+    )
 
-    return da.concatenate(blocks, axis=0), header
+    return cube, header
 
 
 def freq_arr_hz_from_header(header: Header, n_freq: int) -> NDArray[np.float64]:
@@ -324,9 +350,9 @@ def write_zarr_group(
     Written chunk-by-chunk, so no array is ever fully materialised. One
     `dask.array.store` for the whole set with fusion off, rather than a
     `to_zarr` per array, so arrays sharing an upstream task (the four outputs of
-    `run_rmclean` come from one `dask.delayed` call per chunk) compute it once:
-    fusion inlines that task into each consumer branch, and a per-array
-    `to_zarr` bakes the copy in when its `Delayed` is built. The lost task
+    `run_rmclean` come from one task per chunk) compute it once: fusion inlines
+    that task into each consumer branch, and a per-array `to_zarr` bakes the
+    copy in when its `Delayed` is built. The lost task
     boundary is worth far less than redoing a spatial chunk of RM-CLEAN.
 
     Args:
