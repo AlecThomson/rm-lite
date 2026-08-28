@@ -392,7 +392,13 @@ def da_channel_mad(cube: da.Array) -> da.Array:
             "`rmsynth_3d_from_fits`, which does) to keep this bounded."
         )
         cube = cube.rechunk({1: -1, 2: -1})
-    return da.map_blocks(mad_std_on_chan_block, cube, dtype=np.float64)
+    return da.map_blocks(
+        mad_std_on_chan_block,
+        cube,
+        dtype=np.float64,
+        drop_axis=(1, 2),  # each block collapses to one scalar per channel
+        chunks=(cube.chunks[0],),
+    )
 
 
 def estimate_single_stokes_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
@@ -413,7 +419,7 @@ def estimate_single_stokes_channel_noise(stokes_i: da.Array) -> NDArray[np.float
         plain numpy array, not lazy.
     """
     tick = time.time()
-    noise = compute(da_channel_mad(stokes_i))
+    (noise,) = compute(da_channel_mad(stokes_i))
     tock = time.time()
     logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
     return np.asarray(noise)
