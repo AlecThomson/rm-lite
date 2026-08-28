@@ -614,12 +614,13 @@ def get_noise_from_fits(
     return estimate_channel_noise_mad(q_planes, u_planes)
 
 
-def get_noise_arr_from_fits(
+def get_weight_arr_from_fits(
     stokes_q_file: str | Path | None = None,
     stokes_u_file: str | Path | None = None,
     stokes_q_error_file: str | Path | None = None,
     stokes_u_error_file: str | Path | None = None,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+    noise_files_are_weight: bool = False,
 ) -> NDArray[np.float64]:
     no_stokes_files = stokes_q_file is None and stokes_u_file is None
     no_error_files = stokes_q_error_file is None and stokes_u_error_file is None
@@ -629,20 +630,25 @@ def get_noise_arr_from_fits(
         raise ValueError(msg)
 
     if not no_error_files:
+        # If user supplies error files - they take priority
         if stokes_q_error_file is None or stokes_u_error_file is None:
             msg = f"Must pass both Q and U error file! Got {stokes_q_error_file=} {stokes_q_error_file=}"
             raise ValueError(msg)
-        return get_noise_from_error_fits(
+        noise_arr = get_noise_from_error_fits(
             stokes_q_error_file,
             stokes_u_error_file,
             target_chunk_mb,
         )
+        if noise_files_are_weight:
+            return noise_arr
+    else:
+        # Fall back to noise estimate from QU cubes
+        if stokes_q_file is None or stokes_u_file is None:
+            msg = f"Must pass both Q and U file! Got {stokes_q_file=} {stokes_q_file=}"
+            raise ValueError(msg)
+        noise_arr = get_noise_from_fits(stokes_q_file, stokes_u_file, target_chunk_mb)
 
-    if stokes_q_file is None or stokes_u_file is None:
-        msg = f"Must pass both Q and U file! Got {stokes_q_file=} {stokes_q_file=}"
-        raise ValueError(msg)
-
-    return get_noise_from_fits(stokes_q_file, stokes_u_file, target_chunk_mb)
+    return 1.0 / noise_arr**2
 
 
 def rmsynth_3d_from_fits(
@@ -650,6 +656,7 @@ def rmsynth_3d_from_fits(
     stokes_u_file: str | Path,
     stokes_q_error_file: str | Path | None = None,
     stokes_u_error_file: str | Path | None = None,
+    noise_files_are_weight: bool = False,
     weight_arr: NDArray[np.float64] | None = None,
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
@@ -680,8 +687,10 @@ def rmsynth_3d_from_fits(
 
     Args:
         stokes_q_file (str | Path): Path to the Stokes Q FITS cube.
-        stokes_u_file (str | Path): Path to the Stokes U FITS cube, same
-            shape as the Q cube.
+        stokes_u_file (str | Path): Path to the Stokes U FITS cube.
+        stokes_q_error_file (str | Path None, optional): Path to the Stokes Q error cube.
+        stokes_u_error_file (str | Path None, optional): Path to the Stokes U error cube.
+        noise_files_are_weight (bool): Interpret 'error' files directly as weights.
         weight_arr (NDArray[np.float64] | None, optional): Per-channel weight
             array. Defaults to an estimate from the cube noise (see
             `rm_lite.utils.dask_io.estimate_channel_noise_mad`).
@@ -731,14 +740,14 @@ def rmsynth_3d_from_fits(
         "uniform_lsq",
         "briggs",
     ):
-        noise_arr = get_noise_arr_from_fits(
+        weight_arr = get_weight_arr_from_fits(
             stokes_q_file,
             stokes_u_file,
             stokes_q_error_file,
             stokes_u_error_file,
             target_chunk_mb=target_chunk_mb,
+            noise_files_are_weight=noise_files_are_weight,
         )
-        weight_arr = 1.0 / noise_arr**2
 
     stokes_i = None
     stokes_i_model = None
