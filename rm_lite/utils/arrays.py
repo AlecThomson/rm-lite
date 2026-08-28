@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 import dask.array as da
 import numpy as np
@@ -24,11 +24,11 @@ def zero_nonfinite(arr: ArrayT) -> ArrayT:
     dask's implementation, so use `isfinite` + `where` instead -- these
     dispatch identically for numpy and dask inputs.
     """
-    return np.where(np.isfinite(arr), arr, 0.0)
+    return cast(ArrayT, np.where(np.isfinite(arr), arr, 0.0))
 
 
 def broadcast_over_channels(
-    arr_1d: NDArray[np.float64], target: NDArray
+    arr_1d: NDArray[np.float64], target: NDArray[Any]
 ) -> NDArray[np.float64]:
     """Reshape a per-channel 1D array to broadcast against `target`.
 

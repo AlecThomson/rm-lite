@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import dask.array as da
 import numpy as np
@@ -158,7 +158,9 @@ def _compute_global_params(
     return rmsynth_params, theoretical_noise
 
 
-def _collapse_shared_weight_arr(weight_arr: NDArray | da.Array) -> NDArray | da.Array:
+def _collapse_shared_weight_arr(
+    weight_arr: NDArray[Any] | da.Array,
+) -> NDArray[Any] | da.Array:
     """Collapse a spatially-broadcast weight array back to per-channel.
 
     `_shared_rmsf` computes one RMSF for the whole cube, which is only valid
@@ -259,7 +261,7 @@ def _rmsynth_on_block(
     rmsynth_params: RMSynthParams,
     n_phi: int,
     log_level: int,
-    nufft_nthreads=1,
+    nufft_nthreads: int = 1,
 ) -> NDArray[np.complex128]:
     _, cy, cx = block.shape
     with quiet_logs(log_level):
@@ -282,7 +284,7 @@ def _rmsf_on_block(
     rmsynth_params: RMSynthParams,
     n_phi_double: int,
     log_level: int,
-    nufft_nthreads=1,
+    nufft_nthreads: int = 1,
 ) -> NDArray[np.complex128]:
     _, cy, cx = block.shape
     # When weight_arr is 3D, map_blocks slices it to match this block's own
@@ -513,6 +515,7 @@ def rmsynth_3d(
     rmsf_cube: da.Array | None = None
     if per_pixel_rmsf:
         weight_arr = rmsynth_params.weight_arr
+        map_blocks_args: tuple[Any, ...]
         if isinstance(weight_arr, da.Array) and weight_arr.ndim == 3:
             # weight_arr must be chunked exactly like pol_cube spatially so
             # map_blocks hands each block the weight slice for its own
@@ -525,7 +528,6 @@ def rmsynth_3d(
             # 1D (or plain numpy) weight_arr is shared by every pixel, so it
             # can stay a closed-over kwarg like the rest of rmsynth_params.
             map_blocks_args = (pol_cube,)
-
         rmsf_cube = da.map_blocks(
             _rmsf_on_block,
             *map_blocks_args,
