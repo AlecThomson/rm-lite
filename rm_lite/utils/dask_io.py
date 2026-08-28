@@ -362,21 +362,26 @@ def write_zarr_group(
     logger.info(f"Wrote {names} to {store} in {tock - tick:.3g} seconds.")
 
 
-def _channel_mad_std_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
+def mad_std_on_chan_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
     # One plane at a time rather than one `mad_std(..., axis=1)` over the whole
     # block: `nanmedian` copies its input, so the vectorised form peaked at
     # ~2x the block where this peaks at ~2x a single plane, for the same
     # result and the same wall-clock.
-    return np.array([mad_std(plane, ignore_nan=True) for plane in block])
+    stds = np.array([mad_std(plane, ignore_nan=True) for plane in block])
+    # Broadcast each channel's scalar MAD back over its spatial plane so the
+    # block shape (and hence the output array shape) matches the input cube.
+    return np.broadcast_to(stds[:, np.newaxis, np.newaxis], block.shape)
 
 
-def _channel_mad_lazy(cube: da.Array) -> da.Array:
-    """Lazy per-channel MAD std over every spatial pixel of a cube.
+def da_channel_mad(cube: da.Array) -> da.Array:
+    """Lazy per-channel MAD std, broadcast back over every spatial pixel.
 
-    Needs every pixel of a channel in one block (a robust median can't be
-    combined incrementally across separate spatial chunks), so a spatially
-    chunked cube has to be gathered first. Not computed -- so several cubes
-    can be reduced in one `compute` call.
+    Returns an array the same shape as `cube`, where every pixel in a given
+    channel plane holds that channel's MAD std. Needs every pixel of a
+    channel in one block (a robust median can't be combined incrementally
+    across separate spatial chunks), so a spatially chunked cube has to be
+    gathered first. Not computed -- so several cubes can be reduced in one
+    `compute` call.
     """
     if len(cube.chunks[1]) > 1 or len(cube.chunks[2]) > 1:
         # The rechunk is all-to-all: every input block feeds every output
@@ -390,12 +395,10 @@ def _channel_mad_lazy(cube: da.Array) -> da.Array:
             "`rmsynth_3d_from_fits`, which does) to keep this bounded."
         )
         cube = cube.rechunk({1: -1, 2: -1})
-    return da.map_blocks(
-        _channel_mad_std_block, cube, drop_axis=(1, 2), dtype=np.float64
-    )
+    return da.map_blocks(mad_std_on_chan_block, cube, dtype=np.float64)
 
 
-def estimate_stokes_i_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
+def estimate_single_stokes_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
     """Robust per-channel noise from a single Stokes I cube.
 
     Same MAD-based per-channel estimator as `estimate_channel_noise_mad`, but
@@ -413,7 +416,7 @@ def estimate_stokes_i_channel_noise(stokes_i: da.Array) -> NDArray[np.float64]:
         plain numpy array, not lazy.
     """
     tick = time.time()
-    (noise,) = compute(_channel_mad_lazy(stokes_i))
+    noise = compute(da_channel_mad(stokes_i))
     tock = time.time()
     logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
     return np.asarray(noise)
@@ -459,7 +462,7 @@ def estimate_channel_noise_mad(
 
     tick = time.time()
     # One compute so the Q and U reductions share scheduling.
-    q_noise, u_noise = compute(_channel_mad_lazy(stokes_q), _channel_mad_lazy(stokes_u))
+    q_noise, u_noise = compute(da_channel_mad(stokes_q), da_channel_mad(stokes_u))
     tock = time.time()
     logger.info(f"Per-channel noise estimation completed in {tock - tick:.3g} seconds.")
     return np.abs(q_noise + u_noise) / 2.0
