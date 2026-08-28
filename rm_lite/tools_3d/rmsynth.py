@@ -640,6 +640,9 @@ def get_weight_arr_from_fits(
             target_chunk_mb,
         )
         if noise_files_are_weight:
+            logger.warning(
+                "Interpreting Q and U error files directly as weights! Will not invert and square"
+            )
             return noise_arr
     else:
         # Fall back to noise estimate from QU cubes
@@ -764,6 +767,11 @@ def rmsynth_3d_from_fits(
             stokes_i_error, _ = read_fits_cube_dask(
                 stokes_i_error_file, target_chunk_mb=target_chunk_mb
             )
+            if noise_files_are_weight:
+                logger.warning(
+                    "Interpreting Stokes I error file as weight! Will sqrt & invert"
+                )
+                stokes_i_error = 1 / da.sqrt(stokes_i_error)
         elif estimate_stokes_i_noise:
             # Same reason as the Q/U noise above: a frequency-chunked read.
             i_planes, _ = read_fits_cube_channel_chunks(
