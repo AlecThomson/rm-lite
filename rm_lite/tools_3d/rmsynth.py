@@ -330,7 +330,9 @@ def _weight_arr_map_blocks_args(
     """
     if weight_arr.ndim != 3:
         return ()
-    weight_da = weight_arr if isinstance(weight_arr, da.Array) else da.from_array(weight_arr)
+    weight_da = (
+        weight_arr if isinstance(weight_arr, da.Array) else da.from_array(weight_arr)
+    )
     return (weight_da.rechunk({0: -1, 1: target.chunks[1], 2: target.chunks[2]}),)
 
 

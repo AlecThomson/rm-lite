@@ -28,8 +28,8 @@ def zero_nonfinite(arr: ArrayT) -> ArrayT:
 
 
 def broadcast_over_channels(
-    arr_1d: NDArray[np.float64], target: NDArray[Any]
-) -> NDArray[np.float64]:
+    arr_1d: NDArray[DType], target: NDArray[Any]
+) -> NDArray[DType]:
     """Reshape a per-channel 1D array to broadcast against `target`.
 
     `target` has frequency/channel as its leading axis and may carry extra

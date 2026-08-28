@@ -915,6 +915,24 @@ def briggs_weight(
     return weight
 
 
+def _match_channel_mask(
+    mask: NDArray[np.bool_], target: NDArray[Any]
+) -> NDArray[np.bool_]:
+    """Broadcast a per-channel boolean mask to align with `target`'s shape.
+
+    `mask` is 1D (per-channel) when it comes from a per-channel
+    `complex_pol_arr`, but `target` (natural_weight_arr / weight_arr) may be
+    3D (per-channel, per-pixel). Right-aligned broadcasting can't match a 1D
+    mask against a leading channel axis on its own -- reuse the same
+    reshape as `broadcast_over_channels`. If `mask` already matches
+    `target`'s shape (e.g. a genuinely per-pixel `complex_pol_arr`), leave it
+    unchanged.
+    """
+    if mask.shape == target.shape:
+        return mask
+    return broadcast_over_channels(mask, target)
+
+
 def compute_rmsynth_params(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
@@ -973,7 +991,9 @@ def compute_rmsynth_params(
     # inflate their neighbours' sampling density.
     mask = ~np.isfinite(complex_pol_arr)
     natural_weight_arr = natural_weight(real_qu_error)
-    natural_weight_arr[mask] = 0.0
+    natural_weight_arr = np.where(
+        _match_channel_mask(mask, natural_weight_arr), 0.0, natural_weight_arr
+    )
 
     # Broadcast-compatible view of lambda^2 for combining with weight arrays
     # that may carry extra spatial axes beyond the channel axis.
@@ -998,7 +1018,7 @@ def compute_rmsynth_params(
                 lambda_sq_arr_m2_b, natural_weight_arr, fdf_options.robust, cell_m2
             )
 
-    weight_arr[mask] = 0.0
+    weight_arr = np.where(_match_channel_mask(mask, weight_arr), 0.0, weight_arr)
 
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
     # Calculate a single global lam_sq_0_m2 value (summing over all axes when
