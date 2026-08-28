@@ -21,6 +21,7 @@ from rm_lite.tools_3d.rmsynth import (
     rmsynth_3d,
     rmsynth_3d_from_fits,
 )
+from rm_lite.utils import fitting as fitting_mod
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
 from rm_lite.utils.dask_io import (
     channel_chunk_size,
@@ -32,7 +33,6 @@ from rm_lite.utils.dask_io import (
     write_zarr_group,
 )
 from rm_lite.utils.synthesis import calc_faraday_moments, freq_to_lambda2
-from rm_lite.utils import fitting as fitting_mod
 
 RNG = np.random.default_rng(2025)
 
