@@ -318,14 +318,20 @@ def _weight_arr_map_blocks_args(
 
     A 3D weight_arr varies per pixel, so it must be rechunked to match
     `target`'s spatial chunks and passed as a real map_blocks array argument
-    -- otherwise every block's task would receive the whole, unsliced cube
-    instead of its own pixels' weights. A 1D (per-channel, shared) weight_arr
-    needs no such slicing and can stay a closed-over kwarg on rmsynth_params,
-    so this returns an empty tuple for that case.
+    -- otherwise every block's task would receive the whole, unsliced array
+    instead of its own pixels' weights. This applies whether weight_arr is
+    already a dask array or a plain numpy array (map_blocks does not
+    auto-chunk a numpy positional argument to match other array arguments,
+    so a numpy 3D weight_arr needs wrapping in `da.from_array` first).
+
+    A 1D (per-channel, shared) weight_arr needs no slicing and can stay a
+    closed-over kwarg on rmsynth_params, so this returns an empty tuple for
+    that case.
     """
-    if isinstance(weight_arr, da.Array) and weight_arr.ndim == 3:
-        return (weight_arr.rechunk({0: -1, 1: target.chunks[1], 2: target.chunks[2]}),)
-    return ()
+    if weight_arr.ndim != 3:
+        return ()
+    weight_da = weight_arr if isinstance(weight_arr, da.Array) else da.from_array(weight_arr)
+    return (weight_da.rechunk({0: -1, 1: target.chunks[1], 2: target.chunks[2]}),)
 
 
 def rmsynth_3d(
