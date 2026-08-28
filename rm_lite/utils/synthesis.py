@@ -16,7 +16,13 @@ from numpy.typing import NDArray
 from scipy import ndimage
 from tqdm.auto import trange
 
-from rm_lite.utils.arrays import arange, broadcast_over_channels, nd_to_two_d, two_d_to_nd, zero_nonfinite
+from rm_lite.utils.arrays import (
+    arange,
+    broadcast_over_channels,
+    nd_to_two_d,
+    two_d_to_nd,
+    zero_nonfinite,
+)
 from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
@@ -732,9 +738,7 @@ def compute_theoretical_noise(
     weight_arr: NDArray[np.float64],
 ) -> TheoreticalNoise:
     weight_arr = zero_nonfinite(weight_arr)
-    complex_pol_error_flagged = zero_nonfinite(
-        complex_pol_error
-    )
+    complex_pol_error_flagged = zero_nonfinite(complex_pol_error)
     fdf_complex_noise = np.sqrt(
         np.nansum(weight_arr**2 * complex_pol_error_flagged**2)
         / (np.sum(weight_arr)) ** 2
@@ -1369,7 +1373,9 @@ def get_rmsf_nufft(
         old_data_shape = weight_arr.shape
     else:
         old_data_shape = None
-    num_pixels = old_data_shape[1] * old_data_shape[2] if old_data_shape is not None else 1
+    num_pixels = (
+        old_data_shape[1] * old_data_shape[2] if old_data_shape is not None else 1
+    )
 
     # Reshape the mask array to 2 dimensions: (nchan, 1) if spatially uniform,
     # (nchan, num_pixels) if it varies per pixel.

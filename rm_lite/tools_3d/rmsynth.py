@@ -157,6 +157,7 @@ def _compute_global_params(
     )
     return rmsynth_params, theoretical_noise
 
+
 def _collapse_shared_weight_arr(weight_arr: NDArray | da.Array) -> NDArray | da.Array:
     """Collapse a spatially-broadcast weight array back to per-channel.
 
@@ -176,7 +177,8 @@ def _collapse_shared_weight_arr(weight_arr: NDArray | da.Array) -> NDArray | da.
     if weight_arr.ndim == 1:
         return weight_arr
 
-    return weight_arr.mean(axis=(1,2))
+    return weight_arr.mean(axis=(1, 2))
+
 
 def _shared_rmsf(
     rmsynth_params: RMSynthParams,
@@ -571,6 +573,7 @@ def get_noise_from_error_fits(
 
     return (stokes_q_error + stokes_u_error) / 2
 
+
 def get_noise_from_fits(
     stokes_q_file: str | Path,
     stokes_u_file: str | Path,
@@ -586,6 +589,7 @@ def get_noise_from_fits(
     )
     return estimate_channel_noise_mad(q_planes, u_planes)
 
+
 def get_noise_arr_from_fits(
     stokes_q_file: str | Path | None = None,
     stokes_u_file: str | Path | None = None,
@@ -593,7 +597,6 @@ def get_noise_arr_from_fits(
     stokes_u_error_file: str | Path | None = None,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
 ) -> NDArray[np.float64]:
-
     no_stokes_files = stokes_q_file is None and stokes_u_file is None
     no_error_files = stokes_q_error_file is None and stokes_u_error_file is None
 
@@ -615,10 +618,7 @@ def get_noise_arr_from_fits(
         msg = f"Must pass both Q and U file! Got {stokes_q_file=} {stokes_q_file=}"
         raise ValueError(msg)
 
-    return get_noise_from_fits(
-        stokes_q_file, stokes_u_file, target_chunk_mb
-    )
-
+    return get_noise_from_fits(stokes_q_file, stokes_u_file, target_chunk_mb)
 
 
 def rmsynth_3d_from_fits(

@@ -16,6 +16,7 @@ TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
 DType = TypeVar("DType", bound=np.generic)
 ArrayT = TypeVar("ArrayT", bound=NDArray[np.floating] | da.Array)
 
+
 def zero_nonfinite(arr: ArrayT) -> ArrayT:
     """Replace nan/+inf/-inf with 0.0, working for both numpy and dask arrays.
 
@@ -24,6 +25,7 @@ def zero_nonfinite(arr: ArrayT) -> ArrayT:
     dispatch identically for numpy and dask inputs.
     """
     return np.where(np.isfinite(arr), arr, 0.0)
+
 
 def broadcast_over_channels(
     arr_1d: NDArray[np.float64], target: NDArray
@@ -39,6 +41,7 @@ def broadcast_over_channels(
     if target.ndim == 1:
         return arr_1d
     return arr_1d.reshape(arr_1d.shape[0], *([1] * (target.ndim - 1)))
+
 
 def nd_to_two_d(arr: NDArray[DType]) -> NDArray[DType]:
     """Convert an array to 2D.
