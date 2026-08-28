@@ -32,6 +32,7 @@ from rm_lite.utils.dask_io import (
     write_zarr_group,
 )
 from rm_lite.utils.synthesis import calc_faraday_moments, freq_to_lambda2
+from rm_lite.utils import fitting as fitting_mod
 
 RNG = np.random.default_rng(2025)
 
@@ -262,7 +263,7 @@ def test_mixed_batch_shares_upstream_work(monkeypatch):
     stokes_q = 0.6 * stokes_i * np.cos(angle)
     stokes_u = 0.6 * stokes_i * np.sin(angle)
 
-    fit_calls = _counting(monkeypatch, rmsynth3d_mod, "_fit_stokes_i_block")
+    fit_calls = _counting(monkeypatch, fitting_mod, "_fit_stokes_i_block")
     nufft_calls = _counting(monkeypatch, rmsynth3d_mod, "rmsynth_nufft")
     clean_calls = _counting(monkeypatch, rmclean3d_mod, "_clean_block")
 
@@ -489,7 +490,7 @@ def test_estimate_channel_noise_mad_recovers_true_noise():
     q_dask = _chunked(stokes_q, 16, 16)
     u_dask = _chunked(stokes_u, 16, 16)
 
-    noise = estimate_channel_noise_mad(q_dask, u_dask).mean(axis=(1, 2))
+    noise = estimate_channel_noise_mad(q_dask, u_dask)
 
     assert isinstance(noise, np.ndarray)
     assert noise.shape == (n_freq,)
