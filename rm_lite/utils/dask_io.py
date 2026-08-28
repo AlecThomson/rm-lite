@@ -367,10 +367,7 @@ def mad_std_on_chan_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
     # block: `nanmedian` copies its input, so the vectorised form peaked at
     # ~2x the block where this peaks at ~2x a single plane, for the same
     # result and the same wall-clock.
-    stds = np.array([mad_std(plane, ignore_nan=True) for plane in block])
-    # Broadcast each channel's scalar MAD back over its spatial plane so the
-    # block shape (and hence the output array shape) matches the input cube.
-    return np.broadcast_to(stds[:, np.newaxis, np.newaxis], block.shape)
+    return np.array([mad_std(plane, ignore_nan=True) for plane in block])
 
 
 def da_channel_mad(cube: da.Array) -> da.Array:
