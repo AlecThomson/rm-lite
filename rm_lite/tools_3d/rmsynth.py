@@ -14,7 +14,7 @@ from rm_lite.utils.dask_io import (
     DEFAULT_TARGET_CHUNK_MB,
     complex_pol_dask,
     estimate_channel_noise_mad,
-    estimate_stokes_i_channel_noise,
+    estimate_single_stokes_channel_noise,
     freq_arr_hz_from_header,
     read_fits_cube_channel_chunks,
     read_fits_cube_dask,
@@ -157,6 +157,26 @@ def _compute_global_params(
     )
     return rmsynth_params, theoretical_noise
 
+def _collapse_shared_weight_arr(weight_arr: NDArray | da.Array) -> NDArray | da.Array:
+    """Collapse a spatially-broadcast weight array back to per-channel.
+
+    `_shared_rmsf` computes one RMSF for the whole cube, which is only valid
+    if every pixel shares the same per-channel weight vector (see its
+    docstring). `weight_arr` may be 3D (e.g. built from `da_channel_mad`,
+    which broadcasts one scalar per channel across the whole plane), so pull
+    out that shared vector from a single pixel.
+
+    This does NOT verify pixel-invariance -- doing so would force a full
+    read of a potentially huge cube. Callers passing a 3D `weight_arr` are
+    asserting it is spatially uniform (e.g. built by broadcasting a
+    per-channel vector); if it isn't, the RMSF silently reflects only one
+    pixel's weights rather than the whole cube's.
+
+    """
+    if weight_arr.ndim == 1:
+        return weight_arr
+
+    return weight_arr.mean(axis=(1,2))
 
 def _shared_rmsf(
     rmsynth_params: RMSynthParams,
@@ -174,7 +194,7 @@ def _shared_rmsf(
         rmsf_result = get_rmsf_nufft(
             lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
             phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-            weight_arr=rmsynth_params.weight_arr,
+            weight_arr=_collapse_shared_weight_arr(rmsynth_params.weight_arr),
             lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
             do_fit_rmsf=False,
             nthreads=nthreads,
@@ -255,24 +275,28 @@ def _rmsynth_on_block(
 
 def _rmsf_on_block(
     block: NDArray[np.complex128],
+    weight_block: NDArray[np.float64] | None = None,
+    *,
     rmsynth_params: RMSynthParams,
     n_phi_double: int,
     log_level: int,
     nufft_nthreads=1,
 ) -> NDArray[np.complex128]:
     _, cy, cx = block.shape
+    # When weight_arr is 3D, map_blocks slices it to match this block's own
+    # pixels (via weight_block); rmsynth_params.weight_arr itself still holds
+    # the whole, unsliced cube and must not be used directly in that case.
+    weight_arr = weight_block if weight_block is not None else rmsynth_params.weight_arr
     with quiet_logs(log_level):
         rmsf_result = get_rmsf_nufft(
             lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
             phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-            weight_arr=rmsynth_params.weight_arr,
+            weight_arr=weight_arr,
             lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
             mask_arr=~np.isfinite(block),
             do_fit_rmsf=False,
             nthreads=nufft_nthreads,
         )
-    # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is
-    # actually complex128 at runtime (built from a finufft complex output).
     return rmsf_result.rmsf_cube.reshape(n_phi_double, cy, cx)  # type: ignore[return-value]
 
 
@@ -433,7 +457,7 @@ def rmsynth_3d(
     elif stokes_i is not None:
         stokes_i = cast(da.Array, stokes_i.rechunk(stokes_q.chunks))
         if stokes_i_error is None and estimate_stokes_i_noise:
-            stokes_i_error = estimate_stokes_i_channel_noise(stokes_i)
+            stokes_i_error = estimate_single_stokes_channel_noise(stokes_i)
         if compute_model_error:
             logger.warning(
                 "compute_model_error=True: the model-error cube shares one dask "
@@ -486,9 +510,23 @@ def rmsynth_3d(
 
     rmsf_cube: da.Array | None = None
     if per_pixel_rmsf:
+        weight_arr = rmsynth_params.weight_arr
+        if isinstance(weight_arr, da.Array) and weight_arr.ndim == 3:
+            # weight_arr must be chunked exactly like pol_cube spatially so
+            # map_blocks hands each block the weight slice for its own
+            # pixels, not the whole cube's weights.
+            weight_arr = weight_arr.rechunk(
+                {0: -1, 1: pol_cube.chunks[1], 2: pol_cube.chunks[2]}
+            )
+            map_blocks_args = (pol_cube, weight_arr)
+        else:
+            # 1D (or plain numpy) weight_arr is shared by every pixel, so it
+            # can stay a closed-over kwarg like the rest of rmsynth_params.
+            map_blocks_args = (pol_cube,)
+
         rmsf_cube = da.map_blocks(
             _rmsf_on_block,
-            pol_cube,
+            *map_blocks_args,
             chunks=((n_phi_double,), pol_cube.chunks[1], pol_cube.chunks[2]),
             dtype=np.complex128,
             rmsynth_params=rmsynth_params,
@@ -519,9 +557,75 @@ def rmsynth_3d(
     )
 
 
+def get_noise_from_error_fits(
+    stokes_q_error_file: str | Path,
+    stokes_u_error_file: str | Path,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+) -> NDArray[np.float64]:
+    stokes_q_error, _ = read_fits_cube_dask(
+        stokes_q_error_file, target_chunk_mb=target_chunk_mb
+    )
+    stokes_u_error, _ = read_fits_cube_dask(
+        stokes_u_error_file, target_chunk_mb=target_chunk_mb
+    )
+
+    return (stokes_q_error + stokes_u_error) / 2
+
+def get_noise_from_fits(
+    stokes_q_file: str | Path,
+    stokes_u_file: str | Path,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+) -> NDArray[np.float64]:
+    # Per-channel noise needs whole image planes, so it gets its own
+    # frequency-chunked read
+    q_planes, _ = read_fits_cube_channel_chunks(
+        stokes_q_file, target_chunk_mb=target_chunk_mb
+    )
+    u_planes, _ = read_fits_cube_channel_chunks(
+        stokes_u_file, target_chunk_mb=target_chunk_mb
+    )
+    return estimate_channel_noise_mad(q_planes, u_planes)
+
+def get_noise_arr_from_fits(
+    stokes_q_file: str | Path | None = None,
+    stokes_u_file: str | Path | None = None,
+    stokes_q_error_file: str | Path | None = None,
+    stokes_u_error_file: str | Path | None = None,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+) -> NDArray[np.float64]:
+
+    no_stokes_files = stokes_q_file is None and stokes_u_file is None
+    no_error_files = stokes_q_error_file is None and stokes_u_error_file is None
+
+    if no_stokes_files and no_error_files:
+        msg = "Must provide at least Stokes QU files -OR- Stokes QU error files"
+        raise ValueError(msg)
+
+    if not no_error_files:
+        if stokes_q_error_file is None or stokes_u_error_file is None:
+            msg = f"Must pass both Q and U error file! Got {stokes_q_error_file=} {stokes_q_error_file=}"
+            raise ValueError(msg)
+        return get_noise_from_error_fits(
+            stokes_q_error_file,
+            stokes_u_error_file,
+            target_chunk_mb,
+        )
+
+    if stokes_q_file is None or stokes_u_file is None:
+        msg = f"Must pass both Q and U file! Got {stokes_q_file=} {stokes_q_file=}"
+        raise ValueError(msg)
+
+    return get_noise_from_fits(
+        stokes_q_file, stokes_u_file, target_chunk_mb
+    )
+
+
+
 def rmsynth_3d_from_fits(
     stokes_q_file: str | Path,
     stokes_u_file: str | Path,
+    stokes_q_error_file: str | Path | None = None,
+    stokes_u_error_file: str | Path | None = None,
     weight_arr: NDArray[np.float64] | None = None,
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
@@ -603,16 +707,13 @@ def rmsynth_3d_from_fits(
         "uniform_lsq",
         "briggs",
     ):
-        # Per-channel noise needs whole image planes, so it gets its own
-        # frequency-chunked read of the same files rather than a gather of the
-        # spatially chunked cubes above.
-        q_planes, _ = read_fits_cube_channel_chunks(
-            stokes_q_file, target_chunk_mb=target_chunk_mb
+        noise_arr = get_noise_arr_from_fits(
+            stokes_q_file,
+            stokes_u_file,
+            stokes_q_error_file,
+            stokes_u_error_file,
+            target_chunk_mb=target_chunk_mb,
         )
-        u_planes, _ = read_fits_cube_channel_chunks(
-            stokes_u_file, target_chunk_mb=target_chunk_mb
-        )
-        noise_arr = estimate_channel_noise_mad(q_planes, u_planes)
         weight_arr = 1.0 / noise_arr**2
 
     stokes_i = None
@@ -635,7 +736,7 @@ def rmsynth_3d_from_fits(
             i_planes, _ = read_fits_cube_channel_chunks(
                 stokes_i_file, target_chunk_mb=target_chunk_mb
             )
-            stokes_i_error = estimate_stokes_i_channel_noise(i_planes)
+            stokes_i_error = estimate_single_stokes_channel_noise(i_planes)
 
     return rmsynth_3d(
         stokes_q=stokes_q,
