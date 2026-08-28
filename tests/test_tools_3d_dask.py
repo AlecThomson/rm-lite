@@ -489,7 +489,7 @@ def test_estimate_channel_noise_mad_recovers_true_noise():
     q_dask = _chunked(stokes_q, 16, 16)
     u_dask = _chunked(stokes_u, 16, 16)
 
-    noise = estimate_channel_noise_mad(q_dask, u_dask)
+    noise = estimate_channel_noise_mad(q_dask, u_dask).mean(axis=(1, 2))
 
     assert isinstance(noise, np.ndarray)
     assert noise.shape == (n_freq,)
