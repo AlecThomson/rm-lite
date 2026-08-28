@@ -258,18 +258,24 @@ def _match_chunks_to_fdf(
 
 def _rmsynth_on_block(
     block: NDArray[np.complex128],
+    weight_block: NDArray[np.float64] | None = None,
+    *,
     rmsynth_params: RMSynthParams,
     n_phi: int,
     log_level: int,
     nufft_nthreads: int = 1,
 ) -> NDArray[np.complex128]:
     _, cy, cx = block.shape
+    # When weight_arr is 3D, map_blocks slices it to match this block's own
+    # pixels (via weight_block); rmsynth_params.weight_arr itself still holds
+    # the whole, unsliced cube and must not be used directly in that case.
+    weight_arr = weight_block if weight_block is not None else rmsynth_params.weight_arr
     with quiet_logs(log_level):
         fdf = rmsynth_nufft(
             complex_pol_arr=block,
             lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
             phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-            weight_arr=rmsynth_params.weight_arr,
+            weight_arr=weight_arr,
             lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
             nthreads=nufft_nthreads,
         )
@@ -302,6 +308,24 @@ def _rmsf_on_block(
             nthreads=nufft_nthreads,
         )
     return rmsf_result.rmsf_cube.reshape(n_phi_double, cy, cx)  # type: ignore[return-value]
+
+
+def _weight_arr_map_blocks_args(
+    weight_arr: NDArray[np.float64] | da.Array,
+    target: da.Array,
+) -> tuple[da.Array, ...]:
+    """Positional map_blocks args for `weight_arr`, if it needs one.
+
+    A 3D weight_arr varies per pixel, so it must be rechunked to match
+    `target`'s spatial chunks and passed as a real map_blocks array argument
+    -- otherwise every block's task would receive the whole, unsliced cube
+    instead of its own pixels' weights. A 1D (per-channel, shared) weight_arr
+    needs no such slicing and can stay a closed-over kwarg on rmsynth_params,
+    so this returns an empty tuple for that case.
+    """
+    if isinstance(weight_arr, da.Array) and weight_arr.ndim == 3:
+        return (weight_arr.rechunk({0: -1, 1: target.chunks[1], 2: target.chunks[2]}),)
+    return ()
 
 
 def rmsynth_3d(
@@ -340,8 +364,10 @@ def rmsynth_3d(
             otherwise outgrow it.
         stokes_u (da.Array): Stokes U cube, same shape/chunks as `stokes_q`.
         freq_arr_hz (NDArray[np.float64]): Frequency array in Hz.
-        weight_arr (NDArray[np.float64] | None, optional): Per-channel (not
-            per-pixel) weight array. Defaults to uniform.
+        weight_arr (NDArray[np.float64] | None, optional): Weight array,
+            per-channel (n_freq,) if shared by every pixel, or per-channel
+            per-pixel (n_freq, ny, nx) if weights vary spatially. Defaults to
+            uniform.
         phi_max_radm2 (float | None, optional): Maximum Faraday depth. Defaults to None.
         d_phi_radm2 (float | None, optional): Faraday depth resolution. Defaults to None.
         n_samples (float | None, optional): Samples across the RMSF. Defaults to 10.0.
@@ -500,6 +526,7 @@ def rmsynth_3d(
     fdf_dirty_cube = da.map_blocks(
         _rmsynth_on_block,
         pol_cube,
+        *_weight_arr_map_blocks_args(rmsynth_params.weight_arr, pol_cube),
         chunks=((n_phi,), pol_cube.chunks[1], pol_cube.chunks[2]),
         dtype=np.complex128,
         rmsynth_params=rmsynth_params,
@@ -514,23 +541,10 @@ def rmsynth_3d(
 
     rmsf_cube: da.Array | None = None
     if per_pixel_rmsf:
-        weight_arr = rmsynth_params.weight_arr
-        map_blocks_args: tuple[Any, ...]
-        if isinstance(weight_arr, da.Array) and weight_arr.ndim == 3:
-            # weight_arr must be chunked exactly like pol_cube spatially so
-            # map_blocks hands each block the weight slice for its own
-            # pixels, not the whole cube's weights.
-            weight_arr = weight_arr.rechunk(
-                {0: -1, 1: pol_cube.chunks[1], 2: pol_cube.chunks[2]}
-            )
-            map_blocks_args = (pol_cube, weight_arr)
-        else:
-            # 1D (or plain numpy) weight_arr is shared by every pixel, so it
-            # can stay a closed-over kwarg like the rest of rmsynth_params.
-            map_blocks_args = (pol_cube,)
         rmsf_cube = da.map_blocks(
             _rmsf_on_block,
-            *map_blocks_args,
+            pol_cube,
+            *_weight_arr_map_blocks_args(rmsynth_params.weight_arr, pol_cube),
             chunks=((n_phi_double,), pol_cube.chunks[1], pol_cube.chunks[2]),
             dtype=np.complex128,
             rmsynth_params=rmsynth_params,

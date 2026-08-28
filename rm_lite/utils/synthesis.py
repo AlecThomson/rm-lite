@@ -1093,7 +1093,9 @@ def rmsynth_nufft(
         complex_pol_arr (NDArray[np.complex128]): Complex polarisation values (Q + iU)
         lambda_sq_arr_m2 (NDArray[np.float64]): Wavelength^2 values in m^2
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
-        weight_arr (NDArray[np.float64]): Weight array
+        weight_arr (NDArray[np.float64]): Weight array. 1D (per-channel) if
+            shared by every pixel, or 3D (matching complex_pol_arr's shape)
+            if weights vary spectrally per pixel.
         lam_sq_0_m2 (Optional[float], optional): Reference wavelength^2 in m^2. Defaults to None.
         eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
         nthreads (int, optional): finufft OpenMP threads. 0 uses finufft's default
@@ -1101,7 +1103,7 @@ def rmsynth_nufft(
             avoid oversubscription. Defaults to 0.
 
     Raises:
-        ValueError: If the weight and lambda^2 arrays are not the same shape.
+        ValueError: If weight_arr is not 1D or the same shape as complex_pol_arr.
         ValueError: If the Stokes Q and U data arrays are not the same shape.
         ValueError: If the data dimensions are > 3.
         ValueError: If the data depth does not match the lambda^2 vector.
@@ -1112,12 +1114,6 @@ def rmsynth_nufft(
     tick = time.time()
     msg = f"Running RM-synthesis using the NUFFTs over {len(phi_arr_radm2)} Faraday depth channels."
     logger.info(msg)
-    flagged_weight_arr = zero_nonfinite(weight_arr)
-
-    # Sanity check on array sizes
-    if flagged_weight_arr.shape != lambda_sq_arr_m2.shape:
-        msg = f"Weight and lambda^2 arrays must be the same shape. Got {weight_arr.shape} and {lambda_sq_arr_m2.shape}"
-        raise ValueError(msg)
 
     n_dims = len(complex_pol_arr.shape)
     if not n_dims <= 3:
@@ -1128,6 +1124,22 @@ def rmsynth_nufft(
         msg = f"Data depth does not match lambda^2 vector ({complex_pol_arr.shape[0]} vs {lambda_sq_arr_m2.shape[0]})."
         raise ValueError(msg)
 
+    # Sanity check on weight_arr: either 1D and per-channel, or 3D and
+    # matching complex_pol_arr's full shape (per-channel, per-pixel).
+    if weight_arr.ndim == 1:
+        if weight_arr.shape[0] != lambda_sq_arr_m2.shape[0]:
+            msg = f"Weight and lambda^2 arrays must have matching channel counts. Got {weight_arr.shape} and {lambda_sq_arr_m2.shape}"
+            raise ValueError(msg)
+    elif weight_arr.ndim == complex_pol_arr.ndim:
+        if weight_arr.shape != complex_pol_arr.shape:
+            msg = f"3D weight array must match the data shape. Got {weight_arr.shape} and {complex_pol_arr.shape}"
+            raise ValueError(msg)
+    else:
+        msg = f"Weight array must be 1D (per-channel) or match the data's {n_dims}D shape. Got {weight_arr.ndim}D."
+        raise ValueError(msg)
+
+    flagged_weight_arr = zero_nonfinite(weight_arr)
+
     if complex_pol_arr.size == 0:
         msg = "No unflagged data remains. Not doing rm-synthesis"
         logger.critical(msg)
@@ -1136,7 +1148,8 @@ def rmsynth_nufft(
             + 1j * np.ones_like(phi_arr_radm2) * np.nan
         )
 
-    # Reshape the data arrays to 2 dimensions
+    # Reshape the data array (and, if 3D, the weight array identically) to 2
+    # dimensions: (nchan, num_pixels).
     if n_dims == 1:
         complex_pol_arr_2d = np.reshape(complex_pol_arr, (complex_pol_arr.shape[0], 1))
     elif n_dims == 3:
@@ -1151,22 +1164,34 @@ def rmsynth_nufft(
     else:
         complex_pol_arr_2d = complex_pol_arr
 
+    if flagged_weight_arr.ndim == 1:
+        # Shared per-channel weight: (nchan, 1) broadcasts against every
+        # pixel column below.
+        flagged_weight_arr = np.reshape(
+            flagged_weight_arr, (flagged_weight_arr.shape[0], 1)
+        )
+    else:
+        # Per-pixel weight: flatten the same way complex_pol_arr was.
+        flagged_weight_arr = np.reshape(
+            flagged_weight_arr, (flagged_weight_arr.shape[0], -1)
+        )
+
     # Create a complex polarised cube, B&dB Eqns. (8) and (14)
     # Array has dimensions [nFreq, nY * nX]
-    pol_cube = complex_pol_arr_2d * flagged_weight_arr[:, np.newaxis]
+    pol_cube = complex_pol_arr_2d * flagged_weight_arr
 
     # Check for NaNs (flagged data) in the cube & set to zero
     mask_cube = ~np.isfinite(pol_cube)
     pol_cube = zero_nonfinite(pol_cube)
 
     # If full planes are flagged then set corresponding weights to zero
-    mask_planes = np.sum(~mask_cube, axis=1)
+    mask_planes = np.sum(~mask_cube, axis=1, keepdims=True)
     mask_planes = np.where(mask_planes == 0, 0, 1)
-    flagged_weight_arr *= mask_planes
+    flagged_weight_arr = flagged_weight_arr * mask_planes
 
     # The K value used to scale each FDF spectrum must take into account
     # flagged voxels data in the datacube and can be position dependent
-    weight_cube = np.invert(mask_cube) * flagged_weight_arr[:, np.newaxis]
+    weight_cube = np.invert(mask_cube) * flagged_weight_arr
     with np.errstate(divide="ignore", invalid="ignore"):
         scale_arr = np.true_divide(1.0, np.sum(weight_cube, axis=0))
         scale_arr[scale_arr == np.inf] = 0
