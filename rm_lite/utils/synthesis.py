@@ -16,7 +16,7 @@ from numpy.typing import NDArray
 from scipy import ndimage
 from tqdm.auto import trange
 
-from rm_lite.utils.arrays import arange, nd_to_two_d, two_d_to_nd
+from rm_lite.utils.arrays import arange, broadcast_over_channels, nd_to_two_d, two_d_to_nd, zero_nonfinite
 from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
@@ -731,9 +731,9 @@ def compute_theoretical_noise(
     complex_pol_error: NDArray[np.complex128],
     weight_arr: NDArray[np.float64],
 ) -> TheoreticalNoise:
-    weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
-    complex_pol_error_flagged = np.nan_to_num(
-        complex_pol_error, nan=0.0, posinf=0.0, neginf=0.0
+    weight_arr = zero_nonfinite(weight_arr)
+    complex_pol_error_flagged = zero_nonfinite(
+        complex_pol_error
     )
     fdf_complex_noise = np.sqrt(
         np.nansum(weight_arr**2 * complex_pol_error_flagged**2)
@@ -970,29 +970,37 @@ def compute_rmsynth_params(
     mask = ~np.isfinite(complex_pol_arr)
     natural_weight_arr = natural_weight(real_qu_error)
     natural_weight_arr[mask] = 0.0
+
+    # Broadcast-compatible view of lambda^2 for combining with weight arrays
+    # that may carry extra spatial axes beyond the channel axis.
+    lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, natural_weight_arr)
+
     match fdf_options.weight_type:
         case "variance" | "natural":
             weight_arr = natural_weight_arr
         case "uniform":
-            weight_arr = np.ones_like(freq_arr_hz)
+            # Match natural_weight_arr's shape (which may be 3D), not
+            # freq_arr_hz (always 1D).
+            weight_arr = np.ones_like(natural_weight_arr)
         case "uniform_lsq":
             weight_arr = uniform_lsq_weight(
-                lambda_sq_arr_m2, natural_weight_arr, cell_m2
+                lambda_sq_arr_m2_b, natural_weight_arr, cell_m2
             )
         case "briggs":
             if fdf_options.robust is None:
                 msg = "Briggs weighting requires a `robust` parameter."
                 raise ValueError(msg)
             weight_arr = briggs_weight(
-                lambda_sq_arr_m2, natural_weight_arr, fdf_options.robust, cell_m2
+                lambda_sq_arr_m2_b, natural_weight_arr, fdf_options.robust, cell_m2
             )
 
     weight_arr[mask] = 0.0
 
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
-    # Calculate a global lam_sq_0_m2 value, ignoring isolated flagged voxels
+    # Calculate a single global lam_sq_0_m2 value (summing over all axes when
+    # weight_arr is 3D), ignoring isolated flagged voxels.
     scale_factor = 1.0 / np.nansum(weight_arr)
-    lam_sq_0_m2 = float(scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2))
+    lam_sq_0_m2 = float(scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2_b))
     if not np.isfinite(lam_sq_0_m2):
         lam_sq_0_m2 = float(np.nanmean(lambda_sq_arr_m2))
 
@@ -1100,7 +1108,7 @@ def rmsynth_nufft(
     tick = time.time()
     msg = f"Running RM-synthesis using the NUFFTs over {len(phi_arr_radm2)} Faraday depth channels."
     logger.info(msg)
-    flagged_weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
+    flagged_weight_arr = zero_nonfinite(weight_arr)
 
     # Sanity check on array sizes
     if flagged_weight_arr.shape != lambda_sq_arr_m2.shape:
@@ -1145,7 +1153,7 @@ def rmsynth_nufft(
 
     # Check for NaNs (flagged data) in the cube & set to zero
     mask_cube = ~np.isfinite(pol_cube)
-    pol_cube = np.nan_to_num(pol_cube, nan=0.0, posinf=0.0, neginf=0.0)
+    pol_cube = zero_nonfinite(pol_cube)
 
     # If full planes are flagged then set corresponding weights to zero
     mask_planes = np.sum(~mask_cube, axis=1)
@@ -1158,7 +1166,7 @@ def rmsynth_nufft(
     with np.errstate(divide="ignore", invalid="ignore"):
         scale_arr = np.true_divide(1.0, np.sum(weight_cube, axis=0))
         scale_arr[scale_arr == np.inf] = 0
-        scale_arr = np.nan_to_num(scale_arr)
+        scale_arr = zero_nonfinite(scale_arr)
 
     # Clean up one cube worth of memory
     del weight_cube
@@ -1280,7 +1288,10 @@ def get_rmsf_nufft(
     Args:
         lambda_sq_arr_m2 (NDArray[np.float64]): Wavelength^2 values in m^2
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
-        weight_arr (NDArray[np.float64]): Weight array
+        weight_arr (NDArray[np.float64]): Weight array. 1D (per-channel) if
+            every pixel shares the same weighting, or 3D (channel, y, x) if
+            weights vary spectrally per pixel (e.g. per-pixel noise
+            estimates).
         lam_sq_0_m2 (float): Reference wavelength^2 value
         super_resolution (bool, optional): Use superresolution. Defaults to False.
         mask_arr (Optional[NDArray[np.float64]], optional): Mask array. Defaults to None.
@@ -1291,23 +1302,34 @@ def get_rmsf_nufft(
             (all cores). Set to 1 when parallelising across chunks with dask, to
             avoid oversubscription. Defaults to 0.
         reuse_rmsf (bool, optional): Compute one RMSF and reuse it for every
-            pixel when they all share the same channel flagging, instead of
-            running the NUFFT per pixel for an identical answer. The check below
-            gates this regardless, so the flag can only decline a saving already
-            known to be safe; it exists to get at the per-pixel path for testing
-            and debugging. Defaults to True.
+            pixel when they all share the same channel flagging and weighting,
+            instead of running the NUFFT per pixel for an identical answer. The
+            check below gates this regardless, so the flag can only decline a
+            saving already known to be safe; it exists to get at the per-pixel
+            path for testing and debugging. Defaults to True.
 
     Raises:
-        ValueError: If the wavelength^2 and weight arrays are not the same shape.
+        ValueError: If weight_arr is not 1D or 3D.
+        ValueError: If the wavelength^2 and weight arrays don't have matching
+            channel counts.
         ValueError: If the mask dimensions are > 3.
         ValueError: If the mask depth does not match the lambda^2 vector.
+        ValueError: If a 3D mask and a 3D weight array cover different pixel
+            grids.
 
     Returns:
         RMSFResults: rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_arr
     """
     phi_double_arr_radm2 = make_double_phi_arr(phi_arr_radm2)
-    weight_arr = weight_arr.copy()
-    weight_arr = np.nan_to_num(weight_arr, nan=0.0, posinf=0.0, neginf=0.0)
+    weight_arr = np.asarray(weight_arr, dtype=float).copy()
+    weight_arr = zero_nonfinite(weight_arr)
+
+    if weight_arr.ndim not in (1, 3):
+        msg = "weight array must be 1D (per-channel) or 3D (per-channel, per-pixel)."
+        raise ValueError(msg)
+    if weight_arr.shape[0] != lambda_sq_arr_m2.shape[0]:
+        msg = "wavelength^2 and weight arrays must have matching channel counts."
+        raise ValueError(msg)
 
     # Set the mask array (default to 1D, no masked channels)
     if mask_arr is None:
@@ -1317,11 +1339,6 @@ def get_rmsf_nufft(
         mask_arr = mask_arr.astype(bool)
         n_dimension = len(mask_arr.shape)
 
-    # Sanity checks on array sizes
-    if weight_arr.shape != lambda_sq_arr_m2.shape:
-        msg = "wavelength^2 and weight arrays must be the same shape."
-        raise ValueError(msg)
-
     if not n_dimension <= 3:
         msg = "mask dimensions must be <= 3."
         raise ValueError(msg)
@@ -1330,57 +1347,88 @@ def get_rmsf_nufft(
         msg = f"Mask depth does not match lambda^2 vector ({mask_arr.shape[0]} vs {lambda_sq_arr_m2.shape[-1]})."
         raise ValueError(msg)
 
-    # Reshape the mask array to 2 dimensions
+    # A 3D mask and a 3D weight array must describe the same pixel grid, or
+    # there's no way to know which weight column pairs with which mask column
+    # once both are flattened below.
+    if (
+        n_dimension == 3
+        and weight_arr.ndim == 3
+        and mask_arr.shape[1:] != weight_arr.shape[1:]
+    ):
+        msg = (
+            "mask and weight arrays cover different pixel grids "
+            f"({mask_arr.shape[1:]} vs {weight_arr.shape[1:]})."
+        )
+        raise ValueError(msg)
+
+    # The true spatial pixel count, from whichever of mask/weight is 3D (they
+    # must agree, per the check above, if both are).
+    if n_dimension == 3:
+        old_data_shape = mask_arr.shape
+    elif weight_arr.ndim == 3:
+        old_data_shape = weight_arr.shape
+    else:
+        old_data_shape = None
+    num_pixels = old_data_shape[1] * old_data_shape[2] if old_data_shape is not None else 1
+
+    # Reshape the mask array to 2 dimensions: (nchan, 1) if spatially uniform,
+    # (nchan, num_pixels) if it varies per pixel.
     if n_dimension == 1:
         mask_arr = np.reshape(mask_arr, (mask_arr.shape[0], 1))
     elif n_dimension == 3:
-        old_data_shape = mask_arr.shape
-        mask_arr = np.reshape(
-            mask_arr, (mask_arr.shape[0], mask_arr.shape[1] * mask_arr.shape[2])
-        )
-    num_pixels = mask_arr.shape[-1]
+        mask_arr = np.reshape(mask_arr, (mask_arr.shape[0], num_pixels))
 
-    # If full planes are flagged then set corresponding weights to zero
+    # Same reshape for the weight array. Kept independently at (nchan, 1) or
+    # (nchan, num_pixels) rather than always broadcast out to num_pixels --
+    # numpy broadcasting combines mismatched-but-compatible (nchan, 1) and
+    # (nchan, num_pixels) arrays below without materialising a full copy.
+    if weight_arr.ndim == 1:
+        weight_arr = np.reshape(weight_arr, (weight_arr.shape[0], 1))
+    else:
+        weight_arr = np.reshape(weight_arr, (weight_arr.shape[0], num_pixels))
+
+    # If full planes are flagged then set corresponding weights to zero. This
+    # check is relative to the mask's own pixel count (1 if spatially
+    # uniform), not the true `num_pixels` -- a uniform mask flagging a
+    # channel means it's flagged for every real pixel, by definition.
     flag_xy_sum = np.sum(mask_arr, axis=1)
-    mskPlanes = np.where(flag_xy_sum == num_pixels, 0, 1)
-    weight_arr *= mskPlanes
+    mskPlanes = np.where(flag_xy_sum == mask_arr.shape[-1], 0, 1)
+    weight_arr = weight_arr * mskPlanes[:, np.newaxis]
 
-    # A pixel's RMSF depends only on which channels that pixel has flagged, so
-    # when every pixel shares the same flagging there is a single distinct RMSF
-    # in the whole cube. Real flagging is per-channel rather than per-pixel, so
-    # that is the usual case, and computing one spectrum instead of one per pixel
-    # makes this O(1) in pixel count for the same answer -- bit-identical at
-    # nthreads=1 (what the dask path uses), and at finufft's default thread count
-    # within a few ulp, since it splits a multithreaded type-3 differently for one
-    # transform than for a batch.
+    # A pixel's RMSF depends on which channels it has flagged AND how it
+    # weights the channels it keeps, so pixels can only share one RMSF if
+    # both the flagging and the weighting are uniform across pixels. Real
+    # per-channel flagging with per-channel (not per-pixel) weights is the
+    # common case, so this stays O(1) in pixel count then -- bit-identical at
+    # nthreads=1 (what the dask path uses), and at finufft's default thread
+    # count within a few ulp, since it splits a multithreaded type-3
+    # differently for one transform than for a batch.
     #
-    # The test is one pass over the mask and it is exact: the flagging is shared
-    # if and only if, for every channel, either all pixels are flagged or none
-    # are. A chunk holding fully blanked pixels alongside real ones fails it and
-    # takes the per-pixel path, so correctness never rests on `reuse_rmsf` --
-    # the flag can only decline a saving that is already known to be safe.
-    share_rmsf = (
-        reuse_rmsf
-        and num_pixels > 1
-        and bool(np.array_equal(mask_arr.all(axis=1), mask_arr.any(axis=1)))
+    # Both tests are one pass over their array and are exact. A chunk with
+    # any per-pixel variation in either mask or weight fails and takes the
+    # per-pixel path, so correctness never rests on `reuse_rmsf` -- the flag
+    # can only decline a saving that is already known to be safe.
+    mask_uniform = bool(np.array_equal(mask_arr.all(axis=1), mask_arr.any(axis=1)))
+    weight_uniform = weight_arr.shape[-1] == 1 or bool(
+        np.array_equal(weight_arr, np.broadcast_to(weight_arr[:, :1], weight_arr.shape))
     )
+    share_rmsf = reuse_rmsf and num_pixels > 1 and mask_uniform and weight_uniform
     if share_rmsf:
         logger.debug(
-            f"All {num_pixels} pixels share the same channel flagging; "
-            "computing one RMSF instead of one per pixel."
+            f"All {num_pixels} pixels share the same channel flagging and "
+            "weighting; computing one RMSF instead of one per pixel."
         )
     rmsf_mask_arr = mask_arr[:, :1] if share_rmsf else mask_arr
+    weight_for_cube = weight_arr[:, :1] if share_rmsf else weight_arr
 
     fwhm_rmsf_radm2, _, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
     # Calculate the RMSF at each pixel
     # The K value used to scale each RMSF must take into account
     # isolated flagged voxels data in the datacube
-    weight_cube = np.invert(rmsf_mask_arr) * weight_arr[:, np.newaxis]
+    weight_cube = np.invert(rmsf_mask_arr) * weight_for_cube
     with np.errstate(divide="ignore", invalid="ignore"):
         scale_factor_arr = 1.0 / np.sum(weight_cube, axis=0)
-        scale_factor_arr = np.nan_to_num(
-            scale_factor_arr, nan=0.0, posinf=0.0, neginf=0.0
-        )
+        scale_factor_arr = zero_nonfinite(scale_factor_arr)
 
     # Calculate the RMSF for each plane
     exponent = lambda_sq_arr_m2 - lam_sq_0_m2
@@ -1443,8 +1491,9 @@ def get_rmsf_nufft(
     fwhm_rmsf_arr = np.squeeze(fwhm_rmsf_arr)
     fit_status_arr = np.squeeze(fit_status_arr)
 
-    # Restore if 3D shape
-    if n_dimension == 3:
+    # Restore if 3D shape -- either the mask or the weight array (or both)
+    # carried the original spatial grid.
+    if old_data_shape is not None:
         rmsf_cube = np.reshape(
             rmsf_cube, (rmsf_cube.shape[0], old_data_shape[1], old_data_shape[2])
         )
