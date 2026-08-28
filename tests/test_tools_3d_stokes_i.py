@@ -15,7 +15,7 @@ import pytest
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmsynth import rmsynth_3d
-from rm_lite.utils.dask_io import estimate_stokes_i_channel_noise
+from rm_lite.utils.dask_io import estimate_single_stokes_channel_noise
 from rm_lite.utils.fitting import (
     StokesIFitOptions,
     coefficient_errors,
@@ -326,7 +326,7 @@ def test_estimate_stokes_i_noise_runs():
     )
     assert np.isfinite(_require(result.stokes_i_model_cube).compute()).all()
 
-    noise = estimate_stokes_i_channel_noise(_chunked(cube.stokes_i))
+    noise = estimate_single_stokes_channel_noise(_chunked(cube.stokes_i))
     assert noise.shape == (cube.freq_arr_hz.size,)
     assert (noise > 0).all()
 

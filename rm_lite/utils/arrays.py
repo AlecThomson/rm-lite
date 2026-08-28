@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
+import dask.array as da
 import numpy as np
 from numpy.typing import NDArray
 
@@ -13,6 +14,33 @@ from rm_lite.utils.logging import TqdmToLogger, logger
 TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
 
 DType = TypeVar("DType", bound=np.generic)
+ArrayT = TypeVar("ArrayT", bound=NDArray[np.floating] | da.Array)
+
+
+def zero_nonfinite(arr: ArrayT) -> ArrayT:
+    """Replace nan/+inf/-inf with 0.0, working for both numpy and dask arrays.
+
+    `np.nan_to_num`'s `nan=`/`posinf=`/`neginf=` kwargs aren't supported by
+    dask's implementation, so use `isfinite` + `where` instead -- these
+    dispatch identically for numpy and dask inputs.
+    """
+    return cast(ArrayT, np.where(np.isfinite(arr), arr, 0.0))
+
+
+def broadcast_over_channels(
+    arr_1d: NDArray[DType], target: NDArray[Any]
+) -> NDArray[DType]:
+    """Reshape a per-channel 1D array to broadcast against `target`.
+
+    `target` has frequency/channel as its leading axis and may carry extra
+    trailing spatial axes, e.g. `(nchan,)` or `(nchan, ny, nx)`. Right-aligned
+    numpy broadcasting can't match a 1D array against a leading axis on its
+    own, so pad with trailing singleton axes when `target` has more than one
+    dimension.
+    """
+    if target.ndim == 1:
+        return arr_1d
+    return arr_1d.reshape(arr_1d.shape[0], *([1] * (target.ndim - 1)))
 
 
 def nd_to_two_d(arr: NDArray[DType]) -> NDArray[DType]:
