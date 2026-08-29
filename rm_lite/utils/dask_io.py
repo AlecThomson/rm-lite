@@ -171,7 +171,7 @@ def _cube_meta(path: str | Path) -> tuple[tuple[int, int, int], np.dtype[Any], H
     return (n_freq, ny, nx), dtype, header
 
 
-def _fits_block_array(
+def _read_fits_cube_in_one_layer(
     path: str | Path,
     dtype: np.dtype[Any],
     nx: int,
@@ -243,7 +243,7 @@ def read_fits_cube_dask(
         target_chunk_mb=target_chunk_mb,
     )
 
-    cube = _fits_block_array(
+    cube = _read_fits_cube_in_one_layer(
         path=path,
         dtype=dtype,
         nx=nx,
@@ -284,7 +284,7 @@ def read_fits_cube_channel_chunks(
         target_chunk_mb=target_chunk_mb,
     )
 
-    cube = _fits_block_array(
+    cube = _read_fits_cube_in_one_layer(
         path=path,
         dtype=dtype,
         nx=nx,

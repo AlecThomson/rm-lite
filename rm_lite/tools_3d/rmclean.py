@@ -89,7 +89,7 @@ def _clean_block(
     )
 
 
-def _clean_block_arrays(
+def _build_clean_output_arrays(
     fdf_dirty_cube: da.Array,
     rmsf: NDArray[np.complex128] | da.Array,
     rmsf_cube: da.Array | None,
@@ -315,7 +315,7 @@ def run_rmclean(
         else None
     )
 
-    clean, model, resid, iter_count = _clean_block_arrays(
+    clean, model, resid, iter_count = _build_clean_output_arrays(
         fdf_dirty_cube=fdf_dirty_cube,
         rmsf=rmsf,
         rmsf_cube=rmsf_cube,
