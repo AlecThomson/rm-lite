@@ -477,12 +477,10 @@ def _blank_pixels(
 class _PixelCleanOptions:
     """Hands each pixel the CLEAN options that apply to it.
 
-    `mask`, `threshold` and `fdf_noise` are scalars when the noise is
-    per-channel and per-pixel maps when it varies across the image (spatially
-    varying sensitivity, as in a mosaic). The maps are flattened once, the same
-    way the FDF is, and each pixel's values are substituted in as the loop
-    reaches it. All-scalar options are passed straight through, so the common
-    case allocates nothing.
+    `mask`, `threshold` and `fdf_noise` are scalars, or per-pixel maps when the
+    noise varies across the image. Maps are flattened once, like the FDF, and
+    indexed as the pixel loop reaches them; all-scalar options pass straight
+    through and allocate nothing.
     """
 
     def __init__(self, clean_options: RMCleanOptions, spatial_shape: tuple[int, ...]):

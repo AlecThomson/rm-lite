@@ -612,9 +612,8 @@ def fit_stokes_cube(
     planes = _block_planes(
         n_freq, abs(fit_options.fit_order) + 1, fit_options.compute_model_error
     )
-    # A per-pixel reference frequency has to be sliced to each block's own
-    # pixels, so it travels as a positional array argument rather than a kwarg.
-    # `_fit_stokes_i_block` takes it as the last of `arrays`.
+    # A per-pixel reference must be sliced per block, so it travels as a
+    # positional array argument, last in `arrays`.
     ref_blocks: tuple[da.Array, ...] = ()
     if np.ndim(ref_freq_hz) != 0:
         ref_blocks = (cast("da.Array", ref_freq_hz).rechunk(stokes_i.chunks[1:]),)
@@ -718,7 +717,7 @@ def _iter_pixel_fits(
             good = np.isfinite(i_spec) & np.isfinite(e_spec)
             fit = fit_stokes_i_model(
                 freq_arr_hz=freq_arr_hz,
-                ref_freq_hz=ref_freq_at(ref_freq_hz, y, x),
+                ref_freq_hz=ref_freq_for_pixel(ref_freq_hz, y, x),
                 stokes_i_arr=i_spec,
                 stokes_i_error_arr=e_spec,
                 options=fit_options,
@@ -827,11 +826,10 @@ RefFreqHz = float | NDArray[np.float64]
 """A reference frequency in Hz: one for the whole image, or one per pixel."""
 
 
-def ref_freq_at(ref_freq_hz: RefFreqHz, y: int, x: int) -> float:
-    """This pixel's reference frequency, whether it is shared or its own.
+def ref_freq_for_pixel(ref_freq_hz: RefFreqHz, y: int, x: int) -> float:
+    """This pixel's reference frequency, shared or its own.
 
-    Resolved once per pixel so everything below stays scalar: the fit, the model
-    evaluation and the alpha derivative all work one spectrum at a time anyway.
+    Resolved once per pixel so everything below stays scalar.
     """
     if np.ndim(ref_freq_hz) == 0:
         return float(cast("float", ref_freq_hz))
@@ -865,9 +863,8 @@ def _fit_stokes_i_block(
     order, terms and errors stay NaN. A pixel with no finite channels stays NaN.
     """
     i_block = arrays[0]
-    # A per-pixel reference frequency arrives as a (cy, cx) block of its own,
-    # after the data; `has_ref_block` says whether it is there, so a two-array
-    # call is not ambiguous between (data, error) and (data, reference).
+    # A per-pixel reference arrives as a (cy, cx) block after the data;
+    # `has_ref_block` disambiguates (data, error) from (data, reference).
     if has_ref_block:
         ref_freq_hz = arrays[-1]
     n_data = len(arrays) - (1 if has_ref_block else 0)
@@ -890,7 +887,7 @@ def _fit_stokes_i_block(
             if fit is None:
                 _write_flat_model(out, y, x, planes, mean_flux)
                 continue
-            pixel_ref_hz = ref_freq_at(ref_freq_hz, y, x)
+            pixel_ref_hz = ref_freq_for_pixel(ref_freq_hz, y, x)
             model = fit.stokes_i_model_func(
                 freq_arr_hz / pixel_ref_hz, *np.asarray(fit.popt)
             )
@@ -940,7 +937,7 @@ def ref_flux_from_block(
             spec = model_block[:, y, x]
             if np.isfinite(spec).all():
                 ref_flux[y, x] = np.interp(
-                    ref_freq_at(ref_freq_hz, y, x), freq_sorted, spec[order]
+                    ref_freq_for_pixel(ref_freq_hz, y, x), freq_sorted, spec[order]
                 )
     return ref_flux
 
@@ -963,7 +960,9 @@ def alpha_from_model_block(
             spec = model_block[:, y, x]
             if not np.isfinite(spec).all():
                 continue
-            value = _alpha_at_ref(spec, freq_arr_hz, ref_freq_at(ref_freq_hz, y, x))
+            value = _alpha_at_ref(
+                spec, freq_arr_hz, ref_freq_for_pixel(ref_freq_hz, y, x)
+            )
             alpha[y, x] = value if np.isfinite(value) else 0.0
     return alpha
 

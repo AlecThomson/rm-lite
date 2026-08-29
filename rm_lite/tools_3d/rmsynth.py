@@ -39,6 +39,7 @@ from rm_lite.utils.synthesis import (
     compute_rmsynth_params,
     compute_theoretical_noise,
     derotate_to,
+    error_from_weight,
     get_fwhm_rmsf,
     get_rmsf_nufft,
     lam_sq_0_per_pixel,
@@ -158,14 +159,10 @@ def _compute_global_params(
     reconstructed error feeds `compute_theoretical_noise` for a per-channel
     (not per-pixel) theoretical noise estimate.
     """
-    # Faraday depth grid and lam_sq_0_m2 are single numbers for the whole cube,
-    # and the cube's aggregate channel weighting is what sets them, so they come
-    # from the summed profile rather than the full array. For the noise-based
-    # weightings that is exactly the whole-array answer -- the pixel sums factor
-    # straight out of a weighted mean -- and it costs one cheap reduction instead
-    # of carrying a cube through the global calculation. The per-pixel weights
-    # are applied per chunk instead, in `_block_weight_arr`.
-    complex_pol_error = _error_from_weight(weight_summary.channel_profile)
+    # The globals take the summed channel profile, not the whole array: exact
+    # for a weighted mean (the pixel sums factor out) and far cheaper. Per-pixel
+    # weights are applied per chunk, in `_weight_arr_for_block`.
+    complex_pol_error = error_from_weight(weight_summary.channel_profile)
     complex_pol_arr = np.ones_like(freq_arr_hz, dtype=np.complex128)
 
     rmsynth_params = compute_rmsynth_params(
@@ -174,37 +171,13 @@ def _compute_global_params(
         complex_pol_error=complex_pol_error,
         fdf_options=fdf_options,
     )
-    # From the full array, so a per-pixel weight gives a per-pixel noise map.
-    # Left lazy for a lazy weight: nothing reads the cube until something asks
-    # for the map, and then it is one pass fused with whatever else is computed.
+    # From the full array, so a per-pixel weight gives a per-pixel noise map,
+    # left lazy until something asks for it.
     theoretical_noise = compute_theoretical_noise(
-        complex_pol_error=_error_from_weight(weight_arr),
+        complex_pol_error=error_from_weight(weight_arr),
         weight_arr=weight_arr,
     )
     return rmsynth_params, theoretical_noise
-
-
-def _error_from_weight(
-    weight_arr: NDArray[Any] | da.Array,
-) -> NDArray[np.complex128] | da.Array:
-    """The complex Q/U error a weight array implies, `1/sqrt(weight)`.
-
-    A zero or blank weight means no information, so its error is infinite; both
-    are read back as zero weight downstream.
-    """
-    with np.errstate(divide="ignore", invalid="ignore"):
-        real_error = np.where(
-            np.isfinite(weight_arr) & (weight_arr > 0),
-            1.0 / np.sqrt(np.where(weight_arr > 0, weight_arr, 1.0)),
-            np.inf,
-        )
-    # `real_error * (1 + 1j)`, not `real_error + 1j * real_error`: the latter
-    # multiplies inf by a zero real part and turns a blanked channel's error
-    # into NaN.
-    return cast(
-        "NDArray[np.complex128] | da.Array",
-        real_error.astype(np.complex128) * (1.0 + 1.0j),
-    )
 
 
 class WeightSummary(NamedTuple):
@@ -219,35 +192,25 @@ class WeightSummary(NamedTuple):
 def _summarise_weight(
     weight_arr: NDArray[Any] | da.Array, rtol: float = 1e-8
 ) -> WeightSummary:
-    """Reduce a weight array to the two things the whole cube needs.
+    """The two things the globals need from a weight array, in one pass.
 
-    The channel profile sets the Faraday depth grid and `lam_sq_0_m2`: a
-    per-pixel weight array is summed over the image, which is exact for a
-    weighted mean over the cube (the pixel sums factor out) and costs a tiny
-    result instead of dragging a cube through the global calculation.
+    The channel profile sets the Faraday depth grid and `lam_sq_0_m2`; summing
+    over the image is exact for a weighted mean over the cube, since the pixel
+    sums factor out.
 
-    Proportionality decides whether one RMSF describes the cube. The RMSF is
-    normalised by the weight sum, so it depends on the shape of a pixel's weight
-    spectrum, not its scale: pixels whose weights are scalar multiples of each
-    other share one RMSF exactly. That covers noise varying across the image but
-    not with frequency, which is the usual case for a mosaic. It fails when the
-    noise spectrum itself differs pixel to pixel, and then each pixel needs its
-    own RMSF.
-
-    Both are reductions over the same array and are computed together, so a
-    per-pixel weight cube is read once for the pair rather than once each.
+    Proportionality decides whether one RMSF describes the cube: the RMSF is
+    normalised by the weight sum, so pixels whose weights are scalar multiples
+    of each other share one exactly. That covers noise varying spatially but not
+    with frequency; a per-pixel noise *spectrum* fails it and needs its own RMSF.
     """
     if np.ndim(weight_arr) == 1:
         # Passed through in its own dtype: upcasting a float32 weight here would
         # quietly shift every downstream number for the per-channel path.
         return WeightSummary(np.asarray(weight_arr), True)
 
-    # Blanks count as no weight, not as poison. A mosaicked cube carries NaN
-    # wherever a pixel falls outside the primary beam, and the beam shrinks with
-    # frequency, so the top of the band is blanked at the field edge. Summing
-    # those through would make every partially blanked channel NaN, and a NaN
-    # channel weight drops that channel from `lam_sq_0_m2` entirely -- quietly
-    # reweighting the whole cube to whichever channels happen to be complete.
+    # Blanks are no weight, not poison. A mosaic blanks the top of the band at
+    # the field edge; summing that through would make every partially blanked
+    # channel NaN, dropping it from `lam_sq_0_m2` altogether.
     weight_arr = zero_nonfinite(weight_arr)
     profile = np.sum(weight_arr, axis=(1, 2))
     pixel_totals = np.sum(weight_arr, axis=0)
@@ -337,34 +300,30 @@ def _match_chunks_to_fdf(
     return stokes_q.rechunk({1: new_cy}), stokes_u.rechunk({1: new_cy})
 
 
-def _block_weight_arr(
+def _weight_arr_for_block(
     block: NDArray[np.complex128],
     weight_block: NDArray[np.float64] | None,
     rmsynth_params: RMSynthParams,
     fdf_options: FDFOptions,
 ) -> NDArray[np.float64]:
-    """The weights this chunk's pixels use, of the requested weight type.
+    """This chunk's weights, of the requested weight type.
 
-    `weight_block` is this chunk's slice of a per-pixel weight array, so the
-    weight type is applied here rather than over the whole cube: the grid
-    weightings bin channels into lambda^2 cells at a memory cost proportional to
-    however many pixels are weighted at once, and a chunk is the right size for
-    that. It also lets each pixel's own flagging shape its own weights, which a
-    cube-wide weight vector cannot. A per-channel weight array was already
-    weighted globally and is used as-is.
+    Applied per chunk rather than cube-wide: the grid weightings cost memory per
+    pixel weighted at once, and each pixel's own flagging can shape its weights.
+    A per-channel weight array was already weighted globally and is used as-is.
     """
     if weight_block is None:
         return rmsynth_params.weight_arr
     return apply_weight_type(
         lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
-        real_qu_error=np.asarray(_error_from_weight(weight_block).real),
+        real_qu_error=np.asarray(error_from_weight(weight_block).real),
         channel_mask=~np.isfinite(block),
         fdf_options=fdf_options,
         cell_m2=rmsynth_params.cell_m2,
     )
 
 
-def _lam_sq_0_block(
+def _lam_sq_0_on_block(
     block: NDArray[np.complex128],
     weight_block: NDArray[np.float64] | None = None,
     *,
@@ -372,12 +331,11 @@ def _lam_sq_0_block(
     fdf_options: FDFOptions,
 ) -> NDArray[np.float64]:
     """This chunk's per-pixel reference lambda^2, from its own weights."""
-    weight_arr = _block_weight_arr(block, weight_block, rmsynth_params, fdf_options)
+    weight_arr = _weight_arr_for_block(block, weight_block, rmsynth_params, fdf_options)
     if np.ndim(weight_arr) == 1:
         weight_arr = np.broadcast_to(weight_arr[:, np.newaxis, np.newaxis], block.shape)
-    # A pixel's own flagging counts: a channel it does not have cannot pull its
-    # reference. `rmsynth_nufft` zeroes those weights too, so the reference here
-    # is the one the pixel's own RMSF is built from.
+    # A channel the pixel does not have cannot pull its reference; this matches
+    # the weights `rmsynth_nufft` builds the pixel's own RMSF from.
     weight_arr = np.where(np.isfinite(block), weight_arr, 0.0)
     return lam_sq_0_per_pixel(weight_arr, rmsynth_params.lambda_sq_arr_m2)
 
@@ -388,11 +346,10 @@ def _lam_sq_0_map(
     rmsynth_params: RMSynthParams,
     fdf_options: FDFOptions,
 ) -> da.Array:
-    """The reference lambda^2 each pixel is derotated to, as a lazy (ny, nx) map.
+    """Lazy (ny, nx) map of the reference lambda^2 each pixel is derotated to.
 
-    Returned whatever the mode: with a shared reference every pixel holds the
-    same number, and the map is what lets anyone move an FDF between references
-    later (B&dB eq. 33, or `rm_lite.utils.synthesis.derotate_to`).
+    Constant for a shared reference. Returned in every mode: it is what lets an
+    FDF be moved between references later (`derotate_to`).
     """
     if fdf_options.lam_sq_0_m2 != "per_pixel":
         return da.full(
@@ -402,7 +359,7 @@ def _lam_sq_0_map(
             dtype=np.float64,
         )
     return da.map_blocks(
-        _lam_sq_0_block,
+        _lam_sq_0_on_block,
         pol_cube,
         *_weight_arr_map_blocks_args(weight_arr, pol_cube),
         drop_axis=0,
@@ -417,9 +374,7 @@ def _ref_freq_from_lam_sq_0(
 ) -> float | da.Array:
     """The Stokes I reference frequency implied by the reference lambda^2.
 
-    A scalar when every pixel shares a reference, a map when they do not. Derived
-    here and nowhere else, so the flux reference is the phase reference by
-    construction rather than by two call sites agreeing.
+    Derived here and nowhere else, so the flux and phase references cannot drift.
     """
     if not per_pixel:
         return float(lambda2_to_freq(lam_sq_0_m2))
@@ -437,7 +392,7 @@ def _rmsynth_on_block(
     nufft_nthreads: int = 1,
 ) -> NDArray[np.complex128]:
     _, cy, cx = block.shape
-    weight_arr = _block_weight_arr(block, weight_block, rmsynth_params, fdf_options)
+    weight_arr = _weight_arr_for_block(block, weight_block, rmsynth_params, fdf_options)
     with quiet_logs(log_level):
         fdf = rmsynth_nufft(
             complex_pol_arr=block,
@@ -462,7 +417,7 @@ def _rmsf_on_block(
     nufft_nthreads: int = 1,
 ) -> NDArray[np.complex128]:
     _, cy, cx = block.shape
-    weight_arr = _block_weight_arr(block, weight_block, rmsynth_params, fdf_options)
+    weight_arr = _weight_arr_for_block(block, weight_block, rmsynth_params, fdf_options)
     with quiet_logs(log_level):
         rmsf_result = get_rmsf_nufft(
             lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
@@ -659,10 +614,8 @@ def rmsynth_3d(
     # model cube is supplied directly, or one is fitted per pixel; Q/U are then
     # divided by it and the FDF is rescaled to absolute flux by the per-pixel
     # reference-frequency Stokes I flux (see module docstring).
-    # One reference, resolved once. Everything below derives from it -- the FDF's
-    # phase reference and the Stokes I model's frequency are the same quantity in
-    # different units, so nothing takes a reference frequency independently and
-    # the two cannot drift apart.
+    # One reference, resolved once; the Stokes I frequency is derived from it
+    # below and nowhere else, so the phase and flux references cannot drift.
     lam_sq_0_map = _lam_sq_0_map(
         weight_arr=weight_arr,
         pol_cube=pol_cube,
@@ -750,8 +703,7 @@ def rmsynth_3d(
 
     if per_pixel_ref:
         # Synthesised at the cube's reference, then moved to each pixel's own.
-        # B&dB eq. 25 is a shift theorem, so this is exact and costs a phase
-        # ramp rather than a transform per pixel.
+        # Exact, and a phase ramp rather than a transform per pixel.
         fdf_dirty_cube = derotate_to(
             fdf_dirty_cube,
             rmsynth_params.phi_arr_radm2,
@@ -774,9 +726,7 @@ def rmsynth_3d(
             nufft_nthreads=nufft_nthreads,
         )
         if per_pixel_ref:
-            # The RMSF has to sit at the same reference as the FDF, or CLEAN
-            # subtracts a response rotated away from the components it is
-            # fitting.
+            # Same reference as the FDF, or CLEAN subtracts a rotated response.
             rmsf_cube = derotate_to(
                 rmsf_cube,
                 phi_double_arr_radm2,

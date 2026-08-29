@@ -59,11 +59,10 @@ _PER_PIXEL_CLEAN_FIELDS = ("mask", "threshold", "fdf_noise")
 def _spatially_chunked_like(
     value: NDArray[np.float64] | da.Array, fdf_dirty_cube: da.Array, field: str
 ) -> da.Array:
-    """A per-pixel CLEAN parameter chunked to match the FDF's spatial blocks.
+    """A per-pixel CLEAN parameter rechunked to the FDF's spatial blocks.
 
-    Block N of the map is then block N of the cube, so a CLEAN task can pull its
-    own pixels' values by key. Kept lazy: a per-pixel noise map derived from a
-    weight cube is itself lazy, and forcing it here would read the whole cube
+    Block N of the map is then block N of the cube, so a task can pull its own
+    pixels by key. Kept lazy: forcing it here would read the whole weight cube
     while the graph is still being built.
     """
     array = value if isinstance(value, da.Array) else da.from_array(value)
@@ -76,7 +75,7 @@ def _spatially_chunked_like(
     return array.rechunk(fdf_dirty_cube.chunks[1:])
 
 
-def _describe(value: float | NDArray[np.float64] | da.Array) -> str:
+def _format_scalar_or_map(value: float | NDArray[np.float64] | da.Array) -> str:
     """One log-friendly string for a scalar or for a per-pixel map."""
     if np.ndim(value) == 0:
         return f"{float(value):0.3g}"
@@ -460,8 +459,8 @@ def run_rmclean_from_synth(
     moment_threshold = moment_threshold_snr * fdf_error_noise
 
     logger.info(
-        f"Theoretical FDF noise: {_describe(fdf_error_noise)}. "
-        f"Auto mask: {_describe(mask)}, auto threshold: {_describe(threshold)}."
+        f"Theoretical FDF noise: {_format_scalar_or_map(fdf_error_noise)}. "
+        f"Auto mask: {_format_scalar_or_map(mask)}, auto threshold: {_format_scalar_or_map(threshold)}."
     )
 
     return run_rmclean(
