@@ -7,6 +7,7 @@ import warnings
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, TypeVar, cast
 
+import dask.array as da
 import finufft
 import numpy as np
 import polars as pl
@@ -734,8 +735,8 @@ def lambda2_to_freq(lambda_sq_m2: T) -> T:
 
 
 def compute_theoretical_noise(
-    complex_pol_error: NDArray[np.complex128],
-    weight_arr: NDArray[np.float64],
+    complex_pol_error: NDArray[np.complex128] | da.Array,
+    weight_arr: NDArray[np.float64] | da.Array,
 ) -> TheoreticalNoise:
     weight_arr = zero_nonfinite(weight_arr)
     complex_pol_error_flagged = zero_nonfinite(complex_pol_error)
@@ -745,10 +746,14 @@ def compute_theoretical_noise(
     )
 
     fdf_error_noise = (fdf_complex_noise.real + fdf_complex_noise.imag) / 2
+    # `float`, not the bare reduction: a per-pixel (3D) weight array makes these
+    # lazy dask scalars, and `TheoreticalNoise` is declared as floats and used as
+    # floats -- `run_rmclean_from_synth` scales its CLEAN mask and threshold from
+    # them and logs them, which a dask scalar cannot do.
     return TheoreticalNoise(
-        fdf_error_noise=fdf_error_noise,
-        fdf_q_noise=fdf_complex_noise.real,
-        fdf_u_noise=fdf_complex_noise.imag,
+        fdf_error_noise=float(fdf_error_noise),
+        fdf_q_noise=float(fdf_complex_noise.real),
+        fdf_u_noise=float(fdf_complex_noise.imag),
     )
 
 
@@ -859,12 +864,19 @@ def _lambda_sq_density(
     the true sampling density changes (gaps, channelisation changes); this is
     correct inverse-density weighting, not aliasing. Flagged channels (zero
     natural weight) get zero density."""
-    density = np.zeros_like(lambda_sq_arr_m2)
+    # `natural_weight_arr` may carry spatial axes the per-channel lambda^2 does
+    # not, so index both on its shape. A no-op when both are 1D; when the weight
+    # is per-pixel, cells pool every pixel's contribution, which is exact for the
+    # spatially uniform weights this path is given (an occupancy scaled by the
+    # pixel count divides straight back out, since every consumer of these
+    # weights normalises by their sum).
+    lambda_sq_shaped = np.broadcast_to(lambda_sq_arr_m2, natural_weight_arr.shape)
+    density = np.zeros_like(natural_weight_arr)
     good = natural_weight_arr > 0
     if not good.any():
         return density
-    origin = float(lambda_sq_arr_m2[good].min())
-    cell_idx = np.floor((lambda_sq_arr_m2[good] - origin) / cell_m2).astype(np.int64)
+    origin = float(lambda_sq_shaped[good].min())
+    cell_idx = np.floor((lambda_sq_shaped[good] - origin) / cell_m2).astype(np.int64)
     occupancy = np.zeros(int(cell_idx.max()) + 1)
     np.add.at(occupancy, cell_idx, natural_weight_arr[good])
     density[good] = occupancy[cell_idx] / cell_m2
@@ -998,6 +1010,21 @@ def compute_rmsynth_params(
     # Broadcast-compatible view of lambda^2 for combining with weight arrays
     # that may carry extra spatial axes beyond the channel axis.
     lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, natural_weight_arr)
+
+    # uniform_lsq/briggs bin lambda^2 into cells with `np.add.at` over a boolean
+    # selection, neither of which dask can do lazily (the selection's shape is
+    # unknown until compute). A per-pixel weight array from
+    # `rm_lite.tools_3d.rmsynth.get_weight_arr_from_fits` is lazy, so say so here
+    # rather than failing inside `_lambda_sq_density`.
+    if fdf_options.weight_type in ("uniform_lsq", "briggs") and isinstance(
+        natural_weight_arr, da.Array
+    ):
+        msg = (
+            f"{fdf_options.weight_type} weighting needs the weight array in "
+            "memory, but got a lazy per-pixel one. Use 'variance', 'natural' or "
+            "'uniform', or pass a computed weight_arr."
+        )
+        raise TypeError(msg)
 
     match fdf_options.weight_type:
         case "variance" | "natural":

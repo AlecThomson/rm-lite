@@ -32,7 +32,11 @@ from rm_lite.utils.dask_io import (
     spatial_chunk_size,
     write_zarr_group,
 )
-from rm_lite.utils.synthesis import calc_faraday_moments, freq_to_lambda2
+from rm_lite.utils.synthesis import (
+    WeightType,
+    calc_faraday_moments,
+    freq_to_lambda2,
+)
 
 RNG = np.random.default_rng(2025)
 
@@ -575,6 +579,66 @@ def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
     mom0, mom1 = compute(clean.mom0_map, clean.mom1_map)
     assert (mom0 > 0).any()
     assert np.isfinite(mom1).any()
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+@pytest.mark.parametrize("weight_type", ["variance", "uniform"])
+def test_per_pixel_weight_matches_the_shared_one(
+    synthetic_cube: SyntheticCube, weight_type: WeightType
+):
+    """A per-pixel weight cube that is uniform must reduce to the per-channel one.
+
+    Three ways it did not. `compute_theoretical_noise` sums over every element it
+    is handed, so a 3D weight ran the sums over ny*nx times as many terms and
+    reported a noise sqrt(ny*nx) too small -- which `run_rmclean_from_synth`
+    scales its CLEAN mask and threshold from, so CLEAN saw a threshold orders of
+    magnitude too low. It also came back as a lazy dask scalar, which
+    `run_rmclean_from_synth` cannot format or compare. And the shared RMSF took a
+    spatial mean of the whole cube where one pixel is what it documents.
+    """
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    n_freq = synthetic_cube.freq_arr_hz.size
+    ny, nx = synthetic_cube.rm_map.shape
+    weight_1d = 1.0 / np.linspace(1e-3, 3e-3, n_freq) ** 2
+    weight_3d = np.broadcast_to(weight_1d[:, None, None], (n_freq, ny, nx)).copy()
+
+    def run(weight_arr):
+        synth = rmsynth_3d(
+            q_dask,
+            u_dask,
+            synthetic_cube.freq_arr_hz,
+            weight_arr=weight_arr,
+            weight_type=weight_type,
+            d_phi_radm2=D_PHI_RADM2,
+        )
+        clean = run_rmclean_from_synth(synth)
+        return synth, clean
+
+    shared_synth, shared_clean = run(weight_1d)
+    pixel_synth, pixel_clean = run(weight_3d)
+
+    assert isinstance(pixel_synth.theoretical_noise.fdf_error_noise, float)
+    np.testing.assert_allclose(
+        pixel_synth.theoretical_noise.fdf_error_noise,
+        shared_synth.theoretical_noise.fdf_error_noise,
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        pixel_synth.rmsf_arr, shared_synth.rmsf_arr, rtol=1e-12, atol=1e-14
+    )
+    np.testing.assert_allclose(
+        pixel_synth.lam_sq_0_m2, shared_synth.lam_sq_0_m2, rtol=1e-12
+    )
+
+    shared_fdf, pixel_fdf, shared_iters, pixel_iters = compute(
+        shared_clean.clean_fdf_cube,
+        pixel_clean.clean_fdf_cube,
+        shared_clean.iter_count_map,
+        pixel_clean.iter_count_map,
+    )
+    np.testing.assert_allclose(pixel_fdf, shared_fdf, rtol=1e-10, atol=1e-12)
+    np.testing.assert_array_equal(pixel_iters, shared_iters)
 
 
 def _write_cube(path, data: NDArray[np.float64]) -> None:

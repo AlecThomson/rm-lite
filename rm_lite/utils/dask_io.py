@@ -371,10 +371,9 @@ def mad_std_on_chan_block(block: NDArray[np.float64]) -> NDArray[np.float64]:
 
 
 def da_channel_mad(cube: da.Array) -> da.Array:
-    """Lazy per-channel MAD std, broadcast back over every spatial pixel.
+    """Lazy per-channel MAD std over every spatial pixel of a cube.
 
-    Returns an array the same shape as `cube`, where every pixel in a given
-    channel plane holds that channel's MAD std. Needs every pixel of a
+    Returns one value per channel, shape (n_freq,). Needs every pixel of a
     channel in one block (a robust median can't be combined incrementally
     across separate spatial chunks), so a spatially chunked cube has to be
     gathered first. Not computed -- so several cubes can be reduced in one

@@ -127,7 +127,7 @@ class RMSynth3DResults(NamedTuple):
 
 def _compute_global_params(
     freq_arr_hz: NDArray[np.float64],
-    weight_arr: NDArray[np.float64],
+    weight_arr: NDArray[np.float64] | da.Array,
     fdf_options: FDFOptions,
 ) -> tuple[RMSynthParams, TheoreticalNoise]:
     """Compute phi_arr/lam_sq_0_m2/weight_arr and theoretical FDF noise, once for the whole cube.
@@ -151,9 +151,14 @@ def _compute_global_params(
         complex_pol_error=complex_pol_error,
         fdf_options=fdf_options,
     )
+    # Per-channel, per the docstring above: `compute_theoretical_noise` sums over
+    # every element it is given, so a per-pixel (3D) weight array runs the sums
+    # over ny*nx times as many terms and the noise comes back a factor of
+    # sqrt(ny*nx) too small. That silently drives `run_rmclean_from_synth`, which
+    # scales its CLEAN mask and threshold from it.
     theoretical_noise = compute_theoretical_noise(
-        complex_pol_error=complex_pol_error,
-        weight_arr=weight_arr,
+        complex_pol_error=_collapse_shared_weight_arr(complex_pol_error),
+        weight_arr=_collapse_shared_weight_arr(weight_arr),
     )
     return rmsynth_params, theoretical_noise
 
@@ -175,11 +180,14 @@ def _collapse_shared_weight_arr(
     per-channel vector); if it isn't, the RMSF silently reflects only one
     pixel's weights rather than the whole cube's.
 
+    One pixel, not a spatial mean: the mean reads every chunk of the cube,
+    which is the full read this is meant to avoid, and gives the same answer
+    to rounding when the array really is uniform.
     """
     if weight_arr.ndim == 1:
         return weight_arr
 
-    return weight_arr.mean(axis=(1, 2))
+    return weight_arr[:, 0, 0]
 
 
 def _shared_rmsf(
@@ -340,7 +348,7 @@ def rmsynth_3d(
     stokes_q: da.Array,
     stokes_u: da.Array,
     freq_arr_hz: NDArray[np.float64],
-    weight_arr: NDArray[np.float64] | None = None,
+    weight_arr: NDArray[np.float64] | da.Array | None = None,
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
@@ -587,7 +595,8 @@ def get_noise_from_error_fits(
     stokes_q_error_file: str | Path,
     stokes_u_error_file: str | Path,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
-) -> NDArray[np.float64]:
+) -> da.Array:
+    """Lazy per-pixel noise cube, the mean of the Q and U error cubes."""
     stokes_q_error, _ = read_fits_cube_dask(
         stokes_q_error_file, target_chunk_mb=target_chunk_mb
     )
@@ -603,6 +612,10 @@ def get_noise_from_fits(
     stokes_u_file: str | Path,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
 ) -> NDArray[np.float64]:
+    """Per-channel noise estimated from the Q and U cubes themselves.
+
+    Computed, not lazy, so it comes back as a plain (n_freq,) array.
+    """
     # Per-channel noise needs whole image planes, so it gets its own
     # frequency-chunked read
     q_planes, _ = read_fits_cube_channel_chunks(
@@ -621,7 +634,14 @@ def get_weight_arr_from_fits(
     stokes_u_error_file: str | Path | None = None,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     noise_files_are_weight: bool = False,
-) -> NDArray[np.float64]:
+) -> NDArray[np.float64] | da.Array:
+    """The weight array for `rmsynth_3d`, from error cubes or from Q/U themselves.
+
+    Error cubes take priority when given, and yield a lazy per-pixel
+    (n_freq, ny, nx) dask weight array; falling back to Q/U gives a computed
+    per-channel (n_freq,) one. `noise_files_are_weight` takes the error cubes
+    as weights directly, skipping the 1/noise**2 inversion.
+    """
     no_stokes_files = stokes_q_file is None and stokes_u_file is None
     no_error_files = stokes_q_error_file is None and stokes_u_error_file is None
 
@@ -632,7 +652,7 @@ def get_weight_arr_from_fits(
     if not no_error_files:
         # If user supplies error files - they take priority
         if stokes_q_error_file is None or stokes_u_error_file is None:
-            msg = f"Must pass both Q and U error file! Got {stokes_q_error_file=} {stokes_q_error_file=}"
+            msg = f"Must pass both Q and U error file! Got {stokes_q_error_file=} {stokes_u_error_file=}"
             raise ValueError(msg)
         noise_arr = get_noise_from_error_fits(
             stokes_q_error_file,
@@ -647,7 +667,7 @@ def get_weight_arr_from_fits(
     else:
         # Fall back to noise estimate from QU cubes
         if stokes_q_file is None or stokes_u_file is None:
-            msg = f"Must pass both Q and U file! Got {stokes_q_file=} {stokes_q_file=}"
+            msg = f"Must pass both Q and U file! Got {stokes_q_file=} {stokes_u_file=}"
             raise ValueError(msg)
         noise_arr = get_noise_from_fits(stokes_q_file, stokes_u_file, target_chunk_mb)
 
@@ -660,7 +680,7 @@ def rmsynth_3d_from_fits(
     stokes_q_error_file: str | Path | None = None,
     stokes_u_error_file: str | Path | None = None,
     noise_files_are_weight: bool = False,
-    weight_arr: NDArray[np.float64] | None = None,
+    weight_arr: NDArray[np.float64] | da.Array | None = None,
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
