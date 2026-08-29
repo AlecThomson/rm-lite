@@ -155,7 +155,7 @@ def run_rmclean_from_synth(
             threshold=threshold,
             max_iter=max_iter,
             gain=gain,
-            fdf_noise=theoretical_noise.fdf_error_noise,
+            fdf_noise=float(theoretical_noise.fdf_error_noise),
         ),
         multiscale_options=multiscale_options,
         phi_max_scale_radm2=float(fdf_parameters["phi_max_scale_radm2"][0]),

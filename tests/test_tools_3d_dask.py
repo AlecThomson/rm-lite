@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import dask.array as da
 import numpy as np
@@ -37,7 +38,15 @@ from rm_lite.utils.dask_io import (
     spatial_chunk_size,
     write_zarr_group,
 )
-from rm_lite.utils.synthesis import calc_faraday_moments, freq_to_lambda2
+from rm_lite.utils.synthesis import (
+    FDFOptions,
+    WeightType,
+    calc_faraday_moments,
+    compute_theoretical_noise,
+    derotate_to,
+    freq_to_lambda2,
+    lambda2_to_freq,
+)
 
 RNG = np.random.default_rng(2025)
 
@@ -186,14 +195,14 @@ def test_rmclean_3d_block_runs_once_per_chunk(
 ):
     """The expensive per-pixel Hogbom loop must run once per chunk, not once per output."""
     call_count = 0
-    original = rmclean3d_mod._clean_block
+    original = rmclean3d_mod._rmclean_on_block
 
     def counting_wrapper(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(rmclean3d_mod, "_clean_block", counting_wrapper)
+    monkeypatch.setattr(rmclean3d_mod, "_rmclean_on_block", counting_wrapper)
 
     q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
@@ -270,7 +279,7 @@ def test_mixed_batch_shares_upstream_work(monkeypatch):
 
     fit_calls = _counting(monkeypatch, fitting_mod, "_fit_stokes_i_block")
     nufft_calls = _counting(monkeypatch, rmsynth3d_mod, "rmsynth_nufft")
-    clean_calls = _counting(monkeypatch, rmclean3d_mod, "_clean_block")
+    clean_calls = _counting(monkeypatch, rmclean3d_mod, "_rmclean_on_block")
 
     synth = rmsynth3d_mod.rmsynth_3d(
         _chunked(stokes_q, 3, 4),
@@ -328,14 +337,14 @@ def test_write_zarr_group_shares_computation_across_arrays(
     once per array instead of once per chunk.
     """
     call_count = 0
-    original = rmclean3d_mod._clean_block
+    original = rmclean3d_mod._rmclean_on_block
 
     def counting_wrapper(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(rmclean3d_mod, "_clean_block", counting_wrapper)
+    monkeypatch.setattr(rmclean3d_mod, "_rmclean_on_block", counting_wrapper)
 
     q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
@@ -580,6 +589,401 @@ def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
     mom0, mom1 = compute(clean.mom0_map, clean.mom1_map)
     assert (mom0 > 0).any()
     assert np.isfinite(mom1).any()
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+@pytest.mark.parametrize("weight_type", ["variance", "uniform"])
+def test_per_pixel_weight_matches_the_shared_one(
+    synthetic_cube: SyntheticCube, weight_type: WeightType
+):
+    """A per-pixel weight cube that is uniform must reduce to the per-channel one.
+
+    Three ways it did not. `compute_theoretical_noise` sums over every element it
+    is handed, so a 3D weight ran the sums over ny*nx times as many terms and
+    reported a noise sqrt(ny*nx) too small -- which `run_rmclean_from_synth`
+    scales its CLEAN mask and threshold from, so CLEAN saw a threshold orders of
+    magnitude too low. It also came back as a lazy dask scalar, which
+    `run_rmclean_from_synth` cannot format or compare. And the shared RMSF took a
+    spatial mean of the whole cube where one pixel is what it documents.
+    """
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    n_freq = synthetic_cube.freq_arr_hz.size
+    ny, nx = synthetic_cube.rm_map.shape
+    weight_1d = 1.0 / np.linspace(1e-3, 3e-3, n_freq) ** 2
+    weight_3d = np.broadcast_to(weight_1d[:, None, None], (n_freq, ny, nx)).copy()
+
+    def run(weight_arr):
+        synth = rmsynth_3d(
+            q_dask,
+            u_dask,
+            synthetic_cube.freq_arr_hz,
+            weight_arr=weight_arr,
+            weight_type=weight_type,
+            d_phi_radm2=D_PHI_RADM2,
+        )
+        clean = run_rmclean_from_synth(synth)
+        return synth, clean
+
+    shared_synth, shared_clean = run(weight_1d)
+    pixel_synth, pixel_clean = run(weight_3d)
+
+    # A per-pixel weight gives a per-pixel noise map; a uniform one must put the
+    # per-channel answer in every pixel of it.
+    pixel_noise = np.asarray(pixel_synth.theoretical_noise.fdf_error_noise)
+    assert pixel_noise.shape == (ny, nx)
+    np.testing.assert_allclose(
+        pixel_noise,
+        np.full((ny, nx), shared_synth.theoretical_noise.fdf_error_noise),
+        rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        pixel_synth.rmsf_arr, shared_synth.rmsf_arr, rtol=1e-12, atol=1e-14
+    )
+    np.testing.assert_allclose(
+        pixel_synth.lam_sq_0_m2, shared_synth.lam_sq_0_m2, rtol=1e-12
+    )
+
+    shared_fdf, pixel_fdf, shared_iters, pixel_iters = compute(
+        shared_clean.clean_fdf_cube,
+        pixel_clean.clean_fdf_cube,
+        shared_clean.iter_count_map,
+        pixel_clean.iter_count_map,
+    )
+    np.testing.assert_allclose(pixel_fdf, shared_fdf, rtol=1e-10, atol=1e-12)
+    np.testing.assert_array_equal(pixel_iters, shared_iters)
+
+
+def _varying_noise_cube(ny: int = 6, nx: int = 6, span: float = 100.0):
+    """Q/U with the noise rising across the field, as a mosaic edge does."""
+    n_freq = 32
+    freq_arr_hz = np.linspace(0.9e9, 1.4e9, n_freq)
+    lambda_sq = freq_to_lambda2(freq_arr_hz)
+    angle = 2 * (
+        RNG.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
+        + RNG.uniform(0, np.pi, (ny, nx))[None]
+    )
+    sigma_map = np.geomspace(1e-4, 1e-4 * span, ny * nx).reshape(ny, nx)
+    sigma = np.broadcast_to(sigma_map[None], (n_freq, ny, nx)).copy()
+    stokes_q = 0.6 * np.cos(angle) + RNG.normal(0, 1, sigma.shape) * sigma
+    stokes_u = 0.6 * np.sin(angle) + RNG.normal(0, 1, sigma.shape) * sigma
+    return freq_arr_hz, stokes_q, stokes_u, sigma
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_noise_map_is_right_pixel_by_pixel():
+    """Spatially varying noise must give each pixel its own theoretical noise.
+
+    `compute_theoretical_noise` used to sum over the spatial axes too, so one
+    scalar stood for the whole image and it was sqrt(ny*nx) below even the
+    quietest pixel. CLEAN scales its mask and threshold from this, so the number
+    has to be each pixel's own.
+    """
+    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube()
+    weight_arr = 1.0 / sigma**2
+
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 3, 3),
+        _chunked(stokes_u, 3, 3),
+        freq_arr_hz,
+        weight_arr=weight_arr,
+        d_phi_radm2=D_PHI_RADM2,
+    )
+    noise_map = np.asarray(synth.theoretical_noise.fdf_error_noise)
+    ny, nx = sigma.shape[1:]
+    assert noise_map.shape == (ny, nx)
+
+    # Each pixel against the same formula run on that pixel's own spectrum.
+    for pixel in ((0, 0), (0, nx - 1), (ny - 1, nx - 1)):
+        column = sigma[(slice(None), *pixel)]
+        expected = compute_theoretical_noise(
+            (column + 1j * column).astype(np.complex128),
+            1.0 / column**2,
+        ).fdf_error_noise
+        np.testing.assert_allclose(noise_map[pixel], expected, rtol=1e-12)
+
+    # And the map really does span the field's dynamic range, not one value.
+    assert noise_map.max() / noise_map.min() > 50
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_clean_thresholds_follow_the_noise_map():
+    """A noisy pixel must not be cleaned to a quiet pixel's threshold.
+
+    With one scalar threshold for the image, the noisiest pixels get a cut far
+    below their own noise and CLEAN grinds into it.
+    """
+    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube()
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 3, 3),
+        _chunked(stokes_u, 3, 3),
+        freq_arr_hz,
+        weight_arr=1.0 / sigma**2,
+        d_phi_radm2=D_PHI_RADM2,
+    )
+    noise_map = np.asarray(synth.theoretical_noise.fdf_error_noise)
+    per_pixel = run_rmclean_from_synth(synth)
+
+    # The same run, but told the whole image has the quietest pixel's noise:
+    # that is what a single scalar amounts to.
+    flat = synth._replace(
+        theoretical_noise=synth.theoretical_noise._replace(
+            fdf_error_noise=float(noise_map.min())
+        )
+    )
+    uniform = run_rmclean_from_synth(flat)
+
+    per_pixel_iters, uniform_iters = compute(
+        per_pixel.iter_count_map, uniform.iter_count_map
+    )
+    noisiest = np.unravel_index(np.argmax(noise_map), noise_map.shape)
+    assert per_pixel_iters[noisiest] < uniform_iters[noisiest]
+    quietest = np.unravel_index(np.argmin(noise_map), noise_map.shape)
+    assert per_pixel_iters[quietest] == uniform_iters[quietest]
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_shared_rmsf_kept_when_pixels_only_differ_in_scale():
+    """Noise varying across the image but not with frequency still shares an RMSF.
+
+    The RMSF is normalised by the weight sum, so pixels whose weights are scalar
+    multiples of each other have the same one. Keeping the shared spectrum there
+    is what stops per-pixel noise costing a whole extra cube.
+    """
+    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube(ny=4, nx=4)
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        freq_arr_hz,
+        weight_arr=1.0 / sigma**2,
+        d_phi_radm2=D_PHI_RADM2,
+    )
+    assert synth.rmsf_cube is None
+
+    per_pixel = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        freq_arr_hz,
+        weight_arr=1.0 / sigma**2,
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
+    )
+    cube = _require_cube(per_pixel.rmsf_cube).compute()
+    for pixel in ((0, 0), (3, 3)):
+        np.testing.assert_allclose(
+            cube[(slice(None), *pixel)], synth.rmsf_arr, rtol=1e-10, atol=1e-12
+        )
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_per_pixel_rmsf_forced_when_spectra_differ(caplog):
+    """When the noise spectrum itself varies per pixel, no one RMSF fits.
+
+    Nothing asked for the cube here; it is switched on because a shared spectrum
+    would silently be wrong for most of the image.
+    """
+    freq_arr_hz, stokes_q, stokes_u, _ = _varying_noise_cube(ny=4, nx=4)
+    ny, nx = 4, 4
+    # Each pixel's band tilts differently, so no rescaling maps one onto another.
+    tilt = np.linspace(-1.0, 1.0, ny * nx).reshape(ny, nx)
+    sigma = 1e-3 * (freq_arr_hz[:, None, None] / freq_arr_hz[0]) ** tilt[None]
+
+    with caplog.at_level(logging.INFO, logger="rm-lite"):
+        synth = rmsynth_3d(
+            _chunked(stokes_q, 2, 2),
+            _chunked(stokes_u, 2, 2),
+            freq_arr_hz,
+            weight_arr=1.0 / sigma**2,
+            d_phi_radm2=D_PHI_RADM2,
+        )
+
+    assert synth.rmsf_cube is not None
+    assert "do not share one" in caplog.text
+    cube = _require_cube(synth.rmsf_cube).compute()
+    corner_to_corner = np.max(np.abs(cube[:, 0, 0] - cube[:, -1, -1])) / np.max(
+        np.abs(cube[:, 0, 0])
+    )
+    assert corner_to_corner > 0.1
+
+
+def _mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
+    """A linmos-like cube: the primary beam shrinks with frequency, so pixels
+    near the field edge lose the top of the band and the number of contributing
+    channels varies across the image."""
+    n_freq = 96
+    freq_arr_hz = np.linspace(744e6, 1032e6, n_freq)
+    lambda_sq = freq_to_lambda2(freq_arr_hz)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    radius = np.sqrt((yy - (ny - 1) / 2) ** 2 + (xx - (nx - 1) / 2) ** 2)
+    radius = edge * radius / radius.max()
+    # Primary beam radius goes as 1/nu.
+    inside = radius[None] <= (freq_arr_hz[0] / freq_arr_hz)[:, None, None]
+    angle = 2 * (
+        RNG.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
+        + RNG.uniform(0, np.pi, (ny, nx))[None]
+    )
+    stokes_q = np.where(inside, 0.6 * np.cos(angle), np.nan)
+    stokes_u = np.where(inside, 0.6 * np.sin(angle), np.nan)
+    # linmos blanks the noise cube the same way it blanks the data.
+    weight_arr = np.where(inside, 1.0 / 1e-3**2, np.nan)
+    return freq_arr_hz, stokes_q, stokes_u, weight_arr, inside
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_mosaic_edge_channels_are_handled():
+    """A frequency-dependent primary beam blanks the band per pixel.
+
+    The blanks arrive as NaN in both the data and the mosaicked noise cube.
+    Summing those through made every partially blanked channel NaN, and a NaN
+    channel weight drops that channel from `lam_sq_0_m2` altogether -- silently
+    reweighting the cube onto whichever channels happen to be complete.
+    """
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, inside = _mosaic_cube()
+    n_freq = freq_arr_hz.size
+    n_chan = inside.sum(axis=0)
+    assert n_chan.min() < n_chan.max() == n_freq, "premise: the edge loses channels"
+
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 4, 4),
+        _chunked(stokes_u, 4, 4),
+        freq_arr_hz,
+        weight_arr=weight_arr,
+        phi_max_radm2=200.0,
+        d_phi_radm2=2.0,
+    )
+
+    # lam_sq_0_m2 must weight every channel by how many pixels actually kept it.
+    lambda_sq = freq_to_lambda2(freq_arr_hz)
+    channel_weight = inside.sum(axis=(1, 2))
+    expected = float(np.sum(channel_weight * lambda_sq) / np.sum(channel_weight))
+    np.testing.assert_allclose(synth.lam_sq_0_m2, expected, rtol=1e-12)
+
+    # Pixels no longer weight the channels alike, so they cannot share an RMSF:
+    # the per-pixel cube is switched on without being asked for.
+    cube = _require_cube(synth.rmsf_cube).compute()
+    ny, nx = n_chan.shape
+    centre = cube[:, ny // 2, nx // 2]
+    corner = cube[:, 0, 0]
+    assert np.max(np.abs(centre - corner)) / np.max(np.abs(centre)) > 0.1
+
+    # And an edge pixel's noise reflects the channels it actually has.
+    noise_map = np.asarray(synth.theoretical_noise.fdf_error_noise)
+    assert noise_map.shape == (ny, nx)
+    quiet, loud = np.argmax(n_chan), np.argmin(n_chan)
+    np.testing.assert_allclose(
+        noise_map.ravel()[loud] / noise_map.ravel()[quiet],
+        np.sqrt(n_chan.ravel()[quiet] / n_chan.ravel()[loud]),
+        rtol=1e-10,
+    )
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+@pytest.mark.parametrize("mode", ["auto", "per_pixel", 0.1])
+def test_lam_sq_0_modes_keep_one_reference(mode):
+    """Whatever picks the reference, the phase and flux references are the same.
+
+    `stokes_i_ref_freq_hz` is derived from the reference lambda^2 in one place,
+    so a caller cannot end up with an FDF derotated to one frequency and Stokes
+    I terms defined at another.
+    """
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = _mosaic_cube(ny=4, nx=4)
+    ref = float(np.median(freq_arr_hz))
+    stokes_i = np.where(
+        np.isfinite(stokes_q),
+        (freq_arr_hz / ref)[:, None, None] ** -0.8,
+        np.nan,
+    )
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        freq_arr_hz,
+        weight_arr=weight_arr,
+        lam_sq_0_m2=mode,
+        stokes_i=_chunked(stokes_i, 2, 2),
+        stokes_i_error=np.full(freq_arr_hz.size, 1e-3),
+        phi_max_radm2=200.0,
+        d_phi_radm2=2.0,
+    )
+
+    lam_sq_0_map = synth.lam_sq_0_map.compute()
+    assert lam_sq_0_map.shape == stokes_q.shape[1:]
+    ref_freq = synth.stokes_i_ref_freq_hz
+    ref_freq_arr = np.asarray(
+        ref_freq.compute() if isinstance(ref_freq, da.Array) else ref_freq
+    )
+    # The one invariant: the flux reference is the phase reference, in Hz.
+    np.testing.assert_allclose(
+        np.broadcast_to(ref_freq_arr, lam_sq_0_map.shape),
+        lambda2_to_freq(lam_sq_0_map),
+        rtol=1e-12,
+    )
+
+    if mode == "per_pixel":
+        # Edge pixels lost the top of the band, so their reference moved.
+        assert lam_sq_0_map.max() > lam_sq_0_map.min()
+        assert isinstance(ref_freq, da.Array)
+        # A per-pixel reference means a per-pixel RMSF, whether or not it was
+        # asked for: CLEAN needs the RMSF at the FDF's own reference.
+        assert synth.rmsf_cube is not None
+    else:
+        expected = synth.lam_sq_0_m2
+        np.testing.assert_allclose(lam_sq_0_map, expected, rtol=1e-12)
+        assert not isinstance(ref_freq, da.Array)
+        if not isinstance(mode, str):
+            assert synth.lam_sq_0_m2 == pytest.approx(mode)
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_per_pixel_reference_is_an_exact_derotation():
+    """Choosing a reference only ever moves phase, never amplitude.
+
+    B&dB eq. 25 is a shift theorem, so the per-pixel FDF is the shared-reference
+    FDF moved to the map, exactly. Checked without a Stokes I model, since a
+    per-pixel reference frequency also moves the flux the FDF is scaled by.
+    """
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = _mosaic_cube(ny=4, nx=4)
+    common: dict[str, Any] = {
+        "freq_arr_hz": freq_arr_hz,
+        "weight_arr": weight_arr,
+        "phi_max_radm2": 200.0,
+        "d_phi_radm2": 2.0,
+    }
+    shared = rmsynth_3d(
+        _chunked(stokes_q, 2, 2), _chunked(stokes_u, 2, 2), lam_sq_0_m2="auto", **common
+    )
+    per_pixel = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        lam_sq_0_m2="per_pixel",
+        **common,
+    )
+
+    shared_fdf, pixel_fdf, lam_sq_0_map = compute(
+        shared.fdf_dirty_cube, per_pixel.fdf_dirty_cube, per_pixel.lam_sq_0_map
+    )
+    # Amplitudes are untouched bar the last bit of the phase multiply.
+    np.testing.assert_allclose(np.abs(shared_fdf), np.abs(pixel_fdf), rtol=1e-14)
+    np.testing.assert_allclose(
+        derotate_to(shared_fdf, shared.phi_arr_radm2, shared.lam_sq_0_m2, lam_sq_0_map),
+        pixel_fdf,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    # And it inverts: back to the shared reference is where it started.
+    np.testing.assert_allclose(
+        derotate_to(pixel_fdf, shared.phi_arr_radm2, lam_sq_0_map, shared.lam_sq_0_m2),
+        shared_fdf,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+
+def test_lam_sq_0_option_is_validated():
+    """A typo in the mode is caught when the options are built, not at compute."""
+    bad_values: list[Any] = ["nope", -1.0, 0.0, np.nan]
+    for bad in bad_values:
+        with pytest.raises(ValueError, match="lam_sq_0_m2"):
+            FDFOptions(lam_sq_0_m2=bad)
 
 
 def _write_cube(path, data: NDArray[np.float64]) -> None:

@@ -5,8 +5,9 @@ from __future__ import annotations
 import time
 import warnings
 from dataclasses import dataclass
-from typing import Any, Literal, NamedTuple, TypeVar, cast
+from typing import Any, Literal, NamedTuple, TypeAlias, TypeVar, cast, get_args
 
+import dask.array as da
 import finufft
 import numpy as np
 import polars as pl
@@ -19,6 +20,7 @@ from tqdm.auto import trange
 from rm_lite.utils.arrays import (
     arange,
     broadcast_over_channels,
+    float_if_scalar,
     nd_to_two_d,
     two_d_to_nd,
     zero_nonfinite,
@@ -100,17 +102,28 @@ class FractionalSpectra(NamedTuple):
 
 
 class TheoreticalNoise(NamedTuple):
-    """Theoretical noise of the FDF"""
+    """Theoretical noise of the FDF.
 
-    fdf_error_noise: float
+    A float per field for a per-channel weight array; an (ny, nx) map, possibly
+    lazy, when the weights vary per pixel.
+    """
+
+    fdf_error_noise: float | NDArray[np.float64] | da.Array
     """Theoretical noise of the FDF"""
-    fdf_q_noise: float
+    fdf_q_noise: float | NDArray[np.float64] | da.Array
     """Theoretical noise of the real FDF"""
-    fdf_u_noise: float
+    fdf_u_noise: float | NDArray[np.float64] | da.Array
     """Theoretical noise of the imaginary FDF"""
 
 
-WeightType = Literal["variance", "natural", "uniform", "uniform_lsq", "briggs"]
+LamSq0Mode: TypeAlias = Literal["auto", "per_pixel"]
+""" How to pick the reference lambda^2: one weighted mean for the whole dataset,
+or each pixel's own (B&dB 2005 eq. 32, whose criterion is per pixel whenever the
+weights are). """
+
+WeightType: TypeAlias = Literal[
+    "variance", "natural", "uniform", "uniform_lsq", "briggs"
+]
 """ RM-synthesis weighting: `variance`/`natural` (1/sigma^2, equivalent),
 `uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
 narrows the RMSF), `briggs` (robust interpolation between natural and
@@ -142,8 +155,22 @@ class FDFOptions:
     """ Fit RMSF """
     do_fit_rmsf_real: bool = False
     """ Fit real part of the RMSF """
+    lam_sq_0_m2: float | LamSq0Mode = "auto"
+    """ Reference lambda^2 in m^2, or "auto"/"per_pixel" to derive one. The
+    Stokes I reference frequency is derived from it, so the phase and flux
+    references always match. """
 
     def __post_init__(self) -> None:
+        if isinstance(self.lam_sq_0_m2, str):
+            if self.lam_sq_0_m2 not in get_args(LamSq0Mode):
+                msg = (
+                    "lam_sq_0_m2 must be a value in m^2 or one of "
+                    f"{get_args(LamSq0Mode)}, got {self.lam_sq_0_m2!r}."
+                )
+                raise ValueError(msg)
+        elif not np.isfinite(self.lam_sq_0_m2) or self.lam_sq_0_m2 <= 0:
+            msg = f"A given lam_sq_0_m2 must be finite and > 0, got {self.lam_sq_0_m2}."
+            raise ValueError(msg)
         if self.weight_type not in WEIGHT_TYPES:
             msg = (
                 f"weight_type must be one of {WEIGHT_TYPES}, got {self.weight_type!r}."
@@ -209,7 +236,7 @@ def calc_faraday_moments(
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float | NDArray[np.float64],
     axis: int = 0,
-    threshold: float | None = None,
+    threshold: float | NDArray[np.float64] | None = None,
     auto_threshold_sigma: float | None = None,
     debias: bool = False,
     lam_sq_0_m2: float | None = None,
@@ -734,21 +761,27 @@ def lambda2_to_freq(lambda_sq_m2: T) -> T:
 
 
 def compute_theoretical_noise(
-    complex_pol_error: NDArray[np.complex128],
-    weight_arr: NDArray[np.float64],
+    complex_pol_error: NDArray[np.complex128] | da.Array,
+    weight_arr: NDArray[np.float64] | da.Array,
 ) -> TheoreticalNoise:
+    """Theoretical FDF noise, reduced over channels only.
+
+    A per-channel weight gives one float; a per-pixel one gives an (ny, nx) map,
+    lazily if the weights are lazy. Reducing over the spatial axes too would
+    report a noise sqrt(ny*nx) too small for every pixel.
+    """
     weight_arr = zero_nonfinite(weight_arr)
     complex_pol_error_flagged = zero_nonfinite(complex_pol_error)
     fdf_complex_noise = np.sqrt(
-        np.nansum(weight_arr**2 * complex_pol_error_flagged**2)
-        / (np.sum(weight_arr)) ** 2
+        np.nansum(weight_arr**2 * complex_pol_error_flagged**2, axis=0)
+        / (np.sum(weight_arr, axis=0)) ** 2
     )
 
     fdf_error_noise = (fdf_complex_noise.real + fdf_complex_noise.imag) / 2
     return TheoreticalNoise(
-        fdf_error_noise=fdf_error_noise,
-        fdf_q_noise=fdf_complex_noise.real,
-        fdf_u_noise=fdf_complex_noise.imag,
+        fdf_error_noise=float_if_scalar(fdf_error_noise),
+        fdf_q_noise=float_if_scalar(fdf_complex_noise.real),
+        fdf_u_noise=float_if_scalar(fdf_complex_noise.imag),
     )
 
 
@@ -763,6 +796,8 @@ class RMSynthParams(NamedTuple):
     """ Faraday depth values in rad/m^2 """
     weight_arr: NDArray[np.float64]
     """ Weight array """
+    cell_m2: float = 0.0
+    """ lambda^2 gridding cell, for re-deriving the grid weightings per chunk """
 
 
 class SigmaAdd(NamedTuple):
@@ -859,16 +894,57 @@ def _lambda_sq_density(
     the true sampling density changes (gaps, channelisation changes); this is
     correct inverse-density weighting, not aliasing. Flagged channels (zero
     natural weight) get zero density."""
-    density = np.zeros_like(lambda_sq_arr_m2)
-    good = natural_weight_arr > 0
+    # Vectorised over pixels: the weight may be per-channel (n_freq,) or
+    # per-pixel (n_freq, ny, nx), and each pixel gets its own occupancy, since
+    # its own flagging decides which cells are occupied. lambda^2 is per-channel
+    # either way, so the cell edges are shared and only the origin shifts.
+    weight_2d = natural_weight_arr.reshape(natural_weight_arr.shape[0], -1)
+    lambda_sq_1d = np.reshape(lambda_sq_arr_m2, -1)
+    n_pixel = weight_2d.shape[1]
+
+    density = np.zeros_like(weight_2d)
+    good = weight_2d > 0
     if not good.any():
-        return density
-    origin = float(lambda_sq_arr_m2[good].min())
-    cell_idx = np.floor((lambda_sq_arr_m2[good] - origin) / cell_m2).astype(np.int64)
-    occupancy = np.zeros(int(cell_idx.max()) + 1)
-    np.add.at(occupancy, cell_idx, natural_weight_arr[good])
-    density[good] = occupancy[cell_idx] / cell_m2
-    return density
+        return density.reshape(natural_weight_arr.shape)
+
+    origin = np.where(good, lambda_sq_1d[:, np.newaxis], np.inf).min(axis=0)
+    cell_idx = np.where(
+        good, np.floor((lambda_sq_1d[:, np.newaxis] - origin) / cell_m2), 0
+    ).astype(np.int64)
+    pixel_idx = np.broadcast_to(np.arange(n_pixel), cell_idx.shape)
+
+    # One bincount over flattened (cell, pixel) pairs rather than a scatter-add
+    # per pixel: same occupancy, and it stays a single vectorised pass.
+    n_cell = int(cell_idx.max()) + 1
+    occupancy = np.bincount(
+        (cell_idx[good] * n_pixel + pixel_idx[good]),
+        weights=weight_2d[good],
+        minlength=n_cell * n_pixel,
+    ).reshape(n_cell, n_pixel)
+    density[good] = occupancy[cell_idx[good], pixel_idx[good]] / cell_m2
+    return density.reshape(natural_weight_arr.shape)
+
+
+def error_from_weight(
+    weight_arr: NDArray[np.float64] | da.Array,
+) -> NDArray[np.complex128] | da.Array:
+    """The complex Q/U error a weight implies, `1/sqrt(weight)`.
+
+    Zero or blank weight means no information, so infinite error.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        real_error = np.where(
+            np.isfinite(weight_arr) & (weight_arr > 0),
+            1.0 / np.sqrt(np.where(weight_arr > 0, weight_arr, 1.0)),
+            np.inf,
+        )
+    # `real_error * (1 + 1j)`, not `real_error + 1j * real_error`: the latter
+    # multiplies inf by a zero real part and turns a blanked channel's error
+    # into NaN.
+    return cast(
+        "NDArray[np.complex128] | da.Array",
+        real_error.astype(np.complex128) * (1.0 + 1.0j),
+    )
 
 
 def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -906,12 +982,21 @@ def briggs_weight(
     natural-weighted mean sampling density (CASA convention) so `robust` is
     comparable across datasets with different channel counts."""
     density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
-    total_weight = float(np.sum(natural_weight_arr))
-    if total_weight == 0:
-        return np.zeros_like(natural_weight_arr)
-    mean_density = float(np.sum(natural_weight_arr * density) / total_weight)
-    f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
-    weight: NDArray[np.float64] = natural_weight_arr / (1.0 + density * f_sq)
+    # Reduced over channels, not over everything: with a per-pixel weight array
+    # each pixel needs its own natural-weighted mean density, or one pixel's
+    # noise level sets `f_sq` for the whole image and `robust` stops meaning the
+    # same thing pixel to pixel. Scalars for a per-channel weight, as before.
+    total_weight = np.sum(natural_weight_arr, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean_density = np.where(
+            total_weight > 0,
+            np.sum(natural_weight_arr * density, axis=0) / total_weight,
+            np.inf,
+        )
+        f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
+    weight: NDArray[np.float64] = np.where(
+        total_weight > 0, natural_weight_arr / (1.0 + density * f_sq), 0.0
+    )
     return weight
 
 
@@ -931,6 +1016,99 @@ def _match_channel_mask(
     if mask.shape == target.shape:
         return mask
     return broadcast_over_channels(mask, target)
+
+
+def apply_weight_type(
+    lambda_sq_arr_m2: NDArray[np.float64],
+    real_qu_error: NDArray[np.float64],
+    channel_mask: NDArray[np.bool_],
+    fdf_options: FDFOptions,
+    cell_m2: float,
+) -> NDArray[np.float64]:
+    """Q/U error -> RM-synthesis weights of the requested type, per pixel.
+
+    `real_qu_error` is per-channel or per-pixel; the result takes its shape.
+    Separate from `compute_rmsynth_params` so a chunk can weight its own pixels:
+    the grid weightings bin lambda^2 into cells, costing memory per pixel.
+    """
+    # Zero flagged channels before the density-based weights so they do not
+    # inflate their neighbours' sampling density.
+    natural_weight_arr = natural_weight(real_qu_error)
+    natural_weight_arr = np.where(
+        _match_channel_mask(channel_mask, natural_weight_arr), 0.0, natural_weight_arr
+    )
+    # Broadcast-compatible view of lambda^2 for weight arrays that carry spatial
+    # axes beyond the channel axis.
+    lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, natural_weight_arr)
+
+    weight_arr: NDArray[np.float64]
+    match fdf_options.weight_type:
+        case "variance" | "natural":
+            weight_arr = natural_weight_arr
+        case "uniform":
+            # Match natural_weight_arr's shape (which may be 3D), not
+            # freq_arr_hz (always 1D).
+            weight_arr = np.ones_like(natural_weight_arr)
+        case "uniform_lsq":
+            weight_arr = uniform_lsq_weight(
+                lambda_sq_arr_m2_b, natural_weight_arr, cell_m2
+            )
+        case "briggs":
+            if fdf_options.robust is None:
+                msg = "Briggs weighting requires a `robust` parameter."
+                raise ValueError(msg)
+            weight_arr = briggs_weight(
+                lambda_sq_arr_m2_b, natural_weight_arr, fdf_options.robust, cell_m2
+            )
+
+    return np.where(_match_channel_mask(channel_mask, weight_arr), 0.0, weight_arr)
+
+
+def weighted_lam_sq_0(
+    weight_arr: NDArray[np.float64], lambda_sq_arr_m2: NDArray[np.float64]
+) -> float:
+    """Weighted mean of lambda^2 over every axis given, B&dB 2005 eq. 32.
+
+    Nulls the RMSF's orthogonal response at phi = 0, keeping the main lobe
+    parallel to the polarisation vector at the reference.
+    """
+    # Scale factor first, matching the order this was computed in before it was
+    # given a name, so the default path stays bit-for-bit what it was.
+    scale_factor = 1.0 / np.nansum(weight_arr)
+    return float(scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2))
+
+
+def lam_sq_0_per_pixel(
+    weight_arr: NDArray[np.float64], lambda_sq_arr_m2: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """B&dB eq. 32 per pixel, reducing over channels only.
+
+    Pixels that weight or flag the channels differently each have their own.
+    """
+    lambda_sq_b = broadcast_over_channels(lambda_sq_arr_m2, weight_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return cast(
+            "NDArray[np.float64]",
+            np.nansum(weight_arr * lambda_sq_b, axis=0) / np.nansum(weight_arr, axis=0),
+        )
+
+
+def derotate_to(
+    fdf: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    from_lam_sq_0_m2: float | NDArray[np.float64],
+    to_lam_sq_0_m2: float | NDArray[np.float64],
+) -> NDArray[np.complex128]:
+    """Move an FDF or RMSF between reference lambda^2 values.
+
+    B&dB eq. 25 is a shift theorem, so this is an exact phase ramp: amplitudes
+    are untouched and it inverts itself. Either reference may be a per-pixel map.
+    Not valid on a *restored* CLEAN cube, whose real restoring beam does not
+    commute with the ramp.
+    """
+    shift = np.asarray(to_lam_sq_0_m2) - np.asarray(from_lam_sq_0_m2)
+    phi_b = broadcast_over_channels(phi_arr_radm2, fdf)
+    return cast("NDArray[np.complex128]", fdf * np.exp(2j * phi_b * shift))
 
 
 def compute_rmsynth_params(
@@ -987,46 +1165,26 @@ def compute_rmsynth_params(
     cell_m2 = float(np.sqrt(3.0) / phi_max_radm2)
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
-    # Zero flagged channels before the density-based weights so they do not
-    # inflate their neighbours' sampling density.
     mask = ~np.isfinite(complex_pol_arr)
-    natural_weight_arr = natural_weight(real_qu_error)
-    natural_weight_arr = np.where(
-        _match_channel_mask(mask, natural_weight_arr), 0.0, natural_weight_arr
+    weight_arr = apply_weight_type(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        real_qu_error=real_qu_error,
+        channel_mask=mask,
+        fdf_options=fdf_options,
+        cell_m2=cell_m2,
     )
-
-    # Broadcast-compatible view of lambda^2 for combining with weight arrays
-    # that may carry extra spatial axes beyond the channel axis.
-    lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, natural_weight_arr)
-
-    match fdf_options.weight_type:
-        case "variance" | "natural":
-            weight_arr = natural_weight_arr
-        case "uniform":
-            # Match natural_weight_arr's shape (which may be 3D), not
-            # freq_arr_hz (always 1D).
-            weight_arr = np.ones_like(natural_weight_arr)
-        case "uniform_lsq":
-            weight_arr = uniform_lsq_weight(
-                lambda_sq_arr_m2_b, natural_weight_arr, cell_m2
-            )
-        case "briggs":
-            if fdf_options.robust is None:
-                msg = "Briggs weighting requires a `robust` parameter."
-                raise ValueError(msg)
-            weight_arr = briggs_weight(
-                lambda_sq_arr_m2_b, natural_weight_arr, fdf_options.robust, cell_m2
-            )
-
-    weight_arr = np.where(_match_channel_mask(mask, weight_arr), 0.0, weight_arr)
+    lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, weight_arr)
 
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
     # Calculate a single global lam_sq_0_m2 value (summing over all axes when
     # weight_arr is 3D), ignoring isolated flagged voxels.
-    scale_factor = 1.0 / np.nansum(weight_arr)
-    lam_sq_0_m2 = float(scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2_b))
-    if not np.isfinite(lam_sq_0_m2):
-        lam_sq_0_m2 = float(np.nanmean(lambda_sq_arr_m2))
+    if not isinstance(fdf_options.lam_sq_0_m2, str):
+        # Pinned by the caller, e.g. to share a reference with another cube.
+        lam_sq_0_m2 = float(fdf_options.lam_sq_0_m2)
+    else:
+        lam_sq_0_m2 = weighted_lam_sq_0(weight_arr, lambda_sq_arr_m2_b)
+        if not np.isfinite(lam_sq_0_m2):
+            lam_sq_0_m2 = float(np.nanmean(lambda_sq_arr_m2))
 
     logger.debug(f"lam_sq_0_m2 = {lam_sq_0_m2:0.2f} m^2")
 
@@ -1035,6 +1193,7 @@ def compute_rmsynth_params(
         lam_sq_0_m2=lam_sq_0_m2,
         phi_arr_radm2=phi_arr_radm2,
         weight_arr=weight_arr,
+        cell_m2=cell_m2,
     )
 
 
@@ -1685,7 +1844,7 @@ def get_fdf_parameters(
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            peak_pi_fit_snr = peak_pi_fit / theoretical_noise.fdf_error_noise
+            peak_pi_fit_snr = peak_pi_fit / float(theoretical_noise.fdf_error_noise)
 
     # In rare cases, a parabola can be fitted to the edge of the spectrum,
     # producing a unreasonably large RM and polarized intensity.
