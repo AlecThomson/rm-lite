@@ -26,6 +26,7 @@ from rm_lite.tools_3d.rmsynth import (
     rmsynth_3d,
     rmsynth_3d_from_fits,
 )
+from rm_lite.utils import fitting as fitting_mod
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
 from rm_lite.utils.dask_io import (
     channel_chunk_size,
@@ -267,7 +268,7 @@ def test_mixed_batch_shares_upstream_work(monkeypatch):
     stokes_q = 0.6 * stokes_i * np.cos(angle)
     stokes_u = 0.6 * stokes_i * np.sin(angle)
 
-    fit_calls = _counting(monkeypatch, rmsynth3d_mod, "_fit_stokes_i_block")
+    fit_calls = _counting(monkeypatch, fitting_mod, "_fit_stokes_i_block")
     nufft_calls = _counting(monkeypatch, rmsynth3d_mod, "rmsynth_nufft")
     clean_calls = _counting(monkeypatch, rmclean3d_mod, "_clean_block")
 
