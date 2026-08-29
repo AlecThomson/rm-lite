@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import operator
 from dataclasses import replace
 from typing import Any, Literal, NamedTuple
 
 import dask.array as da
 import numpy as np
-from dask.delayed import delayed
+from dask.base import tokenize
+from dask.highlevelgraph import HighLevelGraph
 from numpy.typing import NDArray
 
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults
@@ -50,23 +52,28 @@ class _RMCleanBlockResult(NamedTuple):
     iter_count: NDArray[np.int64]
 
 
-def _per_block_option(
-    value: NDArray[np.float64] | da.Array, fdf_dirty_cube: da.Array
-) -> NDArray[Any]:
-    """This CLEAN parameter sliced to the FDF's spatial blocks, as delayed objects.
+_PER_PIXEL_CLEAN_FIELDS = ("mask", "threshold", "fdf_noise")
+"""`RMCleanOptions` fields that may be a per-pixel map instead of a scalar."""
 
-    Rechunked to the FDF's own spatial chunking so block N of the map is block N
-    of the cube. Kept lazy: a per-pixel noise map derived from a weight cube is
-    itself lazy, and forcing it here would read the whole cube up front.
+
+def _spatially_chunked_like(
+    value: NDArray[np.float64] | da.Array, fdf_dirty_cube: da.Array, field: str
+) -> da.Array:
+    """A per-pixel CLEAN parameter chunked to match the FDF's spatial blocks.
+
+    Block N of the map is then block N of the cube, so a CLEAN task can pull its
+    own pixels' values by key. Kept lazy: a per-pixel noise map derived from a
+    weight cube is itself lazy, and forcing it here would read the whole cube
+    while the graph is still being built.
     """
     array = value if isinstance(value, da.Array) else da.from_array(value)
     if array.shape != fdf_dirty_cube.shape[1:]:
         msg = (
-            "A per-pixel CLEAN mask/threshold/noise must match the FDF's spatial "
-            f"shape {fdf_dirty_cube.shape[1:]}, got {array.shape}."
+            f"A per-pixel CLEAN {field} must match the FDF's spatial shape "
+            f"{fdf_dirty_cube.shape[1:]}, got {array.shape}."
         )
         raise ValueError(msg)
-    return array.rechunk(fdf_dirty_cube.chunks[1:]).to_delayed(optimize_graph=False)
+    return array.rechunk(fdf_dirty_cube.chunks[1:])
 
 
 def _describe(value: float | NDArray[np.float64] | da.Array) -> str:
@@ -89,14 +96,20 @@ def _clean_block(
     clean_options: RMCleanOptions,
     log_level: int,
     multiscale_options: MultiscaleOptions | None = None,
-    option_blocks: dict[str, Any] | None = None,
+    *option_blocks: NDArray[np.float64] | None,
 ) -> _RMCleanBlockResult:
     """CLEAN one spatial chunk. `rmsf_block` is either the block's own RMSF cube
     or the 1D RMSF every pixel shares, which is broadcast to the block here since
-    `rmclean` wants the RMSF and FDF on the same axes."""
-    # This block's slice of any per-pixel mask/threshold/noise map.
-    if option_blocks:
-        clean_options = replace(clean_options, **option_blocks)
+    `rmclean` wants the RMSF and FDF on the same axes. `option_blocks` carries
+    this block's slice of any per-pixel mask/threshold/noise, in
+    `_PER_PIXEL_CLEAN_FIELDS` order, each None where that one is a scalar."""
+    per_pixel: dict[str, Any] = {
+        field: block
+        for field, block in zip(_PER_PIXEL_CLEAN_FIELDS, option_blocks, strict=False)
+        if block is not None
+    }
+    if per_pixel:
+        clean_options = replace(clean_options, **per_pixel)
     if rmsf_block.ndim == 1:
         rmsf_block = np.broadcast_to(
             rmsf_block[:, np.newaxis, np.newaxis],
@@ -120,6 +133,126 @@ def _clean_block(
         resid_fdf=result.resid_fdf_arr,
         iter_count=result.clean_iter_arr,
     )
+
+
+def _build_clean_output_arrays(
+    fdf_dirty_cube: da.Array,
+    rmsf: NDArray[np.complex128] | da.Array,
+    rmsf_cube: da.Array | None,
+    phi_arr_radm2: NDArray[np.float64],
+    phi_double_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_radm2: float,
+    clean_options: RMCleanOptions,
+    multiscale_options: MultiscaleOptions | None,
+    log_level: int,
+) -> tuple[da.Array, da.Array, da.Array, da.Array]:
+    """The four `_clean_block` outputs, from one pass over one graph.
+
+    A `dask.array.from_delayed` per output per block would walk (and re-wrap)
+    every upstream layer 4 * n_chunks times, which is quadratic in the chunk
+    count once the upstream layer count grows with it too. Here the upstream
+    graph is traversed once, by the single `HighLevelGraph.from_collections`
+    call that hangs the CLEAN layer off it.
+
+    Keys are referenced by name rather than going through
+    `dask.array.Array.to_delayed`, which keeps the input graph's own keys: an
+    upstream per-block task (the Stokes I fit, the NUFFT) must not be fused
+    into the block task RM-CLEAN consumes, or anything else built on the same
+    `RMSynth3DResults` stops sharing that work and recomputes it in the same
+    `dask.compute`.
+    """
+    numblocks = fdf_dirty_cube.numblocks
+    fdf_chunks = fdf_dirty_cube.chunks
+    spatial_chunks = fdf_chunks[1:]
+
+    token = tokenize(
+        fdf_dirty_cube.name,
+        rmsf_cube.name if rmsf_cube is not None else rmsf,
+        phi_arr_radm2,
+        phi_double_arr_radm2,
+        fwhm_rmsf_radm2,
+        clean_options,
+        multiscale_options,
+        log_level,
+    )
+    block_name = f"rmclean-block-{token}"
+
+    layer: dict[Any, Any] = {}
+    # A shared RMSF becomes one graph key that every block points at, rather
+    # than the same spectrum re-embedded per block or a cube holding ny*nx
+    # copies.
+    shared_rmsf_key = f"rmclean-rmsf-{token}"
+    if rmsf_cube is None:
+        layer[shared_rmsf_key] = rmsf
+
+    # A per-pixel mask/threshold/noise is a map over the whole image, so each
+    # block reads its own slice of it, by key like the FDF and RMSF do. Scalars
+    # stay on `clean_options` and are shared by every block.
+    option_arrays = {
+        field: _spatially_chunked_like(value, fdf_dirty_cube, field)
+        for field in _PER_PIXEL_CLEAN_FIELDS
+        if (value := getattr(clean_options, field)) is not None and np.ndim(value) != 0
+    }
+
+    for idx in np.ndindex(numblocks):
+        layer[(block_name, *idx)] = (
+            _clean_block,
+            (fdf_dirty_cube.name, *idx),
+            (rmsf_cube.name, *idx) if rmsf_cube is not None else shared_rmsf_key,
+            phi_arr_radm2,
+            phi_double_arr_radm2,
+            fwhm_rmsf_radm2,
+            clean_options,
+            log_level,
+            multiscale_options,
+            *(
+                None
+                if (array := option_arrays.get(field)) is None
+                else (array.name, *idx[1:])
+                for field in _PER_PIXEL_CLEAN_FIELDS
+            ),
+        )
+
+    dependencies = [fdf_dirty_cube]
+    if rmsf_cube is not None:
+        dependencies.append(rmsf_cube)
+    dependencies.extend(option_arrays.values())
+    graph = HighLevelGraph.from_collections(
+        block_name, layer, dependencies=dependencies
+    )
+
+    layers: dict[str, Any] = dict(graph.layers)
+    layer_deps: dict[str, set[str]] = dict(graph.dependencies)
+    arrays: list[tuple[str, type, tuple[tuple[int, ...], ...]]] = []
+    for field, dtype, chunks in (
+        ("clean_fdf", np.complex128, fdf_chunks),
+        ("model_fdf", np.complex128, fdf_chunks),
+        ("resid_fdf", np.complex128, fdf_chunks),
+        ("iter_count", np.int64, spatial_chunks),
+    ):
+        name = f"rmclean-{field.replace('_', '-')}-{token}"
+        field_index = _RMCleanBlockResult._fields.index(field)
+        # The 2D iteration-count map drops the leading (single-block) axis.
+        layers[name] = {
+            (name, *idx[-len(chunks) :]): (
+                operator.getitem,
+                (block_name, *idx),
+                field_index,
+            )
+            for idx in np.ndindex(numblocks)
+        }
+        layer_deps[name] = {block_name}
+        arrays.append((name, dtype, chunks))
+
+    # One graph shared by all four arrays, so a `dask.compute` over any subset
+    # of them runs `_clean_block` once per chunk. Culling at compute time drops
+    # the layers an individual array doesn't reach.
+    shared_graph = HighLevelGraph(layers, layer_deps)
+    clean, model, resid, iter_count = (
+        da.Array(shared_graph, name, chunks, dtype=dtype)
+        for name, dtype, chunks in arrays
+    )
+    return clean, model, resid, iter_count
 
 
 def run_rmclean(
@@ -194,11 +327,24 @@ def run_rmclean(
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
     """
+    if fdf_dirty_cube.numblocks[0] != 1:
+        msg = (
+            "fdf_dirty_cube must be chunked spatially only, but its Faraday "
+            f"depth axis is split into {fdf_dirty_cube.numblocks[0]} chunks."
+        )
+        raise ValueError(msg)
+
     rmsf_cube: da.Array | None = None
     if rmsf.ndim == 3:
         if not isinstance(rmsf, da.Array):
             msg = "A per-pixel rmsf must be a dask array, chunked like fdf_dirty_cube."
             raise TypeError(msg)
+        if rmsf.numblocks[0] != 1:
+            msg = (
+                "A per-pixel rmsf must be chunked spatially only, but its "
+                f"Faraday depth axis is split into {rmsf.numblocks[0]} chunks."
+            )
+            raise ValueError(msg)
         if fdf_dirty_cube.chunks[1:] != rmsf.chunks[1:]:
             msg = (
                 "fdf_dirty_cube and a per-pixel rmsf must have identical "
@@ -231,81 +377,30 @@ def run_rmclean(
         else None
     )
 
-    n_phi = fdf_dirty_cube.shape[0]
-    spatial_chunks = fdf_dirty_cube.chunks[1:]
-    numblocks = fdf_dirty_cube.numblocks
-
-    # optimize_graph=False keeps the input graphs' keys. Optimising here can fuse
-    # an upstream per-block task (the Stokes I fit, the NUFFT) into the block task
-    # RM-CLEAN consumes, dropping its key; anything else built on the same
-    # `RMSynth3DResults` then no longer shares that work and recomputes it in the
-    # same `dask.compute`. Nothing is lost by skipping it: the scheduler optimises
-    # at compute time anyway.
-    dirty_delayed = fdf_dirty_cube.to_delayed(optimize_graph=False)
-    # A shared RMSF becomes one graph key that every block points at, rather than
-    # the same spectrum re-embedded per block or a cube holding ny*nx copies.
-    rmsf_delayed = (
-        rmsf_cube.to_delayed(optimize_graph=False)
-        if rmsf_cube is not None
-        else np.full(numblocks, delayed(rmsf, pure=True), dtype=object)
+    clean, model, resid, iter_count = _build_clean_output_arrays(
+        fdf_dirty_cube=fdf_dirty_cube,
+        rmsf=rmsf,
+        rmsf_cube=rmsf_cube,
+        phi_arr_radm2=phi_arr_radm2,
+        phi_double_arr_radm2=phi_double_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        clean_options=clean_options,
+        multiscale_options=multiscale_options,
+        log_level=log_level,
     )
 
-    # A per-pixel mask/threshold/noise is a map over the whole image, so each
-    # block gets its own slice of it, chunked to match. Scalars stay scalars.
-    option_blocks: dict[str, Any] = {
-        field: _per_block_option(value, fdf_dirty_cube)
-        for field in ("mask", "threshold", "fdf_noise")
-        if (value := getattr(clean_options, field)) is not None and np.ndim(value) != 0
-    }
-
-    clean_blocks = np.empty(numblocks, dtype=object)
-    model_blocks = np.empty(numblocks, dtype=object)
-    resid_blocks = np.empty(numblocks, dtype=object)
-    iter_blocks = np.empty(numblocks[1:], dtype=object)
-
-    for idx in np.ndindex(numblocks):
-        _, iy, ix = idx
-        cy = spatial_chunks[0][iy]
-        cx = spatial_chunks[1][ix]
-
-        block_result = delayed(_clean_block, pure=True)(
-            dirty_delayed[idx],
-            rmsf_delayed[idx],
-            phi_arr_radm2,
-            phi_double_arr_radm2,
-            fwhm_rmsf_radm2,
-            clean_options,
-            log_level,
-            multiscale_options,
-            {field: blocks[iy, ix] for field, blocks in option_blocks.items()} or None,
-        )
-
-        clean_blocks[idx] = da.from_delayed(
-            block_result.clean_fdf, shape=(n_phi, cy, cx), dtype=np.complex128
-        )
-        model_blocks[idx] = da.from_delayed(
-            block_result.model_fdf, shape=(n_phi, cy, cx), dtype=np.complex128
-        )
-        resid_blocks[idx] = da.from_delayed(
-            block_result.resid_fdf, shape=(n_phi, cy, cx), dtype=np.complex128
-        )
-        iter_blocks[idx[1:]] = da.from_delayed(
-            block_result.iter_count, shape=(cy, cx), dtype=np.int64
-        )
-
-    clean_fdf_cube = da.block(clean_blocks.tolist())
     moments = calc_faraday_moments(
-        clean_fdf_cube,
+        clean,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
         threshold=moment_threshold,
     )
 
     return RMClean3DResults(
-        clean_fdf_cube=clean_fdf_cube,
-        model_fdf_cube=da.block(model_blocks.tolist()),
-        resid_fdf_cube=da.block(resid_blocks.tolist()),
-        iter_count_map=da.block(iter_blocks.tolist()),
+        clean_fdf_cube=clean,
+        model_fdf_cube=model,
+        resid_fdf_cube=resid,
+        iter_count_map=iter_count,
         mom0_map=moments.mom0,
         mom1_map=moments.mom1,
         mom2_map=moments.mom2,
