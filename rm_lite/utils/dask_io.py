@@ -141,7 +141,14 @@ def _read_fits_block(
     )
     # Native byte order: FITS is big-endian on disk, and leaving the block
     # that way makes dask insert an `astype` layer on top of every read.
-    return block.astype(block.dtype.newbyteorder("="), copy=False)
+    # Swapped in place rather than through `astype`, which allocates a second
+    # copy of the block: `copy=False` only avoids that when no conversion is
+    # needed, and a byte-order change is one. The block was just read from disk
+    # and nothing else holds it, so rewriting its buffer is safe. Measured on a
+    # 119 MiB block, this takes the read task's peak from 238 MiB to 119 MiB.
+    if block.dtype.isnative:
+        return block
+    return block.byteswap(inplace=True).view(block.dtype.newbyteorder("="))
 
 
 def _cube_meta(path: str | Path) -> tuple[tuple[int, int, int], np.dtype[Any], Header]:

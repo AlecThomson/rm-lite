@@ -277,6 +277,12 @@ def run_rmclean(
         if not isinstance(rmsf, da.Array):
             msg = "A per-pixel rmsf must be a dask array, chunked like fdf_dirty_cube."
             raise TypeError(msg)
+        if rmsf.numblocks[0] != 1:
+            msg = (
+                "A per-pixel rmsf must be chunked spatially only, but its "
+                f"Faraday depth axis is split into {rmsf.numblocks[0]} chunks."
+            )
+            raise ValueError(msg)
         if fdf_dirty_cube.chunks[1:] != rmsf.chunks[1:]:
             msg = (
                 "fdf_dirty_cube and a per-pixel rmsf must have identical "

@@ -1061,3 +1061,9 @@ def test_rmclean_rejects_an_rmsf_it_cannot_use(synthetic_cube: SyntheticCube):
     # pixels.
     with pytest.raises(ValueError, match="identical .*spatial chunking"):
         clean_with(rmsf_cube.rechunk({1: 1, 2: 1}))
+
+    # Split along Faraday depth. The CLEAN tasks index the RMSF by the FDF's
+    # block index, so this would silently hand each block the first depth chunk
+    # of the RMSF rather than the whole spectrum.
+    with pytest.raises(ValueError, match="per-pixel rmsf must be chunked spatially"):
+        clean_with(rmsf_cube.rechunk({0: 1}))
