@@ -43,6 +43,24 @@ def broadcast_over_channels(
     return arr_1d.reshape(arr_1d.shape[0], *([1] * (target.ndim - 1)))
 
 
+def float_if_scalar(value: Any) -> float | NDArray[np.float64] | da.Array:
+    """A plain float for a 0-d value; anything else is left alone, and lazy."""
+    if np.ndim(value) == 0:
+        return float(value)
+    return cast("NDArray[np.float64] | da.Array", value)
+
+
+def format_scalar_or_map(value: float | NDArray[np.float64] | da.Array) -> str:
+    """Log-friendly string for a scalar, or the finite range of a map."""
+    if np.ndim(value) == 0:
+        return f"{float(value):0.3g}"
+    values = np.asarray(value)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return "all non-finite"
+    return f"{finite.min():0.3g} to {finite.max():0.3g} per pixel"
+
+
 def nd_to_two_d(arr: NDArray[DType]) -> NDArray[DType]:
     """Convert an array to 2D.
 

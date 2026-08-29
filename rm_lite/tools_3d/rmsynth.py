@@ -181,7 +181,7 @@ def _compute_global_params(
 
 
 class WeightSummary(NamedTuple):
-    """What the globals need to know about a weight array, from one pass."""
+    """A weight array reduced to its channel weighting and whether pixels share it."""
 
     channel_profile: NDArray[np.float64]
     """The cube's aggregate per-channel weights, shape (n_freq,)."""

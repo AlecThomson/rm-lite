@@ -14,7 +14,9 @@ from dask.highlevelgraph import HighLevelGraph
 from numpy.typing import NDArray
 
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults
+from rm_lite.utils.arrays import format_scalar_or_map
 from rm_lite.utils.clean import (
+    PER_PIXEL_CLEAN_FIELDS,
     MultiscaleOptions,
     RMCleanOptions,
     RMSynthArrays,
@@ -52,11 +54,7 @@ class _RMCleanBlockResult(NamedTuple):
     iter_count: NDArray[np.int64]
 
 
-_PER_PIXEL_CLEAN_FIELDS = ("mask", "threshold", "fdf_noise")
-"""`RMCleanOptions` fields that may be a per-pixel map instead of a scalar."""
-
-
-def _spatially_chunked_like(
+def _align_option_map_to_fdf(
     value: NDArray[np.float64] | da.Array, fdf_dirty_cube: da.Array, field: str
 ) -> da.Array:
     """A per-pixel CLEAN parameter rechunked to the FDF's spatial blocks.
@@ -75,18 +73,7 @@ def _spatially_chunked_like(
     return array.rechunk(fdf_dirty_cube.chunks[1:])
 
 
-def _format_scalar_or_map(value: float | NDArray[np.float64] | da.Array) -> str:
-    """One log-friendly string for a scalar or for a per-pixel map."""
-    if np.ndim(value) == 0:
-        return f"{float(value):0.3g}"
-    values = np.asarray(value)
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return "all non-finite"
-    return f"{finite.min():0.3g} to {finite.max():0.3g} per pixel"
-
-
-def _clean_block(
+def _rmclean_on_block(
     dirty_fdf_block: NDArray[np.complex128],
     rmsf_block: NDArray[np.complex128],
     phi_arr_radm2: NDArray[np.float64],
@@ -101,10 +88,10 @@ def _clean_block(
     or the 1D RMSF every pixel shares, which is broadcast to the block here since
     `rmclean` wants the RMSF and FDF on the same axes. `option_blocks` carries
     this block's slice of any per-pixel mask/threshold/noise, in
-    `_PER_PIXEL_CLEAN_FIELDS` order, each None where that one is a scalar."""
+    `PER_PIXEL_CLEAN_FIELDS` order, each None where that one is a scalar."""
     per_pixel: dict[str, Any] = {
         field: block
-        for field, block in zip(_PER_PIXEL_CLEAN_FIELDS, option_blocks, strict=False)
+        for field, block in zip(PER_PIXEL_CLEAN_FIELDS, option_blocks, strict=False)
         if block is not None
     }
     if per_pixel:
@@ -145,7 +132,7 @@ def _build_clean_output_arrays(
     multiscale_options: MultiscaleOptions | None,
     log_level: int,
 ) -> tuple[da.Array, da.Array, da.Array, da.Array]:
-    """The four `_clean_block` outputs, from one pass over one graph.
+    """The four `_rmclean_on_block` outputs, from one pass over one graph.
 
     A `dask.array.from_delayed` per output per block would walk (and re-wrap)
     every upstream layer 4 * n_chunks times, which is quadratic in the chunk
@@ -188,14 +175,14 @@ def _build_clean_output_arrays(
     # block reads its own slice of it, by key like the FDF and RMSF do. Scalars
     # stay on `clean_options` and are shared by every block.
     option_arrays = {
-        field: _spatially_chunked_like(value, fdf_dirty_cube, field)
-        for field in _PER_PIXEL_CLEAN_FIELDS
+        field: _align_option_map_to_fdf(value, fdf_dirty_cube, field)
+        for field in PER_PIXEL_CLEAN_FIELDS
         if (value := getattr(clean_options, field)) is not None and np.ndim(value) != 0
     }
 
     for idx in np.ndindex(numblocks):
         layer[(block_name, *idx)] = (
-            _clean_block,
+            _rmclean_on_block,
             (fdf_dirty_cube.name, *idx),
             (rmsf_cube.name, *idx) if rmsf_cube is not None else shared_rmsf_key,
             phi_arr_radm2,
@@ -208,7 +195,7 @@ def _build_clean_output_arrays(
                 None
                 if (array := option_arrays.get(field)) is None
                 else (array.name, *idx[1:])
-                for field in _PER_PIXEL_CLEAN_FIELDS
+                for field in PER_PIXEL_CLEAN_FIELDS
             ),
         )
 
@@ -244,7 +231,7 @@ def _build_clean_output_arrays(
         arrays.append((name, dtype, chunks))
 
     # One graph shared by all four arrays, so a `dask.compute` over any subset
-    # of them runs `_clean_block` once per chunk. Culling at compute time drops
+    # of them runs `_rmclean_on_block` once per chunk. Culling at compute time drops
     # the layers an individual array doesn't reach.
     shared_graph = HighLevelGraph(layers, layer_deps)
     clean, model, resid, iter_count = (
@@ -459,8 +446,8 @@ def run_rmclean_from_synth(
     moment_threshold = moment_threshold_snr * fdf_error_noise
 
     logger.info(
-        f"Theoretical FDF noise: {_format_scalar_or_map(fdf_error_noise)}. "
-        f"Auto mask: {_format_scalar_or_map(mask)}, auto threshold: {_format_scalar_or_map(threshold)}."
+        f"Theoretical FDF noise: {format_scalar_or_map(fdf_error_noise)}. "
+        f"Auto mask: {format_scalar_or_map(mask)}, auto threshold: {format_scalar_or_map(threshold)}."
     )
 
     return run_rmclean(

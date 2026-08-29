@@ -4,7 +4,7 @@ import logging
 import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Literal, NamedTuple, Protocol, cast
+from typing import Any, Literal, NamedTuple, Protocol, TypeAlias, cast
 
 import dask.array as da
 import numpy as np
@@ -822,7 +822,7 @@ def _write_flat_model(
     out[planes.model, y, x] = mean_flux
 
 
-RefFreqHz = float | NDArray[np.float64]
+RefFreqHz: TypeAlias = float | NDArray[np.float64]
 """A reference frequency in Hz: one for the whole image, or one per pixel."""
 
 

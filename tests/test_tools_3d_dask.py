@@ -195,14 +195,14 @@ def test_rmclean_3d_block_runs_once_per_chunk(
 ):
     """The expensive per-pixel Hogbom loop must run once per chunk, not once per output."""
     call_count = 0
-    original = rmclean3d_mod._clean_block
+    original = rmclean3d_mod._rmclean_on_block
 
     def counting_wrapper(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(rmclean3d_mod, "_clean_block", counting_wrapper)
+    monkeypatch.setattr(rmclean3d_mod, "_rmclean_on_block", counting_wrapper)
 
     q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
@@ -279,7 +279,7 @@ def test_mixed_batch_shares_upstream_work(monkeypatch):
 
     fit_calls = _counting(monkeypatch, fitting_mod, "_fit_stokes_i_block")
     nufft_calls = _counting(monkeypatch, rmsynth3d_mod, "rmsynth_nufft")
-    clean_calls = _counting(monkeypatch, rmclean3d_mod, "_clean_block")
+    clean_calls = _counting(monkeypatch, rmclean3d_mod, "_rmclean_on_block")
 
     synth = rmsynth3d_mod.rmsynth_3d(
         _chunked(stokes_q, 3, 4),
@@ -337,14 +337,14 @@ def test_write_zarr_group_shares_computation_across_arrays(
     once per array instead of once per chunk.
     """
     call_count = 0
-    original = rmclean3d_mod._clean_block
+    original = rmclean3d_mod._rmclean_on_block
 
     def counting_wrapper(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(rmclean3d_mod, "_clean_block", counting_wrapper)
+    monkeypatch.setattr(rmclean3d_mod, "_rmclean_on_block", counting_wrapper)
 
     q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)

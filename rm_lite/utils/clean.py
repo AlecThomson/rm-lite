@@ -106,6 +106,10 @@ class MinorLoopResults(NamedTuple):
     """The number of iterations"""
 
 
+PER_PIXEL_CLEAN_FIELDS = ("mask", "threshold", "fdf_noise")
+"""`RMCleanOptions` fields that take a per-pixel map as well as a scalar."""
+
+
 @dataclass(frozen=True, kw_only=True, slots=True)
 class RMCleanOptions:
     """Options for RM-CLEAN, shared by the 1D and 3D tools"""
@@ -474,7 +478,7 @@ def _blank_pixels(
     return np.isnan(_fdf_peak_abs(dirty_fdf_arr_2d))
 
 
-class _PixelCleanOptions:
+class PixelCleanOptions:
     """Hands each pixel the CLEAN options that apply to it.
 
     `mask`, `threshold` and `fdf_noise` are scalars, or per-pixel maps when the
@@ -487,7 +491,7 @@ class _PixelCleanOptions:
         self._options = clean_options
         self._per_pixel = {
             field: nd_to_two_d(np.asarray(value)).reshape(-1)
-            for field in ("mask", "threshold", "fdf_noise")
+            for field in PER_PIXEL_CLEAN_FIELDS
             if np.ndim(value := getattr(clean_options, field)) != 0
         }
         for field, values in self._per_pixel.items():
@@ -618,7 +622,7 @@ def rmclean(
     # multiscale gets the narrower blank-pixel screen instead: there a
     # scale-convolved dirty FDF can clear `mask * peak_response` even when the
     # raw peak does not, so the general no-op argument does not hold.
-    pixel_options = _PixelCleanOptions(clean_options, dirty_fdf_arr_2d.shape[1:])
+    pixel_options = PixelCleanOptions(clean_options, dirty_fdf_arr_2d.shape[1:])
     if not multiscale or clean_options.fdf_noise is not None:
         skip_arr = _null_clean_pixels(dirty_fdf_arr_2d, pixel_options.mask_1d)
         logger.info(

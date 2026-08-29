@@ -20,6 +20,7 @@ from tqdm.auto import trange
 from rm_lite.utils.arrays import (
     arange,
     broadcast_over_channels,
+    float_if_scalar,
     nd_to_two_d,
     two_d_to_nd,
     zero_nonfinite,
@@ -757,13 +758,6 @@ def lambda2_to_freq(lambda_sq_m2: T) -> T:
     return speed_of_light_m_s / np.sqrt(lambda_sq_m2)  # type: ignore[no-any-return]
 
 
-def _noise_value(value: Any) -> float | NDArray[np.float64] | da.Array:
-    """A plain float for a per-channel noise, left as-is (and lazy) per pixel."""
-    if np.ndim(value) == 0:
-        return float(value)
-    return cast("NDArray[np.float64] | da.Array", value)
-
-
 def compute_theoretical_noise(
     complex_pol_error: NDArray[np.complex128] | da.Array,
     weight_arr: NDArray[np.float64] | da.Array,
@@ -783,9 +777,9 @@ def compute_theoretical_noise(
 
     fdf_error_noise = (fdf_complex_noise.real + fdf_complex_noise.imag) / 2
     return TheoreticalNoise(
-        fdf_error_noise=_noise_value(fdf_error_noise),
-        fdf_q_noise=_noise_value(fdf_complex_noise.real),
-        fdf_u_noise=_noise_value(fdf_complex_noise.imag),
+        fdf_error_noise=float_if_scalar(fdf_error_noise),
+        fdf_q_noise=float_if_scalar(fdf_complex_noise.real),
+        fdf_u_noise=float_if_scalar(fdf_complex_noise.imag),
     )
 
 
