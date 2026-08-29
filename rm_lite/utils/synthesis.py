@@ -101,13 +101,17 @@ class FractionalSpectra(NamedTuple):
 
 
 class TheoreticalNoise(NamedTuple):
-    """Theoretical noise of the FDF"""
+    """Theoretical noise of the FDF.
 
-    fdf_error_noise: float
+    A float per field for a per-channel weight array; an (ny, nx) map, possibly
+    lazy, when the weights vary per pixel.
+    """
+
+    fdf_error_noise: float | NDArray[np.float64] | da.Array
     """Theoretical noise of the FDF"""
-    fdf_q_noise: float
+    fdf_q_noise: float | NDArray[np.float64] | da.Array
     """Theoretical noise of the real FDF"""
-    fdf_u_noise: float
+    fdf_u_noise: float | NDArray[np.float64] | da.Array
     """Theoretical noise of the imaginary FDF"""
 
 
@@ -210,7 +214,7 @@ def calc_faraday_moments(
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float | NDArray[np.float64],
     axis: int = 0,
-    threshold: float | None = None,
+    threshold: float | NDArray[np.float64] | None = None,
     auto_threshold_sigma: float | None = None,
     debias: bool = False,
     lam_sq_0_m2: float | None = None,
@@ -734,26 +738,38 @@ def lambda2_to_freq(lambda_sq_m2: T) -> T:
     return speed_of_light_m_s / np.sqrt(lambda_sq_m2)  # type: ignore[no-any-return]
 
 
+def _noise_value(value: Any) -> float | NDArray[np.float64] | da.Array:
+    """A plain float for a per-channel noise, left as-is (and lazy) per pixel."""
+    if np.ndim(value) == 0:
+        return float(value)
+    return cast("NDArray[np.float64] | da.Array", value)
+
+
 def compute_theoretical_noise(
     complex_pol_error: NDArray[np.complex128] | da.Array,
     weight_arr: NDArray[np.float64] | da.Array,
 ) -> TheoreticalNoise:
+    """Theoretical FDF noise, one value per pixel of the weight array.
+
+    Reduced over the channel axis only. A per-channel (1D) weight array gives one
+    float for the whole cube, as before; a per-pixel (3D) one gives an (ny, nx)
+    map, which is the point of per-pixel weights -- summing over the spatial axes
+    too would divide the noise by a further sqrt(ny*nx) and report the wrong
+    number for every pixel. A lazy weight array keeps the map lazy, so it costs a
+    pass over the cube only when something asks for it.
+    """
     weight_arr = zero_nonfinite(weight_arr)
     complex_pol_error_flagged = zero_nonfinite(complex_pol_error)
     fdf_complex_noise = np.sqrt(
-        np.nansum(weight_arr**2 * complex_pol_error_flagged**2)
-        / (np.sum(weight_arr)) ** 2
+        np.nansum(weight_arr**2 * complex_pol_error_flagged**2, axis=0)
+        / (np.sum(weight_arr, axis=0)) ** 2
     )
 
     fdf_error_noise = (fdf_complex_noise.real + fdf_complex_noise.imag) / 2
-    # `float`, not the bare reduction: a per-pixel (3D) weight array makes these
-    # lazy dask scalars, and `TheoreticalNoise` is declared as floats and used as
-    # floats -- `run_rmclean_from_synth` scales its CLEAN mask and threshold from
-    # them and logs them, which a dask scalar cannot do.
     return TheoreticalNoise(
-        fdf_error_noise=float(fdf_error_noise),
-        fdf_q_noise=float(fdf_complex_noise.real),
-        fdf_u_noise=float(fdf_complex_noise.imag),
+        fdf_error_noise=_noise_value(fdf_error_noise),
+        fdf_q_noise=_noise_value(fdf_complex_noise.real),
+        fdf_u_noise=_noise_value(fdf_complex_noise.imag),
     )
 
 
@@ -768,6 +784,8 @@ class RMSynthParams(NamedTuple):
     """ Faraday depth values in rad/m^2 """
     weight_arr: NDArray[np.float64]
     """ Weight array """
+    cell_m2: float = 0.0
+    """ lambda^2 gridding cell, for re-deriving the grid weightings per chunk """
 
 
 class SigmaAdd(NamedTuple):
@@ -864,23 +882,35 @@ def _lambda_sq_density(
     the true sampling density changes (gaps, channelisation changes); this is
     correct inverse-density weighting, not aliasing. Flagged channels (zero
     natural weight) get zero density."""
-    # `natural_weight_arr` may carry spatial axes the per-channel lambda^2 does
-    # not, so index both on its shape. A no-op when both are 1D; when the weight
-    # is per-pixel, cells pool every pixel's contribution, which is exact for the
-    # spatially uniform weights this path is given (an occupancy scaled by the
-    # pixel count divides straight back out, since every consumer of these
-    # weights normalises by their sum).
-    lambda_sq_shaped = np.broadcast_to(lambda_sq_arr_m2, natural_weight_arr.shape)
-    density = np.zeros_like(natural_weight_arr)
-    good = natural_weight_arr > 0
+    # Vectorised over pixels: the weight may be per-channel (n_freq,) or
+    # per-pixel (n_freq, ny, nx), and each pixel gets its own occupancy, since
+    # its own flagging decides which cells are occupied. lambda^2 is per-channel
+    # either way, so the cell edges are shared and only the origin shifts.
+    weight_2d = natural_weight_arr.reshape(natural_weight_arr.shape[0], -1)
+    lambda_sq_1d = np.reshape(lambda_sq_arr_m2, -1)
+    n_pixel = weight_2d.shape[1]
+
+    density = np.zeros_like(weight_2d)
+    good = weight_2d > 0
     if not good.any():
-        return density
-    origin = float(lambda_sq_shaped[good].min())
-    cell_idx = np.floor((lambda_sq_shaped[good] - origin) / cell_m2).astype(np.int64)
-    occupancy = np.zeros(int(cell_idx.max()) + 1)
-    np.add.at(occupancy, cell_idx, natural_weight_arr[good])
-    density[good] = occupancy[cell_idx] / cell_m2
-    return density
+        return density.reshape(natural_weight_arr.shape)
+
+    origin = np.where(good, lambda_sq_1d[:, np.newaxis], np.inf).min(axis=0)
+    cell_idx = np.where(
+        good, np.floor((lambda_sq_1d[:, np.newaxis] - origin) / cell_m2), 0
+    ).astype(np.int64)
+    pixel_idx = np.broadcast_to(np.arange(n_pixel), cell_idx.shape)
+
+    # One bincount over flattened (cell, pixel) pairs rather than a scatter-add
+    # per pixel: same occupancy, and it stays a single vectorised pass.
+    n_cell = int(cell_idx.max()) + 1
+    occupancy = np.bincount(
+        (cell_idx[good] * n_pixel + pixel_idx[good]),
+        weights=weight_2d[good],
+        minlength=n_cell * n_pixel,
+    ).reshape(n_cell, n_pixel)
+    density[good] = occupancy[cell_idx[good], pixel_idx[good]] / cell_m2
+    return density.reshape(natural_weight_arr.shape)
 
 
 def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -918,12 +948,21 @@ def briggs_weight(
     natural-weighted mean sampling density (CASA convention) so `robust` is
     comparable across datasets with different channel counts."""
     density = _lambda_sq_density(lambda_sq_arr_m2, natural_weight_arr, cell_m2)
-    total_weight = float(np.sum(natural_weight_arr))
-    if total_weight == 0:
-        return np.zeros_like(natural_weight_arr)
-    mean_density = float(np.sum(natural_weight_arr * density) / total_weight)
-    f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
-    weight: NDArray[np.float64] = natural_weight_arr / (1.0 + density * f_sq)
+    # Reduced over channels, not over everything: with a per-pixel weight array
+    # each pixel needs its own natural-weighted mean density, or one pixel's
+    # noise level sets `f_sq` for the whole image and `robust` stops meaning the
+    # same thing pixel to pixel. Scalars for a per-channel weight, as before.
+    total_weight = np.sum(natural_weight_arr, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean_density = np.where(
+            total_weight > 0,
+            np.sum(natural_weight_arr * density, axis=0) / total_weight,
+            np.inf,
+        )
+        f_sq = (5.0 * 10.0**-robust) ** 2 / mean_density
+    weight: NDArray[np.float64] = np.where(
+        total_weight > 0, natural_weight_arr / (1.0 + density * f_sq), 0.0
+    )
     return weight
 
 
@@ -943,6 +982,55 @@ def _match_channel_mask(
     if mask.shape == target.shape:
         return mask
     return broadcast_over_channels(mask, target)
+
+
+def apply_weight_type(
+    lambda_sq_arr_m2: NDArray[np.float64],
+    real_qu_error: NDArray[np.float64],
+    channel_mask: NDArray[np.bool_],
+    fdf_options: FDFOptions,
+    cell_m2: float,
+) -> NDArray[np.float64]:
+    """Turn a Q/U error into RM-synthesis weights of the requested type.
+
+    `real_qu_error` is per-channel (n_freq,) or per-pixel (n_freq, ny, nx); the
+    result has its shape either way, and every weight type is computed per pixel
+    from that pixel's own errors and flagging. Split out of
+    `compute_rmsynth_params` so a chunk can weight its own pixels without the
+    whole cube: the grid weightings bin channels into lambda^2 cells, which costs
+    memory proportional to the pixel count being weighted at once.
+    """
+    # Zero flagged channels before the density-based weights so they do not
+    # inflate their neighbours' sampling density.
+    natural_weight_arr = natural_weight(real_qu_error)
+    natural_weight_arr = np.where(
+        _match_channel_mask(channel_mask, natural_weight_arr), 0.0, natural_weight_arr
+    )
+    # Broadcast-compatible view of lambda^2 for weight arrays that carry spatial
+    # axes beyond the channel axis.
+    lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, natural_weight_arr)
+
+    weight_arr: NDArray[np.float64]
+    match fdf_options.weight_type:
+        case "variance" | "natural":
+            weight_arr = natural_weight_arr
+        case "uniform":
+            # Match natural_weight_arr's shape (which may be 3D), not
+            # freq_arr_hz (always 1D).
+            weight_arr = np.ones_like(natural_weight_arr)
+        case "uniform_lsq":
+            weight_arr = uniform_lsq_weight(
+                lambda_sq_arr_m2_b, natural_weight_arr, cell_m2
+            )
+        case "briggs":
+            if fdf_options.robust is None:
+                msg = "Briggs weighting requires a `robust` parameter."
+                raise ValueError(msg)
+            weight_arr = briggs_weight(
+                lambda_sq_arr_m2_b, natural_weight_arr, fdf_options.robust, cell_m2
+            )
+
+    return np.where(_match_channel_mask(channel_mask, weight_arr), 0.0, weight_arr)
 
 
 def compute_rmsynth_params(
@@ -999,53 +1087,15 @@ def compute_rmsynth_params(
     cell_m2 = float(np.sqrt(3.0) / phi_max_radm2)
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
-    # Zero flagged channels before the density-based weights so they do not
-    # inflate their neighbours' sampling density.
     mask = ~np.isfinite(complex_pol_arr)
-    natural_weight_arr = natural_weight(real_qu_error)
-    natural_weight_arr = np.where(
-        _match_channel_mask(mask, natural_weight_arr), 0.0, natural_weight_arr
+    weight_arr = apply_weight_type(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        real_qu_error=real_qu_error,
+        channel_mask=mask,
+        fdf_options=fdf_options,
+        cell_m2=cell_m2,
     )
-
-    # Broadcast-compatible view of lambda^2 for combining with weight arrays
-    # that may carry extra spatial axes beyond the channel axis.
-    lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, natural_weight_arr)
-
-    # uniform_lsq/briggs bin lambda^2 into cells with `np.add.at` over a boolean
-    # selection, neither of which dask can do lazily (the selection's shape is
-    # unknown until compute). A per-pixel weight array from
-    # `rm_lite.tools_3d.rmsynth.get_weight_arr_from_fits` is lazy, so say so here
-    # rather than failing inside `_lambda_sq_density`.
-    if fdf_options.weight_type in ("uniform_lsq", "briggs") and isinstance(
-        natural_weight_arr, da.Array
-    ):
-        msg = (
-            f"{fdf_options.weight_type} weighting needs the weight array in "
-            "memory, but got a lazy per-pixel one. Use 'variance', 'natural' or "
-            "'uniform', or pass a computed weight_arr."
-        )
-        raise TypeError(msg)
-
-    match fdf_options.weight_type:
-        case "variance" | "natural":
-            weight_arr = natural_weight_arr
-        case "uniform":
-            # Match natural_weight_arr's shape (which may be 3D), not
-            # freq_arr_hz (always 1D).
-            weight_arr = np.ones_like(natural_weight_arr)
-        case "uniform_lsq":
-            weight_arr = uniform_lsq_weight(
-                lambda_sq_arr_m2_b, natural_weight_arr, cell_m2
-            )
-        case "briggs":
-            if fdf_options.robust is None:
-                msg = "Briggs weighting requires a `robust` parameter."
-                raise ValueError(msg)
-            weight_arr = briggs_weight(
-                lambda_sq_arr_m2_b, natural_weight_arr, fdf_options.robust, cell_m2
-            )
-
-    weight_arr = np.where(_match_channel_mask(mask, weight_arr), 0.0, weight_arr)
+    lambda_sq_arr_m2_b = broadcast_over_channels(lambda_sq_arr_m2, weight_arr)
 
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
     # Calculate a single global lam_sq_0_m2 value (summing over all axes when
@@ -1062,6 +1112,7 @@ def compute_rmsynth_params(
         lam_sq_0_m2=lam_sq_0_m2,
         phi_arr_radm2=phi_arr_radm2,
         weight_arr=weight_arr,
+        cell_m2=cell_m2,
     )
 
 
@@ -1712,7 +1763,7 @@ def get_fdf_parameters(
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            peak_pi_fit_snr = peak_pi_fit / theoretical_noise.fdf_error_noise
+            peak_pi_fit_snr = peak_pi_fit / float(theoretical_noise.fdf_error_noise)
 
     # In rare cases, a parabola can be fitted to the edge of the spectrum,
     # producing a unreasonably large RM and polarized intensity.

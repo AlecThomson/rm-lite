@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
@@ -110,16 +110,19 @@ class MinorLoopResults(NamedTuple):
 class RMCleanOptions:
     """Options for RM-CLEAN, shared by the 1D and 3D tools"""
 
-    mask: float
-    """Masking threshold - pixels below this value are not cleaned"""
-    threshold: float
-    """Cleaning threshold - stop when all pixels are below this value"""
+    mask: float | NDArray[np.float64]
+    """Masking threshold - pixels below this value are not cleaned. A scalar, or
+    a per-pixel map shaped like the FDF's spatial axes."""
+    threshold: float | NDArray[np.float64]
+    """Cleaning threshold - stop when all pixels are below this value. A scalar,
+    or a per-pixel map shaped like the FDF's spatial axes."""
     max_iter: int = 100_000
     """Maximum clean iterations"""
     gain: float = 0.1
     """Clean loop gain"""
-    fdf_noise: float | None = None
-    """Theoretical FDF noise; enables the adaptive off-source auto-mask when set."""
+    fdf_noise: float | NDArray[np.float64] | None = None
+    """Theoretical FDF noise; enables the adaptive off-source auto-mask when set.
+    A scalar, or a per-pixel map shaped like the FDF's spatial axes."""
 
     def __post_init__(self) -> None:
         if self.max_iter < 1:
@@ -434,7 +437,7 @@ def _fdf_peak_abs(
 
 def _null_clean_pixels(
     dirty_fdf_arr_2d: NDArray[np.complex128],
-    mask: float,
+    mask: float | NDArray[np.float64],
 ) -> NDArray[np.bool_]:
     """Pixels whose dirty FDF peak cannot clear `mask`, so CLEAN is a no-op.
 
@@ -469,6 +472,53 @@ def _blank_pixels(
     NaNs`. Skipping leaves the NaN residual the pixel came in with.
     """
     return np.isnan(_fdf_peak_abs(dirty_fdf_arr_2d))
+
+
+class _PixelCleanOptions:
+    """Hands each pixel the CLEAN options that apply to it.
+
+    `mask`, `threshold` and `fdf_noise` are scalars when the noise is
+    per-channel and per-pixel maps when it varies across the image (spatially
+    varying sensitivity, as in a mosaic). The maps are flattened once, the same
+    way the FDF is, and each pixel's values are substituted in as the loop
+    reaches it. All-scalar options are passed straight through, so the common
+    case allocates nothing.
+    """
+
+    def __init__(self, clean_options: RMCleanOptions, spatial_shape: tuple[int, ...]):
+        self._options = clean_options
+        self._per_pixel = {
+            field: nd_to_two_d(np.asarray(value)).reshape(-1)
+            for field in ("mask", "threshold", "fdf_noise")
+            if np.ndim(value := getattr(clean_options, field)) != 0
+        }
+        for field, values in self._per_pixel.items():
+            if values.shape != spatial_shape:
+                msg = (
+                    f"A per-pixel CLEAN {field} must match the FDF's spatial "
+                    f"shape {spatial_shape}, got {values.shape}."
+                )
+                raise ValueError(msg)
+
+    @property
+    def mask_1d(self) -> float | NDArray[np.float64]:
+        """The mask as the pixel loop sees it: a scalar, or one value per pixel."""
+        return self._per_pixel.get("mask", self._options.mask)
+
+    def describe_mask(self) -> str:
+        mask = self.mask_1d
+        if np.ndim(mask) == 0:
+            return f"{float(mask):0.3g}"
+        return f"{np.min(mask):0.3g} to {np.max(mask):0.3g} per-pixel"
+
+    def at(self, pix_idx: int) -> RMCleanOptions:
+        """The options for one pixel."""
+        if not self._per_pixel:
+            return self._options
+        return replace(
+            self._options,
+            **{field: values[pix_idx] for field, values in self._per_pixel.items()},
+        )
 
 
 def rmclean(
@@ -570,11 +620,12 @@ def rmclean(
     # multiscale gets the narrower blank-pixel screen instead: there a
     # scale-convolved dirty FDF can clear `mask * peak_response` even when the
     # raw peak does not, so the general no-op argument does not hold.
+    pixel_options = _PixelCleanOptions(clean_options, dirty_fdf_arr_2d.shape[1:])
     if not multiscale or clean_options.fdf_noise is not None:
-        skip_arr = _null_clean_pixels(dirty_fdf_arr_2d, clean_options.mask)
+        skip_arr = _null_clean_pixels(dirty_fdf_arr_2d, pixel_options.mask_1d)
         logger.info(
             f"Skipping {int(skip_arr.sum())} of {skip_arr.size} pixels with no "
-            f"emission above the {clean_options.mask:0.3g} CLEAN mask."
+            f"emission above the {pixel_options.describe_mask()} CLEAN mask."
         )
     else:
         skip_arr = _blank_pixels(dirty_fdf_arr_2d)
@@ -602,7 +653,7 @@ def rmclean(
                     rmsf_spectrum=rmsf_arr_2d[:, pix_idx],
                     rmsf_fwhm=rmsf_fwhm,
                     scales=scales,
-                    clean_options=clean_options,
+                    clean_options=pixel_options.at(pix_idx),
                     multiscale_options=ms_options,
                 )
             )
@@ -623,7 +674,7 @@ def rmclean(
                 if rm_synth_arrays.fdf_mask_arr is not None
                 else None,
             ),
-            clean_options=clean_options,
+            clean_options=pixel_options.at(pix_idx),
         )
         clean_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.clean_fdf_spectrum
         resid_fdf_arr_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
@@ -723,11 +774,13 @@ def minor_cycle(
     minor_loop_options = MinorLoopOptions(
         max_iter=clean_options.max_iter,
         gain=clean_options.gain,
-        mask_threshold=clean_options.mask,
-        stopping_threshold=clean_options.threshold,
+        mask_threshold=float(clean_options.mask),
+        stopping_threshold=float(clean_options.threshold),
         start_iter=0,
         update_mask=True,
-        noise=clean_options.fdf_noise,
+        noise=None
+        if clean_options.fdf_noise is None
+        else float(clean_options.fdf_noise),
     )
 
     logger.info("Starting initial minor loop...")
@@ -1418,7 +1471,7 @@ def _multiscale_minor_cycles(
             active=active,
             selection=selection,
             selection_margin=multiscale_options.selection_margin,
-            engage_floor=HYBRID_ENGAGE_MASK_FACTOR * clean_options.mask,
+            engage_floor=HYBRID_ENGAGE_MASK_FACTOR * float(clean_options.mask),
         )
         scale = float(scales[scale_index])
         peak_response = float(kernels.peak_response[scale_index])
@@ -1624,8 +1677,8 @@ def multiscale_clean_spectrum(
             r.iter_count,
         )
 
-    mask = clean_options.mask
-    threshold = clean_options.threshold
+    mask = float(clean_options.mask)
+    threshold = float(clean_options.threshold)
     kernel = multiscale_options.kernel
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)

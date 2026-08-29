@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import dask.array as da
@@ -35,6 +36,7 @@ from rm_lite.utils.dask_io import (
 from rm_lite.utils.synthesis import (
     WeightType,
     calc_faraday_moments,
+    compute_theoretical_noise,
     freq_to_lambda2,
 )
 
@@ -618,10 +620,13 @@ def test_per_pixel_weight_matches_the_shared_one(
     shared_synth, shared_clean = run(weight_1d)
     pixel_synth, pixel_clean = run(weight_3d)
 
-    assert isinstance(pixel_synth.theoretical_noise.fdf_error_noise, float)
+    # A per-pixel weight gives a per-pixel noise map; a uniform one must put the
+    # per-channel answer in every pixel of it.
+    pixel_noise = np.asarray(pixel_synth.theoretical_noise.fdf_error_noise)
+    assert pixel_noise.shape == (ny, nx)
     np.testing.assert_allclose(
-        pixel_synth.theoretical_noise.fdf_error_noise,
-        shared_synth.theoretical_noise.fdf_error_noise,
+        pixel_noise,
+        np.full((ny, nx), shared_synth.theoretical_noise.fdf_error_noise),
         rtol=1e-12,
     )
     np.testing.assert_allclose(
@@ -639,6 +644,158 @@ def test_per_pixel_weight_matches_the_shared_one(
     )
     np.testing.assert_allclose(pixel_fdf, shared_fdf, rtol=1e-10, atol=1e-12)
     np.testing.assert_array_equal(pixel_iters, shared_iters)
+
+
+def _varying_noise_cube(ny: int = 6, nx: int = 6, span: float = 100.0):
+    """Q/U with the noise rising across the field, as a mosaic edge does."""
+    n_freq = 32
+    freq_arr_hz = np.linspace(0.9e9, 1.4e9, n_freq)
+    lambda_sq = freq_to_lambda2(freq_arr_hz)
+    angle = 2 * (
+        RNG.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
+        + RNG.uniform(0, np.pi, (ny, nx))[None]
+    )
+    sigma_map = np.geomspace(1e-4, 1e-4 * span, ny * nx).reshape(ny, nx)
+    sigma = np.broadcast_to(sigma_map[None], (n_freq, ny, nx)).copy()
+    stokes_q = 0.6 * np.cos(angle) + RNG.normal(0, 1, sigma.shape) * sigma
+    stokes_u = 0.6 * np.sin(angle) + RNG.normal(0, 1, sigma.shape) * sigma
+    return freq_arr_hz, stokes_q, stokes_u, sigma
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_noise_map_is_right_pixel_by_pixel():
+    """Spatially varying noise must give each pixel its own theoretical noise.
+
+    `compute_theoretical_noise` used to sum over the spatial axes too, so one
+    scalar stood for the whole image and it was sqrt(ny*nx) below even the
+    quietest pixel. CLEAN scales its mask and threshold from this, so the number
+    has to be each pixel's own.
+    """
+    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube()
+    weight_arr = 1.0 / sigma**2
+
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 3, 3),
+        _chunked(stokes_u, 3, 3),
+        freq_arr_hz,
+        weight_arr=weight_arr,
+        d_phi_radm2=D_PHI_RADM2,
+    )
+    noise_map = np.asarray(synth.theoretical_noise.fdf_error_noise)
+    ny, nx = sigma.shape[1:]
+    assert noise_map.shape == (ny, nx)
+
+    # Each pixel against the same formula run on that pixel's own spectrum.
+    for pixel in ((0, 0), (0, nx - 1), (ny - 1, nx - 1)):
+        column = sigma[(slice(None), *pixel)]
+        expected = compute_theoretical_noise(
+            (column + 1j * column).astype(np.complex128),
+            1.0 / column**2,
+        ).fdf_error_noise
+        np.testing.assert_allclose(noise_map[pixel], expected, rtol=1e-12)
+
+    # And the map really does span the field's dynamic range, not one value.
+    assert noise_map.max() / noise_map.min() > 50
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_clean_thresholds_follow_the_noise_map():
+    """A noisy pixel must not be cleaned to a quiet pixel's threshold.
+
+    With one scalar threshold for the image, the noisiest pixels get a cut far
+    below their own noise and CLEAN grinds into it.
+    """
+    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube()
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 3, 3),
+        _chunked(stokes_u, 3, 3),
+        freq_arr_hz,
+        weight_arr=1.0 / sigma**2,
+        d_phi_radm2=D_PHI_RADM2,
+    )
+    noise_map = np.asarray(synth.theoretical_noise.fdf_error_noise)
+    per_pixel = run_rmclean_from_synth(synth)
+
+    # The same run, but told the whole image has the quietest pixel's noise:
+    # that is what a single scalar amounts to.
+    flat = synth._replace(
+        theoretical_noise=synth.theoretical_noise._replace(
+            fdf_error_noise=float(noise_map.min())
+        )
+    )
+    uniform = run_rmclean_from_synth(flat)
+
+    per_pixel_iters, uniform_iters = compute(
+        per_pixel.iter_count_map, uniform.iter_count_map
+    )
+    noisiest = np.unravel_index(np.argmax(noise_map), noise_map.shape)
+    assert per_pixel_iters[noisiest] < uniform_iters[noisiest]
+    quietest = np.unravel_index(np.argmin(noise_map), noise_map.shape)
+    assert per_pixel_iters[quietest] == uniform_iters[quietest]
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_shared_rmsf_kept_when_pixels_only_differ_in_scale():
+    """Noise varying across the image but not with frequency still shares an RMSF.
+
+    The RMSF is normalised by the weight sum, so pixels whose weights are scalar
+    multiples of each other have the same one. Keeping the shared spectrum there
+    is what stops per-pixel noise costing a whole extra cube.
+    """
+    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube(ny=4, nx=4)
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        freq_arr_hz,
+        weight_arr=1.0 / sigma**2,
+        d_phi_radm2=D_PHI_RADM2,
+    )
+    assert synth.rmsf_cube is None
+
+    per_pixel = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        freq_arr_hz,
+        weight_arr=1.0 / sigma**2,
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
+    )
+    cube = _require_cube(per_pixel.rmsf_cube).compute()
+    for pixel in ((0, 0), (3, 3)):
+        np.testing.assert_allclose(
+            cube[(slice(None), *pixel)], synth.rmsf_arr, rtol=1e-10, atol=1e-12
+        )
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_per_pixel_rmsf_forced_when_spectra_differ(caplog):
+    """When the noise spectrum itself varies per pixel, no one RMSF fits.
+
+    Nothing asked for the cube here; it is switched on because a shared spectrum
+    would silently be wrong for most of the image.
+    """
+    freq_arr_hz, stokes_q, stokes_u, _ = _varying_noise_cube(ny=4, nx=4)
+    ny, nx = 4, 4
+    # Each pixel's band tilts differently, so no rescaling maps one onto another.
+    tilt = np.linspace(-1.0, 1.0, ny * nx).reshape(ny, nx)
+    sigma = 1e-3 * (freq_arr_hz[:, None, None] / freq_arr_hz[0]) ** tilt[None]
+
+    with caplog.at_level(logging.INFO, logger="rm-lite"):
+        synth = rmsynth_3d(
+            _chunked(stokes_q, 2, 2),
+            _chunked(stokes_u, 2, 2),
+            freq_arr_hz,
+            weight_arr=1.0 / sigma**2,
+            d_phi_radm2=D_PHI_RADM2,
+        )
+
+    assert synth.rmsf_cube is not None
+    assert "do not share one" in caplog.text
+    cube = _require_cube(synth.rmsf_cube).compute()
+    corner_to_corner = np.max(np.abs(cube[:, 0, 0] - cube[:, -1, -1])) / np.max(
+        np.abs(cube[:, 0, 0])
+    )
+    assert corner_to_corner > 0.1
 
 
 def _write_cube(path, data: NDArray[np.float64]) -> None:

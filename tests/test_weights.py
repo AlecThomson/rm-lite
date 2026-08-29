@@ -3,7 +3,6 @@ on a virtual lambda^2 grid (inverse local density, no smoothing)."""
 
 from __future__ import annotations
 
-import dask.array as da
 import numpy as np
 import pytest
 from numpy.typing import NDArray
@@ -164,54 +163,57 @@ def test_fdf_options_validation() -> None:
     FDFOptions(weight_type="briggs", robust=0.0)  # ok
 
 
-def test_lambda_sq_density_handles_a_per_pixel_weight() -> None:
-    """A per-pixel weight array comes with a lambda^2 broadcast to (n_freq, 1, 1).
+def test_lambda_sq_density_is_per_pixel() -> None:
+    """Each pixel gets its own lambda^2 occupancy, from its own flagging.
 
-    Indexing the per-channel lambda^2 with a 3D boolean selection raised
-    IndexError, so uniform_lsq and briggs weighting could not be used with a
-    per-pixel weight array at all.
+    A per-pixel weight array comes with lambda^2 broadcast to (n_freq, 1, 1);
+    indexing that with a 3D boolean selection used to raise IndexError, so
+    uniform_lsq and briggs could not be used with per-pixel weights at all.
     """
-    ny, nx = 4, 5
+    ny, nx = 3, 4
     weight_3d = np.broadcast_to(ONES[:, None, None], (ONES.size, ny, nx)).copy()
+    # One pixel keeps only the top half of the band, so its cells are its own.
+    weight_3d[: ONES.size // 2, 0, 0] = 0.0
 
     density_1d = _lambda_sq_density(LAMBDA_SQ, ONES, CELL_M2)
     density_3d = _lambda_sq_density(LAMBDA_SQ[:, None, None], weight_3d, CELL_M2)
 
     assert density_3d.shape == weight_3d.shape
-    # Every pixel contributes to each cell's occupancy, so the density comes out
-    # a flat factor of ny*nx higher. Every consumer normalises by the weight
-    # sum, so that factor divides straight back out.
-    np.testing.assert_allclose(density_3d[:, 0, 0], density_1d * ny * nx)
+    # An untouched pixel matches the per-channel answer exactly: pixels do not
+    # pool into each other's cells.
+    np.testing.assert_allclose(density_3d[:, 1, 1], density_1d)
+    # The half-flagged pixel is zero where it is flagged, and its own density
+    # elsewhere -- computed from its own channels, not its neighbours'.
+    assert (density_3d[: ONES.size // 2, 0, 0] == 0).all()
+    flagged = ONES.copy()
+    flagged[: ONES.size // 2] = 0.0
     np.testing.assert_allclose(
-        density_3d, np.broadcast_to(density_3d[:, :1, :1], density_3d.shape)
-    )
-
-    weight_1d = uniform_lsq_weight(LAMBDA_SQ, ONES, CELL_M2)
-    weight_pixel = uniform_lsq_weight(LAMBDA_SQ[:, None, None], weight_3d, CELL_M2)[
-        :, 0, 0
-    ]
-    np.testing.assert_allclose(
-        weight_pixel / weight_pixel.sum(), weight_1d / weight_1d.sum()
+        density_3d[:, 0, 0], _lambda_sq_density(LAMBDA_SQ, flagged, CELL_M2)
     )
 
 
 @pytest.mark.parametrize("weight_type", ["uniform_lsq", "briggs"])
-def test_lazy_weight_rejected_by_grid_weighting(weight_type: WeightType) -> None:
-    """Cell binning needs the weights in memory, so say so rather than failing deep."""
-    weight_3d = da.from_array(
-        np.broadcast_to(ONES[:, None, None], (ONES.size, 2, 2)).copy()
-    )
-    error = 1.0 / np.sqrt(weight_3d)
-    with pytest.raises(TypeError, match="needs the weight array in memory"):
-        compute_rmsynth_params(
-            freq_arr_hz=FREQ_HZ,
-            complex_pol_arr=np.ones_like(FREQ_HZ, dtype=np.complex128),
-            complex_pol_error=(error + 1j * error).astype(np.complex128),
-            fdf_options=FDFOptions(
-                phi_max_radm2=100.0,
-                d_phi_radm2=1.0,
-                n_samples=10.0,
-                weight_type=weight_type,
-                robust=0.0,
-            ),
+def test_grid_weighting_is_per_pixel(weight_type: WeightType) -> None:
+    """uniform_lsq and briggs give each pixel the weights its own band earns."""
+    ny, nx = 2, 3
+    weight_3d = np.broadcast_to(ONES[:, None, None], (ONES.size, ny, nx)).copy()
+    weight_3d[:, 1, 2] *= 4.0  # a quieter pixel, same band shape
+
+    def weights(
+        lambda_sq: NDArray[np.float64], natural: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        if weight_type == "briggs":
+            return briggs_weight(lambda_sq, natural, 0.0, CELL_M2)
+        return uniform_lsq_weight(lambda_sq, natural, CELL_M2)
+
+    weight_1d = weights(LAMBDA_SQ, ONES)
+    weight_pixel = weights(LAMBDA_SQ[:, None, None], weight_3d)
+
+    assert weight_pixel.shape == weight_3d.shape
+    # Scaling one pixel's noise scales its weights and nothing else, and the
+    # normalised weighting (all that the FDF sees) is unchanged.
+    for pixel in ((0, 0), (1, 2)):
+        column = weight_pixel[(slice(None), *pixel)]
+        np.testing.assert_allclose(
+            column / column.sum(), weight_1d / weight_1d.sum(), rtol=1e-12
         )

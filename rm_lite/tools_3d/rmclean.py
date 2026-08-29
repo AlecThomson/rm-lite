@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal, NamedTuple
+from dataclasses import replace
+from typing import Any, Literal, NamedTuple
 
 import dask.array as da
 import numpy as np
@@ -49,6 +50,36 @@ class _RMCleanBlockResult(NamedTuple):
     iter_count: NDArray[np.int64]
 
 
+def _per_block_option(
+    value: NDArray[np.float64] | da.Array, fdf_dirty_cube: da.Array
+) -> NDArray[Any]:
+    """This CLEAN parameter sliced to the FDF's spatial blocks, as delayed objects.
+
+    Rechunked to the FDF's own spatial chunking so block N of the map is block N
+    of the cube. Kept lazy: a per-pixel noise map derived from a weight cube is
+    itself lazy, and forcing it here would read the whole cube up front.
+    """
+    array = value if isinstance(value, da.Array) else da.from_array(value)
+    if array.shape != fdf_dirty_cube.shape[1:]:
+        msg = (
+            "A per-pixel CLEAN mask/threshold/noise must match the FDF's spatial "
+            f"shape {fdf_dirty_cube.shape[1:]}, got {array.shape}."
+        )
+        raise ValueError(msg)
+    return array.rechunk(fdf_dirty_cube.chunks[1:]).to_delayed(optimize_graph=False)
+
+
+def _describe(value: float | NDArray[np.float64] | da.Array) -> str:
+    """One log-friendly string for a scalar or for a per-pixel map."""
+    if np.ndim(value) == 0:
+        return f"{float(value):0.3g}"
+    values = np.asarray(value)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return "all non-finite"
+    return f"{finite.min():0.3g} to {finite.max():0.3g} per pixel"
+
+
 def _clean_block(
     dirty_fdf_block: NDArray[np.complex128],
     rmsf_block: NDArray[np.complex128],
@@ -58,10 +89,14 @@ def _clean_block(
     clean_options: RMCleanOptions,
     log_level: int,
     multiscale_options: MultiscaleOptions | None = None,
+    option_blocks: dict[str, Any] | None = None,
 ) -> _RMCleanBlockResult:
     """CLEAN one spatial chunk. `rmsf_block` is either the block's own RMSF cube
     or the 1D RMSF every pixel shares, which is broadcast to the block here since
     `rmclean` wants the RMSF and FDF on the same axes."""
+    # This block's slice of any per-pixel mask/threshold/noise map.
+    if option_blocks:
+        clean_options = replace(clean_options, **option_blocks)
     if rmsf_block.ndim == 1:
         rmsf_block = np.broadcast_to(
             rmsf_block[:, np.newaxis, np.newaxis],
@@ -93,12 +128,12 @@ def run_rmclean(
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
-    mask: float,
-    threshold: float,
+    mask: float | NDArray[np.float64] | da.Array,
+    threshold: float | NDArray[np.float64] | da.Array,
     max_iter: int = 100_000,
     gain: float = 0.1,
-    moment_threshold: float | None = None,
-    fdf_noise: float | None = None,
+    moment_threshold: float | NDArray[np.float64] | da.Array | None = None,
+    fdf_noise: float | NDArray[np.float64] | da.Array | None = None,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
     multiscale_scales: NDArray[np.float64] | None = None,
@@ -215,6 +250,14 @@ def run_rmclean(
         else np.full(numblocks, delayed(rmsf, pure=True), dtype=object)
     )
 
+    # A per-pixel mask/threshold/noise is a map over the whole image, so each
+    # block gets its own slice of it, chunked to match. Scalars stay scalars.
+    option_blocks: dict[str, Any] = {
+        field: _per_block_option(value, fdf_dirty_cube)
+        for field in ("mask", "threshold", "fdf_noise")
+        if (value := getattr(clean_options, field)) is not None and np.ndim(value) != 0
+    }
+
     clean_blocks = np.empty(numblocks, dtype=object)
     model_blocks = np.empty(numblocks, dtype=object)
     resid_blocks = np.empty(numblocks, dtype=object)
@@ -234,6 +277,7 @@ def run_rmclean(
             clean_options,
             log_level,
             multiscale_options,
+            {field: blocks[iy, ix] for field, blocks in option_blocks.items()} or None,
         )
 
         clean_blocks[idx] = da.from_delayed(
@@ -321,8 +365,8 @@ def run_rmclean_from_synth(
     moment_threshold = moment_threshold_snr * fdf_error_noise
 
     logger.info(
-        f"Theoretical FDF noise: {fdf_error_noise:0.3g}. "
-        f"Auto mask: {mask:0.3g}, auto threshold: {threshold:0.3g}."
+        f"Theoretical FDF noise: {_describe(fdf_error_noise)}. "
+        f"Auto mask: {_describe(mask)}, auto threshold: {_describe(threshold)}."
     )
 
     return run_rmclean(
