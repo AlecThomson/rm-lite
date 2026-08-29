@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal, TypeAlias, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
-ComponentKind = Literal["delta", "gauss", "slab", "turbulent"]
+ComponentKind: TypeAlias = Literal["delta", "gauss", "slab", "turbulent"]
 
 
 def _burn_envelope(

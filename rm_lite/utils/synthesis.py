@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import warnings
 from dataclasses import dataclass
-from typing import Any, Literal, NamedTuple, TypeVar, cast, get_args
+from typing import Any, Literal, NamedTuple, TypeAlias, TypeVar, cast, get_args
 
 import dask.array as da
 import finufft
@@ -116,12 +116,14 @@ class TheoreticalNoise(NamedTuple):
     """Theoretical noise of the imaginary FDF"""
 
 
-LamSq0Mode = Literal["auto", "per_pixel"]
+LamSq0Mode: TypeAlias = Literal["auto", "per_pixel"]
 """ How to pick the reference lambda^2: one weighted mean for the whole dataset,
 or each pixel's own (B&dB 2005 eq. 32, whose criterion is per pixel whenever the
 weights are). """
 
-WeightType = Literal["variance", "natural", "uniform", "uniform_lsq", "briggs"]
+WeightType: TypeAlias = Literal[
+    "variance", "natural", "uniform", "uniform_lsq", "briggs"
+]
 """ RM-synthesis weighting: `variance`/`natural` (1/sigma^2, equivalent),
 `uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
 narrows the RMSF), `briggs` (robust interpolation between natural and
