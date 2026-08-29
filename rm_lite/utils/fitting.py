@@ -4,7 +4,7 @@ import logging
 import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Literal, NamedTuple, Protocol
+from typing import Any, Literal, NamedTuple, Protocol, cast
 
 import dask.array as da
 import numpy as np
@@ -592,7 +592,7 @@ def fit_stokes_cube(
     stokes_i: da.Array,
     stokes_i_error: NDArray[np.float64] | da.Array | None,
     freq_arr_hz: NDArray[np.float64],
-    ref_freq_hz: float,
+    ref_freq_hz: RefFreqHz | da.Array,
     fit_options: StokesIFitOptions,
     log_level: int,
 ) -> StokesIFitCubes:
@@ -612,9 +612,17 @@ def fit_stokes_cube(
     planes = _block_planes(
         n_freq, abs(fit_options.fit_order) + 1, fit_options.compute_model_error
     )
+    # A per-pixel reference frequency has to be sliced to each block's own
+    # pixels, so it travels as a positional array argument rather than a kwarg.
+    # `_fit_stokes_i_block` takes it as the last of `arrays`.
+    ref_blocks: tuple[da.Array, ...] = ()
+    if np.ndim(ref_freq_hz) != 0:
+        ref_blocks = (cast("da.Array", ref_freq_hz).rechunk(stokes_i.chunks[1:]),)
+
     stacked = da.map_blocks(
         _fit_stokes_i_block,
         *((stokes_i,) if err_cube is None else (stokes_i, err_cube)),
+        *ref_blocks,
         dtype=np.float64,
         chunks=((planes.n_out,), stokes_i.chunks[1], stokes_i.chunks[2]),
         freq_arr_hz=freq_arr_hz,
@@ -622,6 +630,7 @@ def fit_stokes_cube(
         err_1d=err_1d,
         fit_options=fit_options,
         log_level=log_level,
+        has_ref_block=bool(ref_blocks),
     )
     return StokesIFitCubes(
         model_cube=stacked[planes.model],
@@ -691,7 +700,7 @@ def _iter_pixel_fits(
     err_block: NDArray[np.float64] | None,
     err_1d: NDArray[np.float64] | None,
     freq_arr_hz: NDArray[np.float64],
-    ref_freq_hz: float,
+    ref_freq_hz: RefFreqHz,
     fit_options: StokesIFitOptions,
 ) -> Iterator[PixelFit]:
     """Yield a `PixelFit` for every pixel in a chunk.
@@ -709,7 +718,7 @@ def _iter_pixel_fits(
             good = np.isfinite(i_spec) & np.isfinite(e_spec)
             fit = fit_stokes_i_model(
                 freq_arr_hz=freq_arr_hz,
-                ref_freq_hz=ref_freq_hz,
+                ref_freq_hz=ref_freq_at(ref_freq_hz, y, x),
                 stokes_i_arr=i_spec,
                 stokes_i_error_arr=e_spec,
                 options=fit_options,
@@ -814,13 +823,29 @@ def _write_flat_model(
     out[planes.model, y, x] = mean_flux
 
 
+RefFreqHz = float | NDArray[np.float64]
+"""A reference frequency in Hz: one for the whole image, or one per pixel."""
+
+
+def ref_freq_at(ref_freq_hz: RefFreqHz, y: int, x: int) -> float:
+    """This pixel's reference frequency, whether it is shared or its own.
+
+    Resolved once per pixel so everything below stays scalar: the fit, the model
+    evaluation and the alpha derivative all work one spectrum at a time anyway.
+    """
+    if np.ndim(ref_freq_hz) == 0:
+        return float(cast("float", ref_freq_hz))
+    return float(cast("NDArray[np.float64]", ref_freq_hz)[y, x])
+
+
 def _fit_stokes_i_block(
     *arrays: NDArray[np.float64],
     freq_arr_hz: NDArray[np.float64],
-    ref_freq_hz: float,
+    ref_freq_hz: RefFreqHz,
     err_1d: NDArray[np.float64] | None,
     fit_options: StokesIFitOptions,
     log_level: int,
+    has_ref_block: bool = False,
 ) -> NDArray[np.float64]:
     """Fit a Stokes I model per pixel over one spatial chunk, in a single pass.
 
@@ -831,7 +856,8 @@ def _fit_stokes_i_block(
     model error and an alpha error follow, both from one Monte-Carlo over the same
     per-pixel fit covariance, so they cost no extra fit.
 
-    `arrays` is `(i_block,)` or `(i_block, err_block)`; the error cube is
+    `arrays` is `(i_block,)` or `(i_block, err_block)`, optionally followed by a
+    per-pixel `ref_freq_hz` block when `has_ref_block`; the error cube is
     optional (see `_pixel_stokes_i_error`). A pixel that was not fitted (too few
     finite channels or SNR below `fit_options.snr_cut`) or whose model is
     unusable (see `rm_lite.utils.fitting.model_is_usable`) falls back to a flat
@@ -839,7 +865,13 @@ def _fit_stokes_i_block(
     order, terms and errors stay NaN. A pixel with no finite channels stays NaN.
     """
     i_block = arrays[0]
-    err_block = arrays[1] if len(arrays) > 1 else None
+    # A per-pixel reference frequency arrives as a (cy, cx) block of its own,
+    # after the data; `has_ref_block` says whether it is there, so a two-array
+    # call is not ambiguous between (data, error) and (data, reference).
+    if has_ref_block:
+        ref_freq_hz = arrays[-1]
+    n_data = len(arrays) - (1 if has_ref_block else 0)
+    err_block = arrays[1] if n_data > 1 else None
     n_freq, cy, cx = i_block.shape
     planes = _block_planes(
         n_freq, abs(fit_options.fit_order) + 1, fit_options.compute_model_error
@@ -858,14 +890,17 @@ def _fit_stokes_i_block(
             if fit is None:
                 _write_flat_model(out, y, x, planes, mean_flux)
                 continue
+            pixel_ref_hz = ref_freq_at(ref_freq_hz, y, x)
             model = fit.stokes_i_model_func(
-                freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt)
+                freq_arr_hz / pixel_ref_hz, *np.asarray(fit.popt)
             )
             if not model_is_usable(model[good]):
                 n_rejected += 1
                 _write_flat_model(out, y, x, planes, mean_flux)
                 continue
-            _write_model_planes(out, y, x, planes, fit, model, freq_arr_hz, ref_freq_hz)
+            _write_model_planes(
+                out, y, x, planes, fit, model, freq_arr_hz, pixel_ref_hz
+            )
             if fit_options.compute_model_error:
                 _write_error_planes(
                     out,
@@ -874,7 +909,7 @@ def _fit_stokes_i_block(
                     planes,
                     fit,
                     freq_arr_hz,
-                    ref_freq_hz,
+                    pixel_ref_hz,
                     fit_options.n_error_samples,
                 )
     if n_rejected:
@@ -890,7 +925,7 @@ def _fit_stokes_i_block(
 def ref_flux_from_block(
     model_block: NDArray[np.float64],
     freq_arr_hz: NDArray[np.float64],
-    ref_freq_hz: float,
+    ref_freq_hz: RefFreqHz,
 ) -> NDArray[np.float64]:
     """Interpolate a Stokes I model cube block at the reference frequency ->
     (cy, cx) reference-flux map block."""
@@ -904,14 +939,16 @@ def ref_flux_from_block(
         for x in range(cx):
             spec = model_block[:, y, x]
             if np.isfinite(spec).all():
-                ref_flux[y, x] = np.interp(ref_freq_hz, freq_sorted, spec[order])
+                ref_flux[y, x] = np.interp(
+                    ref_freq_at(ref_freq_hz, y, x), freq_sorted, spec[order]
+                )
     return ref_flux
 
 
 def alpha_from_model_block(
     model_block: NDArray[np.float64],
     freq_arr_hz: NDArray[np.float64],
-    ref_freq_hz: float,
+    ref_freq_hz: RefFreqHz,
 ) -> NDArray[np.float64]:
     """Spectral index alpha at the reference frequency from a supplied model cube.
 
@@ -926,7 +963,7 @@ def alpha_from_model_block(
             spec = model_block[:, y, x]
             if not np.isfinite(spec).all():
                 continue
-            value = _alpha_at_ref(spec, freq_arr_hz, ref_freq_hz)
+            value = _alpha_at_ref(spec, freq_arr_hz, ref_freq_at(ref_freq_hz, y, x))
             alpha[y, x] = value if np.isfinite(value) else 0.0
     return alpha
 

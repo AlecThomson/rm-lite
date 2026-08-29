@@ -31,14 +31,17 @@ from rm_lite.utils.fitting import (
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import (
     FDFOptions,
+    LamSq0Mode,
     RMSynthParams,
     TheoreticalNoise,
     WeightType,
     apply_weight_type,
     compute_rmsynth_params,
     compute_theoretical_noise,
+    derotate_to,
     get_fwhm_rmsf,
     get_rmsf_nufft,
+    lam_sq_0_per_pixel,
     lambda2_to_freq,
     make_double_phi_arr,
     rmsynth_nufft,
@@ -63,7 +66,15 @@ class RMSynth3DResults(NamedTuple):
     fwhm_rmsf_radm2: float
     """Analytic RMSF FWHM (per-pixel fitting is not performed in 3D)."""
     lam_sq_0_m2: float
-    """Reference wavelength^2 value in m^2."""
+    """Reference wavelength^2 in m^2 the FDF is derotated to. With
+    `lam_sq_0_m2="per_pixel"` this is the cube-wide value, a common reference to
+    move to via `lam_sq_0_map`; the per-pixel references actually used are in
+    that map."""
+    lam_sq_0_map: da.Array
+    """Per-pixel reference wavelength^2, shape (ny, nx), lazy. Constant at
+    `lam_sq_0_m2` unless `lam_sq_0_m2="per_pixel"`. Returned in every mode: it is
+    what lets an FDF be moved between references afterwards
+    (`rm_lite.utils.synthesis.derotate_to`, Brentjens & de Bruyn 2005 eq. 33)."""
     theoretical_noise: TheoreticalNoise
     """Theoretical FDF-domain noise from the per-channel weight array. This is a
     per-channel, not per-pixel, estimate, so it is uniform across the cube. When
@@ -116,9 +127,12 @@ class RMSynth3DResults(NamedTuple):
     """Name of each plane of `stokes_i_coeff_cube`: ("flux", "alpha", "beta", ...)
     for `fit_function="log"`, ("c0", "c1", ...) for "linear". None on the same
     terms as `stokes_i_coeff_cube`."""
-    stokes_i_ref_freq_hz: float | None = None
-    """Frequency the Stokes I model terms are defined at, in Hz (the FDF's own
-    reference frequency, `lambda2_to_freq(lam_sq_0_m2)`). With `fit_function="log"`
+    stokes_i_ref_freq_hz: float | da.Array | None = None
+    """Frequency the Stokes I model terms are defined at, in Hz: the FDF's own
+    reference frequency, `lambda2_to_freq` of the reference lambda^2, so the flux
+    and phase references are the same by construction. A per-pixel map when
+    `lam_sq_0_m2="per_pixel"`, and then the terms are each pixel's own -- compare
+    alpha across the image by re-evaluating to a common frequency first. With `fit_function="log"`
     the model is `flux * 10**(alpha*log10(nu/nu_ref) + beta*log10(nu/nu_ref)**2
     + ...)`; with "linear" it is `sum(c_i * (nu/nu_ref)**i)`. None unless a Stokes
     I cube or model was supplied."""
@@ -350,6 +364,68 @@ def _block_weight_arr(
     )
 
 
+def _lam_sq_0_block(
+    block: NDArray[np.complex128],
+    weight_block: NDArray[np.float64] | None = None,
+    *,
+    rmsynth_params: RMSynthParams,
+    fdf_options: FDFOptions,
+) -> NDArray[np.float64]:
+    """This chunk's per-pixel reference lambda^2, from its own weights."""
+    weight_arr = _block_weight_arr(block, weight_block, rmsynth_params, fdf_options)
+    if np.ndim(weight_arr) == 1:
+        weight_arr = np.broadcast_to(weight_arr[:, np.newaxis, np.newaxis], block.shape)
+    # A pixel's own flagging counts: a channel it does not have cannot pull its
+    # reference. `rmsynth_nufft` zeroes those weights too, so the reference here
+    # is the one the pixel's own RMSF is built from.
+    weight_arr = np.where(np.isfinite(block), weight_arr, 0.0)
+    return lam_sq_0_per_pixel(weight_arr, rmsynth_params.lambda_sq_arr_m2)
+
+
+def _lam_sq_0_map(
+    weight_arr: NDArray[np.float64] | da.Array,
+    pol_cube: da.Array,
+    rmsynth_params: RMSynthParams,
+    fdf_options: FDFOptions,
+) -> da.Array:
+    """The reference lambda^2 each pixel is derotated to, as a lazy (ny, nx) map.
+
+    Returned whatever the mode: with a shared reference every pixel holds the
+    same number, and the map is what lets anyone move an FDF between references
+    later (B&dB eq. 33, or `rm_lite.utils.synthesis.derotate_to`).
+    """
+    if fdf_options.lam_sq_0_m2 != "per_pixel":
+        return da.full(
+            pol_cube.shape[1:],
+            rmsynth_params.lam_sq_0_m2,
+            chunks=pol_cube.chunks[1:],
+            dtype=np.float64,
+        )
+    return da.map_blocks(
+        _lam_sq_0_block,
+        pol_cube,
+        *_weight_arr_map_blocks_args(weight_arr, pol_cube),
+        drop_axis=0,
+        dtype=np.float64,
+        rmsynth_params=rmsynth_params,
+        fdf_options=fdf_options,
+    )
+
+
+def _ref_freq_from_lam_sq_0(
+    lam_sq_0_map: da.Array, lam_sq_0_m2: float, per_pixel: bool
+) -> float | da.Array:
+    """The Stokes I reference frequency implied by the reference lambda^2.
+
+    A scalar when every pixel shares a reference, a map when they do not. Derived
+    here and nowhere else, so the flux reference is the phase reference by
+    construction rather than by two call sites agreeing.
+    """
+    if not per_pixel:
+        return float(lambda2_to_freq(lam_sq_0_m2))
+    return cast("da.Array", lambda2_to_freq(lam_sq_0_map))
+
+
 def _rmsynth_on_block(
     block: NDArray[np.complex128],
     weight_block: NDArray[np.float64] | None = None,
@@ -431,6 +507,7 @@ def rmsynth_3d(
     stokes_u: da.Array,
     freq_arr_hz: NDArray[np.float64],
     weight_arr: NDArray[np.float64] | da.Array | None = None,
+    lam_sq_0_m2: float | LamSq0Mode = "auto",
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
@@ -534,6 +611,7 @@ def rmsynth_3d(
         n_samples=n_samples,
         weight_type=weight_type,
         robust=robust,
+        lam_sq_0_m2=lam_sq_0_m2,
     )
     fit_options = StokesIFitOptions(
         fit_order=fit_order,
@@ -546,6 +624,13 @@ def rmsynth_3d(
     if weight_arr is None:
         weight_arr = np.ones_like(freq_arr_hz)
     weight_summary = _summarise_weight(weight_arr)
+    if fdf_options.lam_sq_0_m2 == "per_pixel" and not per_pixel_rmsf:
+        logger.info(
+            "lam_sq_0_m2='per_pixel' derotates each pixel to its own reference, "
+            "so the RMSF differs pixel to pixel too; computing the per-pixel "
+            "RMSF cube, which RM-CLEAN needs to match the FDF it is cleaning."
+        )
+        per_pixel_rmsf = True
     if not weight_summary.pixels_proportional and not per_pixel_rmsf:
         logger.info(
             "Pixels weight the channels differently, so they do not share one "
@@ -574,7 +659,20 @@ def rmsynth_3d(
     # model cube is supplied directly, or one is fitted per pixel; Q/U are then
     # divided by it and the FDF is rescaled to absolute flux by the per-pixel
     # reference-frequency Stokes I flux (see module docstring).
-    ref_freq_hz = float(lambda2_to_freq(rmsynth_params.lam_sq_0_m2))
+    # One reference, resolved once. Everything below derives from it -- the FDF's
+    # phase reference and the Stokes I model's frequency are the same quantity in
+    # different units, so nothing takes a reference frequency independently and
+    # the two cannot drift apart.
+    lam_sq_0_map = _lam_sq_0_map(
+        weight_arr=weight_arr,
+        pol_cube=pol_cube,
+        rmsynth_params=rmsynth_params,
+        fdf_options=fdf_options,
+    )
+    per_pixel_ref = fdf_options.lam_sq_0_m2 == "per_pixel"
+    ref_freq_hz = _ref_freq_from_lam_sq_0(
+        lam_sq_0_map, rmsynth_params.lam_sq_0_m2, per_pixel_ref
+    )
     stokes_i_model_cube: da.Array | None = None
     stokes_i_model_error_cube: da.Array | None = None
     ref_flux_map: da.Array | None = None
@@ -650,6 +748,17 @@ def rmsynth_3d(
         # Rescale fractional FDF to absolute polarised flux per pixel.
         fdf_dirty_cube = fdf_dirty_cube * ref_flux_map[np.newaxis, :, :]
 
+    if per_pixel_ref:
+        # Synthesised at the cube's reference, then moved to each pixel's own.
+        # B&dB eq. 25 is a shift theorem, so this is exact and costs a phase
+        # ramp rather than a transform per pixel.
+        fdf_dirty_cube = derotate_to(
+            fdf_dirty_cube,
+            rmsynth_params.phi_arr_radm2,
+            rmsynth_params.lam_sq_0_m2,
+            lam_sq_0_map,
+        )
+
     rmsf_cube: da.Array | None = None
     if per_pixel_rmsf:
         rmsf_cube = da.map_blocks(
@@ -664,6 +773,16 @@ def rmsynth_3d(
             log_level=log_level,
             nufft_nthreads=nufft_nthreads,
         )
+        if per_pixel_ref:
+            # The RMSF has to sit at the same reference as the FDF, or CLEAN
+            # subtracts a response rotated away from the components it is
+            # fitting.
+            rmsf_cube = derotate_to(
+                rmsf_cube,
+                phi_double_arr_radm2,
+                rmsynth_params.lam_sq_0_m2,
+                lam_sq_0_map,
+            )
 
     return RMSynth3DResults(
         fdf_dirty_cube=fdf_dirty_cube,
@@ -672,6 +791,7 @@ def rmsynth_3d(
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
+        lam_sq_0_map=lam_sq_0_map,
         theoretical_noise=theoretical_noise,
         stokes_i_model_cube=stokes_i_model_cube,
         stokes_i_model_error_cube=stokes_i_model_error_cube,
@@ -777,6 +897,7 @@ def rmsynth_3d_from_fits(
     stokes_u_error_file: str | Path | None = None,
     noise_files_are_weight: bool = False,
     weight_arr: NDArray[np.float64] | da.Array | None = None,
+    lam_sq_0_m2: float | LamSq0Mode = "auto",
     phi_max_radm2: float | None = None,
     d_phi_radm2: float | None = None,
     n_samples: float | None = 10.0,
@@ -900,6 +1021,7 @@ def rmsynth_3d_from_fits(
         stokes_u=stokes_u,
         freq_arr_hz=freq_arr_hz,
         weight_arr=weight_arr,
+        lam_sq_0_m2=lam_sq_0_m2,
         phi_max_radm2=phi_max_radm2,
         d_phi_radm2=d_phi_radm2,
         n_samples=n_samples,

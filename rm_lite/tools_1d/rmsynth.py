@@ -19,6 +19,7 @@ from rm_lite.utils.fitting import (
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FDFOptions,
+    LamSq0Mode,
     StokesData,
     WeightType,
     compute_rmsynth_params,
@@ -127,6 +128,7 @@ def run_rmsynth(
     n_samples: float | None = 10.0,
     weight_type: WeightType = "variance",
     robust: float | None = None,
+    lam_sq_0_m2: float | LamSq0Mode = "auto",
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real: bool = False,
     fit_function: Literal["log", "linear"] = "log",
@@ -148,6 +150,13 @@ def run_rmsynth(
         d_phi_radm2 (float | None, optional): Spacing in Faraday depth. Defaults to None.
         n_samples (float | None, optional): Number of samples across the RMSF. Defaults to 10.0.
         weight_type (WeightType, optional): Weighting: 'variance' (1/sigma^2), 'uniform' (equal per channel), 'uniform_lsq' (equal per lambda^2 interval, narrows the RMSF), 'briggs' (robust). Defaults to "variance".
+        lam_sq_0_m2 (float | LamSq0Mode, optional): Reference lambda^2 in m^2 the
+            FDF is derotated to, or how to pick one: "auto" for the weighted mean
+            of the observed lambda^2 (Brentjens & de Bruyn 2005, eq. 32), or a
+            fixed value to share a reference with another spectrum or cube. There
+            is one spectrum here, so "per_pixel" is the same as "auto". The Stokes
+            I model's reference frequency is derived from it, so the flux and
+            phase references match by construction. Defaults to "auto".
         robust (float | None, optional): Briggs robust parameter, required for weight_type='briggs'. Defaults to None.
         do_fit_rmsf (bool, optional): Fit the RMSF main lobe. Defaults to False.
         do_fit_rmsf_real (bool, optional): Fit only the real part of the RMSF. Defaults to False.
@@ -180,6 +189,7 @@ def run_rmsynth(
         n_samples=n_samples,
         weight_type=weight_type,
         robust=robust,
+        lam_sq_0_m2=lam_sq_0_m2,
         do_fit_rmsf=do_fit_rmsf,
         do_fit_rmsf_real=do_fit_rmsf_real,
     )

@@ -115,6 +115,14 @@ class TheoreticalNoise(NamedTuple):
     """Theoretical noise of the imaginary FDF"""
 
 
+LamSq0Mode = Literal["auto", "per_pixel"]
+""" How the reference lambda^2 is chosen when a value is not given outright.
+`auto` derotates everything to one weighted mean of lambda^2; `per_pixel` gives
+each pixel its own. Brentjens & de Bruyn (2005) eq. 32 derives that mean by
+nulling the RMSF's orthogonal response, a criterion that is per pixel whenever
+the weights or the flagging are. """
+LAM_SQ_0_MODES: tuple[str, ...] = ("auto", "per_pixel")
+
 WeightType = Literal["variance", "natural", "uniform", "uniform_lsq", "briggs"]
 """ RM-synthesis weighting: `variance`/`natural` (1/sigma^2, equivalent),
 `uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
@@ -147,8 +155,23 @@ class FDFOptions:
     """ Fit RMSF """
     do_fit_rmsf_real: bool = False
     """ Fit real part of the RMSF """
+    lam_sq_0_m2: float | LamSq0Mode = "auto"
+    """ Reference lambda^2 in m^2, or how to choose one: "auto" for the weighted
+    mean over the whole dataset, "per_pixel" for each pixel's own. The FDF is
+    derotated to it, and the Stokes I model's reference frequency is derived
+    from it, so the two references are the same by construction. """
 
     def __post_init__(self) -> None:
+        if isinstance(self.lam_sq_0_m2, str):
+            if self.lam_sq_0_m2 not in LAM_SQ_0_MODES:
+                msg = (
+                    "lam_sq_0_m2 must be a value in m^2 or one of "
+                    f"{LAM_SQ_0_MODES}, got {self.lam_sq_0_m2!r}."
+                )
+                raise ValueError(msg)
+        elif not np.isfinite(self.lam_sq_0_m2) or self.lam_sq_0_m2 <= 0:
+            msg = f"A given lam_sq_0_m2 must be finite and > 0, got {self.lam_sq_0_m2}."
+            raise ValueError(msg)
         if self.weight_type not in WEIGHT_TYPES:
             msg = (
                 f"weight_type must be one of {WEIGHT_TYPES}, got {self.weight_type!r}."
@@ -1033,6 +1056,58 @@ def apply_weight_type(
     return np.where(_match_channel_mask(channel_mask, weight_arr), 0.0, weight_arr)
 
 
+def weighted_lam_sq_0(
+    weight_arr: NDArray[np.float64], lambda_sq_arr_m2: NDArray[np.float64]
+) -> float:
+    """One reference lambda^2 for the whole dataset, B&dB 2005 eq. 32.
+
+    Derotating to the weighted mean of lambda^2 nulls the derivative of the
+    RMSF's orthogonal (imaginary) response at phi = 0, so the response across
+    the main lobe stays parallel to the polarisation vector at the reference.
+    Reduced over every axis it is given.
+    """
+    # Scale factor first, matching the order this was computed in before it was
+    # given a name, so the default path stays bit-for-bit what it was.
+    scale_factor = 1.0 / np.nansum(weight_arr)
+    return float(scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2))
+
+
+def lam_sq_0_per_pixel(
+    weight_arr: NDArray[np.float64], lambda_sq_arr_m2: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """B&dB eq. 32 per pixel, reducing over channels only.
+
+    The criterion behind eq. 32 is a property of a pixel's own weight function,
+    so pixels that weight or flag the channels differently -- a mosaic whose
+    primary beam shrinks with frequency, say -- each have their own.
+    """
+    lambda_sq_b = broadcast_over_channels(lambda_sq_arr_m2, weight_arr)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return cast(
+            "NDArray[np.float64]",
+            np.nansum(weight_arr * lambda_sq_b, axis=0) / np.nansum(weight_arr, axis=0),
+        )
+
+
+def derotate_to(
+    fdf: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    from_lam_sq_0_m2: float | NDArray[np.float64],
+    to_lam_sq_0_m2: float | NDArray[np.float64],
+) -> NDArray[np.complex128]:
+    """Move an FDF (or an RMSF) from one reference lambda^2 to another.
+
+    B&dB eq. 25 is a shift theorem, so this is an exact phase ramp rather than a
+    re-transform: amplitudes are untouched and the operation inverts itself.
+    Either reference may be a per-pixel map broadcasting against `fdf`'s spatial
+    axes. Note this is not the same as derotating a *restored* CLEAN cube, whose
+    real restoring beam does not commute with the ramp.
+    """
+    shift = np.asarray(to_lam_sq_0_m2) - np.asarray(from_lam_sq_0_m2)
+    phi_b = broadcast_over_channels(phi_arr_radm2, fdf)
+    return cast("NDArray[np.complex128]", fdf * np.exp(2j * phi_b * shift))
+
+
 def compute_rmsynth_params(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complex128],
@@ -1100,10 +1175,13 @@ def compute_rmsynth_params(
     # lam_sq_0_m2 is the weighted mean of lambda^2 distribution (B&dB Eqn. 32)
     # Calculate a single global lam_sq_0_m2 value (summing over all axes when
     # weight_arr is 3D), ignoring isolated flagged voxels.
-    scale_factor = 1.0 / np.nansum(weight_arr)
-    lam_sq_0_m2 = float(scale_factor * np.nansum(weight_arr * lambda_sq_arr_m2_b))
-    if not np.isfinite(lam_sq_0_m2):
-        lam_sq_0_m2 = float(np.nanmean(lambda_sq_arr_m2))
+    if not isinstance(fdf_options.lam_sq_0_m2, str):
+        # Pinned by the caller, e.g. to share a reference with another cube.
+        lam_sq_0_m2 = float(fdf_options.lam_sq_0_m2)
+    else:
+        lam_sq_0_m2 = weighted_lam_sq_0(weight_arr, lambda_sq_arr_m2_b)
+        if not np.isfinite(lam_sq_0_m2):
+            lam_sq_0_m2 = float(np.nanmean(lambda_sq_arr_m2))
 
     logger.debug(f"lam_sq_0_m2 = {lam_sq_0_m2:0.2f} m^2")
 

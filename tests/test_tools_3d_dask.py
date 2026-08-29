@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import dask.array as da
 import numpy as np
@@ -39,10 +39,13 @@ from rm_lite.utils.dask_io import (
     write_zarr_group,
 )
 from rm_lite.utils.synthesis import (
+    FDFOptions,
     WeightType,
     calc_faraday_moments,
     compute_theoretical_noise,
+    derotate_to,
     freq_to_lambda2,
+    lambda2_to_freq,
 )
 
 RNG = np.random.default_rng(2025)
@@ -872,6 +875,115 @@ def test_mosaic_edge_channels_are_handled():
         np.sqrt(n_chan.ravel()[quiet] / n_chan.ravel()[loud]),
         rtol=1e-10,
     )
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+@pytest.mark.parametrize("mode", ["auto", "per_pixel", 0.1])
+def test_lam_sq_0_modes_keep_one_reference(mode):
+    """Whatever picks the reference, the phase and flux references are the same.
+
+    `stokes_i_ref_freq_hz` is derived from the reference lambda^2 in one place,
+    so a caller cannot end up with an FDF derotated to one frequency and Stokes
+    I terms defined at another.
+    """
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = _mosaic_cube(ny=4, nx=4)
+    ref = float(np.median(freq_arr_hz))
+    stokes_i = np.where(
+        np.isfinite(stokes_q),
+        (freq_arr_hz / ref)[:, None, None] ** -0.8,
+        np.nan,
+    )
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        freq_arr_hz,
+        weight_arr=weight_arr,
+        lam_sq_0_m2=mode,
+        stokes_i=_chunked(stokes_i, 2, 2),
+        stokes_i_error=np.full(freq_arr_hz.size, 1e-3),
+        phi_max_radm2=200.0,
+        d_phi_radm2=2.0,
+    )
+
+    lam_sq_0_map = synth.lam_sq_0_map.compute()
+    assert lam_sq_0_map.shape == stokes_q.shape[1:]
+    ref_freq = synth.stokes_i_ref_freq_hz
+    ref_freq_arr = np.asarray(
+        ref_freq.compute() if isinstance(ref_freq, da.Array) else ref_freq
+    )
+    # The one invariant: the flux reference is the phase reference, in Hz.
+    np.testing.assert_allclose(
+        np.broadcast_to(ref_freq_arr, lam_sq_0_map.shape),
+        lambda2_to_freq(lam_sq_0_map),
+        rtol=1e-12,
+    )
+
+    if mode == "per_pixel":
+        # Edge pixels lost the top of the band, so their reference moved.
+        assert lam_sq_0_map.max() > lam_sq_0_map.min()
+        assert isinstance(ref_freq, da.Array)
+        # A per-pixel reference means a per-pixel RMSF, whether or not it was
+        # asked for: CLEAN needs the RMSF at the FDF's own reference.
+        assert synth.rmsf_cube is not None
+    else:
+        expected = synth.lam_sq_0_m2
+        np.testing.assert_allclose(lam_sq_0_map, expected, rtol=1e-12)
+        assert not isinstance(ref_freq, da.Array)
+        if not isinstance(mode, str):
+            assert synth.lam_sq_0_m2 == pytest.approx(mode)
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_per_pixel_reference_is_an_exact_derotation():
+    """Choosing a reference only ever moves phase, never amplitude.
+
+    B&dB eq. 25 is a shift theorem, so the per-pixel FDF is the shared-reference
+    FDF moved to the map, exactly. Checked without a Stokes I model, since a
+    per-pixel reference frequency also moves the flux the FDF is scaled by.
+    """
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = _mosaic_cube(ny=4, nx=4)
+    common: dict[str, Any] = {
+        "freq_arr_hz": freq_arr_hz,
+        "weight_arr": weight_arr,
+        "phi_max_radm2": 200.0,
+        "d_phi_radm2": 2.0,
+    }
+    shared = rmsynth_3d(
+        _chunked(stokes_q, 2, 2), _chunked(stokes_u, 2, 2), lam_sq_0_m2="auto", **common
+    )
+    per_pixel = rmsynth_3d(
+        _chunked(stokes_q, 2, 2),
+        _chunked(stokes_u, 2, 2),
+        lam_sq_0_m2="per_pixel",
+        **common,
+    )
+
+    shared_fdf, pixel_fdf, lam_sq_0_map = compute(
+        shared.fdf_dirty_cube, per_pixel.fdf_dirty_cube, per_pixel.lam_sq_0_map
+    )
+    # Amplitudes are untouched bar the last bit of the phase multiply.
+    np.testing.assert_allclose(np.abs(shared_fdf), np.abs(pixel_fdf), rtol=1e-14)
+    np.testing.assert_allclose(
+        derotate_to(shared_fdf, shared.phi_arr_radm2, shared.lam_sq_0_m2, lam_sq_0_map),
+        pixel_fdf,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    # And it inverts: back to the shared reference is where it started.
+    np.testing.assert_allclose(
+        derotate_to(pixel_fdf, shared.phi_arr_radm2, lam_sq_0_map, shared.lam_sq_0_m2),
+        shared_fdf,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+
+def test_lam_sq_0_option_is_validated():
+    """A typo in the mode is caught when the options are built, not at compute."""
+    bad_values: list[Any] = ["nope", -1.0, 0.0, np.nan]
+    for bad in bad_values:
+        with pytest.raises(ValueError, match="lam_sq_0_m2"):
+            FDFOptions(lam_sq_0_m2=bad)
 
 
 def _write_cube(path, data: NDArray[np.float64]) -> None:

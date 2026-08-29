@@ -11,6 +11,7 @@ examples/rmsynth_1d.ipynb
 examples/rmclean_1d.ipynb
 examples/rmclean_multiscale_1d.ipynb
 examples/weighting_1d.ipynb
+examples/reference_lambda_sq.ipynb
 examples/rmsynth_2d.ipynb
 examples/rmsynth_3d.ipynb
 examples/rmsynth_3d_stokes_i.ipynb
