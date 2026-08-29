@@ -803,6 +803,77 @@ def test_per_pixel_rmsf_forced_when_spectra_differ(caplog):
     assert corner_to_corner > 0.1
 
 
+def _mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
+    """A linmos-like cube: the primary beam shrinks with frequency, so pixels
+    near the field edge lose the top of the band and the number of contributing
+    channels varies across the image."""
+    n_freq = 96
+    freq_arr_hz = np.linspace(744e6, 1032e6, n_freq)
+    lambda_sq = freq_to_lambda2(freq_arr_hz)
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    radius = np.sqrt((yy - (ny - 1) / 2) ** 2 + (xx - (nx - 1) / 2) ** 2)
+    radius = edge * radius / radius.max()
+    # Primary beam radius goes as 1/nu.
+    inside = radius[None] <= (freq_arr_hz[0] / freq_arr_hz)[:, None, None]
+    angle = 2 * (
+        RNG.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
+        + RNG.uniform(0, np.pi, (ny, nx))[None]
+    )
+    stokes_q = np.where(inside, 0.6 * np.cos(angle), np.nan)
+    stokes_u = np.where(inside, 0.6 * np.sin(angle), np.nan)
+    # linmos blanks the noise cube the same way it blanks the data.
+    weight_arr = np.where(inside, 1.0 / 1e-3**2, np.nan)
+    return freq_arr_hz, stokes_q, stokes_u, weight_arr, inside
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_mosaic_edge_channels_are_handled():
+    """A frequency-dependent primary beam blanks the band per pixel.
+
+    The blanks arrive as NaN in both the data and the mosaicked noise cube.
+    Summing those through made every partially blanked channel NaN, and a NaN
+    channel weight drops that channel from `lam_sq_0_m2` altogether -- silently
+    reweighting the cube onto whichever channels happen to be complete.
+    """
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, inside = _mosaic_cube()
+    n_freq = freq_arr_hz.size
+    n_chan = inside.sum(axis=0)
+    assert n_chan.min() < n_chan.max() == n_freq, "premise: the edge loses channels"
+
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 4, 4),
+        _chunked(stokes_u, 4, 4),
+        freq_arr_hz,
+        weight_arr=weight_arr,
+        phi_max_radm2=200.0,
+        d_phi_radm2=2.0,
+    )
+
+    # lam_sq_0_m2 must weight every channel by how many pixels actually kept it.
+    lambda_sq = freq_to_lambda2(freq_arr_hz)
+    channel_weight = inside.sum(axis=(1, 2))
+    expected = float(np.sum(channel_weight * lambda_sq) / np.sum(channel_weight))
+    np.testing.assert_allclose(synth.lam_sq_0_m2, expected, rtol=1e-12)
+
+    # Pixels no longer weight the channels alike, so they cannot share an RMSF:
+    # the per-pixel cube is switched on without being asked for.
+    cube = _require_cube(synth.rmsf_cube).compute()
+    ny, nx = n_chan.shape
+    centre = cube[:, ny // 2, nx // 2]
+    corner = cube[:, 0, 0]
+    assert np.max(np.abs(centre - corner)) / np.max(np.abs(centre)) > 0.1
+
+    # And an edge pixel's noise reflects the channels it actually has.
+    noise_map = np.asarray(synth.theoretical_noise.fdf_error_noise)
+    assert noise_map.shape == (ny, nx)
+    quiet, loud = np.argmax(n_chan), np.argmin(n_chan)
+    np.testing.assert_allclose(
+        noise_map.ravel()[loud] / noise_map.ravel()[quiet],
+        np.sqrt(n_chan.ravel()[quiet] / n_chan.ravel()[loud]),
+        rtol=1e-10,
+    )
+
+
 def _write_cube(path, data: NDArray[np.float64]) -> None:
     """Write a cube to FITS in FITS-native big-endian float32."""
     fits.PrimaryHDU(data.astype(">f4")).writeto(path, overwrite=True)

@@ -11,6 +11,7 @@ import numpy as np
 from dask.base import compute
 from numpy.typing import NDArray
 
+from rm_lite.utils.arrays import zero_nonfinite
 from rm_lite.utils.dask_io import (
     DEFAULT_TARGET_CHUNK_MB,
     complex_pol_dask,
@@ -172,12 +173,23 @@ def _compute_global_params(
 def _error_from_weight(
     weight_arr: NDArray[Any] | da.Array,
 ) -> NDArray[np.complex128] | da.Array:
-    """The complex Q/U error a weight array implies, `1/sqrt(weight)`."""
-    with np.errstate(divide="ignore"):
-        real_error = np.where(weight_arr > 0, 1.0 / np.sqrt(weight_arr), np.inf)
+    """The complex Q/U error a weight array implies, `1/sqrt(weight)`.
+
+    A zero or blank weight means no information, so its error is infinite; both
+    are read back as zero weight downstream.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        real_error = np.where(
+            np.isfinite(weight_arr) & (weight_arr > 0),
+            1.0 / np.sqrt(np.where(weight_arr > 0, weight_arr, 1.0)),
+            np.inf,
+        )
+    # `real_error * (1 + 1j)`, not `real_error + 1j * real_error`: the latter
+    # multiplies inf by a zero real part and turns a blanked channel's error
+    # into NaN.
     return cast(
         "NDArray[np.complex128] | da.Array",
-        (real_error + 1j * real_error).astype(np.complex128),
+        real_error.astype(np.complex128) * (1.0 + 1.0j),
     )
 
 
@@ -216,6 +228,13 @@ def _summarise_weight(
         # quietly shift every downstream number for the per-channel path.
         return WeightSummary(np.asarray(weight_arr), True)
 
+    # Blanks count as no weight, not as poison. A mosaicked cube carries NaN
+    # wherever a pixel falls outside the primary beam, and the beam shrinks with
+    # frequency, so the top of the band is blanked at the field edge. Summing
+    # those through would make every partially blanked channel NaN, and a NaN
+    # channel weight drops that channel from `lam_sq_0_m2` entirely -- quietly
+    # reweighting the whole cube to whichever channels happen to be complete.
+    weight_arr = zero_nonfinite(weight_arr)
     profile = np.sum(weight_arr, axis=(1, 2))
     pixel_totals = np.sum(weight_arr, axis=0)
     grand_total = np.sum(profile)
