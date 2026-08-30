@@ -843,12 +843,16 @@ def get_weight_arr_from_fits(
 def _divide_by_model_cube(pol_cube: da.Array, model_cube: da.Array) -> da.Array:
     """Divide Q+iU by the Stokes I model, quiet where the model is blank.
 
-    Every pixel the fit rejected -- outside a primary-beam cutoff, below the
-    SNR cut, or unusable per `model_is_usable` -- carries a NaN model, and a
-    complex array divided by NaN raises `invalid value encountered in divide`.
-    That is the intended answer (the pixel's FDF comes back NaN), but the
-    warning fires once per chunk, so a mosaic blanked over most of its field
-    buries the log in it.
+    A pixel with no finite channels keeps a NaN model, and a complex array
+    divided by NaN raises `invalid value encountered in divide`. That is the
+    intended answer (the pixel's FDF comes back NaN), but the warning fires once
+    per chunk, so a field blanked over most of its area buries the log in it.
+
+    In practice that is the same pixels `_error_from_weight_cube` blanks: a zero
+    weight gives an infinite error in every channel, and the fit's `good` mask
+    wants finite data *and* finite error. Pixels rejected for low SNR or an
+    unusable model are not this case -- they fall back to a flat mean model,
+    which divides without complaint.
 
     Only `invalid` is suppressed: an exactly-zero model would mean the fit
     guard let a bad model through, and that divide-by-zero is worth seeing.
