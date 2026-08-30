@@ -856,8 +856,8 @@ def _divide_by_model_cube(pol_cube: da.Array, model_cube: da.Array) -> da.Array:
 
     Only `invalid` is suppressed: an exactly-zero model would mean the fit
     guard let a bad model through, and that divide-by-zero is worth seeing.
-    Same reason as `_error_from_weight_cube` for doing this in the block --
-    an `errstate` around the lazy expression never reaches dask's workers.
+    In the block for the same reason as `_error_from_weight_cube`: the division
+    is lazy, so an `errstate` around it has exited before `compute()` runs it.
     """
 
     def _block(
@@ -882,8 +882,12 @@ def _error_from_weight_cube(weight_arr: da.Array) -> da.Array:
     infinite error drops the pixel from the Stokes I fit and its maps come back
     NaN -- but numpy warns about it once per chunk, which buries the log on a
     RACS-sized field. The suppression has to sit inside the block, where the
-    division actually runs: an `errstate` around the lazy expression never
-    reaches dask's workers.
+    division actually runs: `1 / da.sqrt(...)` only builds a graph node, so an
+    `errstate` wrapped around it has long since exited by the time `compute()`
+    evaluates the division. Wrapping the caller's `compute()` instead would work
+    under the threaded scheduler, which copies the calling context into its
+    workers, but not under `processes`, and it would put the burden on every
+    caller.
     """
 
     def _block(block: NDArray[np.floating]) -> NDArray[np.floating]:
