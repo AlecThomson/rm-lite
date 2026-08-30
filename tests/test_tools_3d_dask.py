@@ -1295,19 +1295,27 @@ def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
     )
     alpha_map = _require_cube(synth.stokes_i_alpha_map)
 
+    # Both blanked divisions are on this path: inverting the zero weight, and
+    # dividing Q+iU by the NaN model the fit leaves outside the cutoff.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         computed = alpha_map.compute()
-    divides = [
+        fdf_cube = synth.fdf_dirty_cube.compute()
+    blanked = [
         str(warning.message)
         for warning in caught
         if issubclass(warning.category, RuntimeWarning)
-        and "divide by zero" in str(warning.message)
+        and (
+            "divide by zero" in str(warning.message)
+            or "invalid value encountered in divide" in str(warning.message)
+        )
     ]
-    assert divides == []
+    assert blanked == []
 
     assert np.all(np.isnan(computed[~inside]))
     np.testing.assert_allclose(computed[inside], alpha, atol=1e-5)
+    assert np.all(np.isnan(fdf_cube[:, ~inside]))
+    assert np.all(np.isfinite(fdf_cube[:, inside]))
 
 
 def test_channel_noise_from_channel_chunks_matches_whole_cube(tmp_path):

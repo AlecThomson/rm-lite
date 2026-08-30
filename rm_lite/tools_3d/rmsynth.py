@@ -674,7 +674,7 @@ def rmsynth_3d(
         alpha_error_map = fit_cubes.alpha_error_map
 
     if stokes_i_model_cube is not None:
-        pol_cube = pol_cube / stokes_i_model_cube
+        pol_cube = _divide_by_model_cube(pol_cube, stokes_i_model_cube)
         ref_flux_map = da.map_blocks(
             ref_flux_from_block,
             stokes_i_model_cube,
@@ -838,6 +838,36 @@ def get_weight_arr_from_fits(
         noise_arr = get_noise_from_fits(stokes_q_file, stokes_u_file, target_chunk_mb)
 
     return 1.0 / noise_arr**2
+
+
+def _divide_by_model_cube(pol_cube: da.Array, model_cube: da.Array) -> da.Array:
+    """Divide Q+iU by the Stokes I model, quiet where the model is blank.
+
+    Every pixel the fit rejected -- outside a primary-beam cutoff, below the
+    SNR cut, or unusable per `model_is_usable` -- carries a NaN model, and a
+    complex array divided by NaN raises `invalid value encountered in divide`.
+    That is the intended answer (the pixel's FDF comes back NaN), but the
+    warning fires once per chunk, so a mosaic blanked over most of its field
+    buries the log in it.
+
+    Only `invalid` is suppressed: an exactly-zero model would mean the fit
+    guard let a bad model through, and that divide-by-zero is worth seeing.
+    Same reason as `_error_from_weight_cube` for doing this in the block --
+    an `errstate` around the lazy expression never reaches dask's workers.
+    """
+
+    def _block(
+        pol_block: NDArray[np.complexfloating], model_block: NDArray[np.floating]
+    ) -> NDArray[np.complexfloating]:
+        with np.errstate(invalid="ignore"):
+            return pol_block / model_block
+
+    return da.map_blocks(
+        _block,
+        pol_cube,
+        model_cube,
+        dtype=np.result_type(pol_cube.dtype, model_cube.dtype),
+    )
 
 
 def _error_from_weight_cube(weight_arr: da.Array) -> da.Array:
