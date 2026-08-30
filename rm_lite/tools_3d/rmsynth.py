@@ -654,6 +654,27 @@ def get_weight_arr_from_fits(
     return 1.0 / noise_arr**2
 
 
+def _error_from_weight_cube(weight_arr: da.Array) -> da.Array:
+    """Turn a weight cube into the error cube it implies, `error = 1/sqrt(weight)`.
+
+    A linmos weight is zero everywhere outside the primary-beam cutoff, so this
+    divides by zero over most of the field. That is the answer we want -- an
+    infinite error drops the pixel from the Stokes I fit and its maps come back
+    NaN -- but numpy warns about it once per chunk, which buries the log on a
+    RACS-sized field. The suppression has to sit inside the block, where the
+    division actually runs: an `errstate` around the lazy expression never
+    reaches dask's workers.
+    """
+
+    def _block(block: NDArray[np.floating]) -> NDArray[np.floating]:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return cast(NDArray[np.floating], 1.0 / np.sqrt(block))
+
+    return da.map_blocks(
+        _block, weight_arr, dtype=np.result_type(weight_arr.dtype, np.float32)
+    )
+
+
 def rmsynth_3d_from_fits(
     stokes_q_file: str | Path,
     stokes_u_file: str | Path,
@@ -771,7 +792,7 @@ def rmsynth_3d_from_fits(
                 logger.warning(
                     "Interpreting Stokes I error file as weight! Will sqrt & invert"
                 )
-                stokes_i_error = 1 / da.sqrt(stokes_i_error)
+                stokes_i_error = _error_from_weight_cube(stokes_i_error)
         elif estimate_stokes_i_noise:
             # Same reason as the Q/U noise above: a frequency-chunked read.
             i_planes, _ = read_fits_cube_channel_chunks(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import warnings
 from typing import NamedTuple
 
 import dask.array as da
@@ -831,6 +832,78 @@ def test_rmsynth_3d_from_fits_on_a_dummy_stokes_axis(
     np.testing.assert_allclose(
         peak_rm, synthetic_cube.rm_map, atol=2 * synth.fwhm_rmsf_radm2
     )
+
+
+def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
+    """A zeroed linmos weight must blank pixels silently, not warn per chunk.
+
+    `noise_files_are_weight` inverts the weight cube, and a primary-beam weight
+    is 0 over most of the field. Infinite error there is intended -- the pixel
+    drops out of the Stokes I fit and its maps come back NaN -- so the only
+    thing to check is that numpy stays quiet about the division while the
+    pixels inside the cutoff still recover their spectral index.
+    """
+    freq_arr_hz = (np.arange(744, 1032, 6) * 1e6).astype(np.float64)
+    ny = nx = 12
+    alpha = -0.9
+    cutoff = 3.0
+    ref_freq_hz = float(np.median(freq_arr_hz))
+
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    radius = np.hypot(yy - (ny - 1) / 2, xx - (nx - 1) / 2)
+    inside = radius <= cutoff
+    taper = np.where(inside, np.exp(-(radius**2) / (2 * cutoff**2)), 0.0)
+    weight = np.repeat(taper[np.newaxis], freq_arr_hz.size, axis=0)
+
+    spectrum = (freq_arr_hz / ref_freq_hz)[:, np.newaxis, np.newaxis] ** alpha
+    stokes_i = np.broadcast_to(2.0 * spectrum, weight.shape).copy()
+    rm_map = RNG.uniform(-100, 100, (ny, nx))
+    angle = 2 * rm_map[np.newaxis] * freq_to_lambda2(freq_arr_hz)[:, None, None]
+    stokes_q = 0.5 * np.cos(angle) * stokes_i
+    stokes_u = 0.5 * np.sin(angle) * stokes_i
+
+    header = Header()
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = freq_arr_hz[0]
+    header["CDELT3"] = freq_arr_hz[1] - freq_arr_hz[0]
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+    for name, data in (
+        ("q", stokes_q),
+        ("u", stokes_u),
+        ("i", stokes_i),
+        ("weight", weight),
+    ):
+        fits.PrimaryHDU(data.astype(">f4"), header=header).writeto(
+            tmp_path / f"{name}.fits"
+        )
+
+    synth = rmsynth_3d_from_fits(
+        tmp_path / "q.fits",
+        tmp_path / "u.fits",
+        stokes_i_file=tmp_path / "i.fits",
+        stokes_i_error_file=tmp_path / "weight.fits",
+        noise_files_are_weight=True,
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=150.0,
+        fit_order=1,
+        stokes_i_snr_cut=None,
+    )
+    alpha_map = _require_cube(synth.stokes_i_alpha_map)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        computed = alpha_map.compute()
+    divides = [
+        str(warning.message)
+        for warning in caught
+        if issubclass(warning.category, RuntimeWarning)
+        and "divide by zero" in str(warning.message)
+    ]
+    assert divides == []
+
+    assert np.all(np.isnan(computed[~inside]))
+    np.testing.assert_allclose(computed[inside], alpha, atol=1e-5)
 
 
 def test_channel_noise_from_channel_chunks_matches_whole_cube(tmp_path):
