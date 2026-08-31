@@ -190,7 +190,7 @@ def fit_fdf(
 
     amplitude_guess = float(np.nanmax(fdf_to_fit_arr[mask]))
     mean_guess = float(phi_arr_radm2[mask][np.argmax(fdf_to_fit_arr[mask])])
-    stddev_guess = float(fwhm_fdf_radm2 / (2 * np.sqrt(2 * np.log(2))))
+    stddev_guess = fwhm_to_sigma(fwhm_fdf_radm2)
     if mask.sum() > 1:
         # pcov is discarded, so a "covariance could not be estimated" warning on a
         # near-flat (depolarised) peak is irrelevant here; the params still fit.
