@@ -31,6 +31,7 @@ from rm_lite.utils.fitting import (
     check_snr_cut_has_error,
     fit_fdf,
     fit_rmsf,
+    fit_sampled_peak,
     fit_stokes_i_model,
     flat_fit_result,
     gaussian_integrand,
@@ -551,13 +552,13 @@ def calc_faraday_peaks(
 ) -> FaradayPeaks:
     """Locate the peak of a Faraday depth spectrum and measure it.
 
-    The brightest sample and its two neighbours are fitted with a parabola, so
-    the peak amplitude and Faraday depth are sub-sample accurate; Q and U are
-    interpolated linearly to that depth for the polarisation angle.
-    `calc_peak_stats` then turns that peak into the angles and errors, exactly as
-    for the 1D Gaussian fit in `get_fdf_parameters`. Peak finding here is
-    elementwise plus a single reduction over the Faraday depth axis, so numpy or
-    dask arrays of any dimensionality work, chunked however you like.
+    The brightest sample and its two neighbours go to
+    `rm_lite.utils.fitting.fit_sampled_peak`, which interpolates the peak
+    sub-sample; `calc_peak_stats` then turns that peak into the angles and
+    errors, exactly as for the 1D Gaussian fit in `get_fdf_parameters`. Finding
+    the peak here is elementwise plus a single reduction over the Faraday depth
+    axis, so numpy or dask arrays of any dimensionality work, chunked however
+    you like.
 
     Everything is NaN for a spectrum with no interior maximum (peak on an end
     sample, flat, or no finite samples), and for one whose peak is below
@@ -612,25 +613,21 @@ def calc_faraday_peaks(
         )
 
     fdf_below, fdf_at, fdf_above = (sample_offset_from_peak(o) for o in (-1, 0, 1))
-    amp_below, amp_at, amp_above = np.abs(fdf_below), np.abs(fdf_at), np.abs(fdf_above)
+    # A brightest sample at either end of the axis has no neighbour on one side,
+    # where the gather above returned zero rather than a sample. Blank it, so the
+    # fit reports no peak instead of fitting that zero.
+    is_interior = (peak_index > 0) & (peak_index < n_phi - 1)
+    fdf_at = np.where(is_interior, fdf_at, np.nan)
 
-    # Three-point parabola through the peak sample. A real maximum curves down,
-    # so anything else (an end sample, a flat or an all-NaN spectrum) is not one.
-    curvature = amp_below - 2.0 * amp_at + amp_above
-    is_peak = (peak_index > 0) & (peak_index < n_phi - 1) & (curvature < 0)
-    peak_offset = 0.5 * (amp_below - amp_above) / np.where(is_peak, curvature, np.nan)
-    peak_pi = amp_at - 0.25 * (amp_below - amp_above) * peak_offset
+    peak = fit_sampled_peak(fdf_below, fdf_at, fdf_above)
+    peak_pi, peak_offset, peak_fdf = peak.amplitude, peak.offset, peak.value
     if threshold is not None:
-        peak_pi = np.where(peak_pi >= threshold, peak_pi, np.nan)
-        peak_offset = np.where(np.isfinite(peak_pi), peak_offset, np.nan)
+        detected = peak_pi >= threshold
+        peak_pi = np.where(detected, peak_pi, np.nan)
+        peak_offset = np.where(detected, peak_offset, np.nan)
+        peak_fdf = np.where(detected, peak_fdf, np.nan)
+    # The fit's offset is in samples; the Faraday depth grid is uniform.
     peak_rm_radm2 = phi_arr_radm2[0] + (peak_index + peak_offset) * phi_step
-
-    # Q and U interpolated to the fitted depth, between the peak sample and
-    # whichever neighbour the fit moved towards.
-    neighbour_weight = np.abs(peak_offset)
-    peak_fdf = (1.0 - neighbour_weight) * fdf_at + neighbour_weight * np.where(
-        peak_offset >= 0, fdf_above, fdf_below
-    )
 
     return calc_peak_stats(
         peak_pi=peak_pi,

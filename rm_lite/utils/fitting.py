@@ -215,6 +215,46 @@ def fit_fdf(
     )
 
 
+class SampledPeakFit(NamedTuple):
+    """Sub-sample peak from the three samples straddling it."""
+
+    amplitude: NDArray[np.float64]
+    """Interpolated peak amplitude"""
+    offset: NDArray[np.float64]
+    """Peak position in samples from the middle one, within [-0.5, 0.5]"""
+    value: NDArray[np.complex128]
+    """The sampled curve interpolated to `offset`, phase kept"""
+
+
+def fit_sampled_peak(
+    below: NDArray[np.complex128],
+    at: NDArray[np.complex128],
+    above: NDArray[np.complex128],
+) -> SampledPeakFit:
+    """Fit a peak sub-sample from the three samples straddling it.
+
+    A parabola through the three amplitudes gives the peak amplitude and its
+    offset from the middle sample; the samples themselves are interpolated
+    linearly to that offset, so the phase comes along. Elementwise, so one peak
+    or a whole cube of them (numpy or dask) costs the same code, which is what
+    makes this the cheap alternative to `fit_fdf`'s per-spectrum Gaussian fit.
+
+    Everything is NaN where the three samples do not describe a maximum: a curve
+    that does not turn over, or a non-finite sample.
+    """
+    amp_below, amp_at, amp_above = np.abs(below), np.abs(at), np.abs(above)
+    # A real maximum curves down, so a non-negative curvature is not a peak.
+    curvature = amp_below - 2.0 * amp_at + amp_above
+    offset = 0.5 * (amp_below - amp_above) / np.where(curvature < 0, curvature, np.nan)
+    amplitude = amp_at - 0.25 * (amp_below - amp_above) * offset
+    # Linear interpolation towards whichever neighbour the fit moved.
+    neighbour_weight = np.abs(offset)
+    value = (1.0 - neighbour_weight) * at + neighbour_weight * np.where(
+        offset >= 0, above, below
+    )
+    return SampledPeakFit(amplitude=amplitude, offset=offset, value=value)
+
+
 def polynomial(order: int) -> StokesIModel:
     def poly_func(x: NDArray[np.float64], *params: float) -> NDArray[np.float64]:
         if len(params) != order + 1:

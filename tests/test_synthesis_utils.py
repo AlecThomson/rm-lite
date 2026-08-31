@@ -7,7 +7,12 @@ import numpy as np
 import pytest
 from numpy.random import Generator
 from numpy.typing import NDArray
-from rm_lite.utils.fitting import StokesIFitOptions, gaussian, gaussian_integrand
+from rm_lite.utils.fitting import (
+    StokesIFitOptions,
+    fit_sampled_peak,
+    gaussian,
+    gaussian_integrand,
+)
 from rm_lite.utils.synthesis import (
     StokesData,
     calc_faraday_moments,
@@ -213,24 +218,43 @@ def test_moments_dask():
         assert np.allclose(moment_dask.compute(), moment_numpy)
 
 
-def thin_fdf(
-    phi_arr_radm2: NDArray[np.float64],
-    fwhm: float,
-    amplitude: float,
-    rm_radm2: float,
-    pa0_deg: float,
-    lam_sq_0_m2: float,
-) -> NDArray[np.complex128]:
-    """A Faraday-thin FDF: RMSF-shaped lobe, angle 2*(pa0 + RM*lam_sq_0)."""
-    lobe = gaussian(phi_arr_radm2, amplitude, rm_radm2, fwhm=fwhm)
-    phase = np.exp(2j * (np.deg2rad(pa0_deg) + rm_radm2 * lam_sq_0_m2))
-    return np.asarray(lobe * phase, dtype=np.complex128)
+def test_fit_sampled_peak_interpolates_between_samples():
+    def parabola(offset: float) -> float:
+        return 2.0 - 0.5 * (offset - 0.25) ** 2
+
+    below, at, above = (
+        np.array(parabola(offset), dtype=np.complex128) for offset in (-1.0, 0.0, 1.0)
+    )
+    peak = fit_sampled_peak(below, at, above)
+
+    # An exact parabola is recovered exactly, peak a quarter sample along.
+    assert np.isclose(float(peak.offset), 0.25)
+    assert np.isclose(float(peak.amplitude), 2.0)
+    # The value is interpolated a quarter of the way to the upper neighbour.
+    assert np.isclose(peak.value, 0.75 * parabola(0.0) + 0.25 * parabola(1.0))
+
+
+def test_fit_sampled_peak_without_a_maximum():
+    # Convex, flat, and a hole where the peak sample should be.
+    for samples in ([1.0, 2.0, 4.0], [1.0, 1.0, 1.0], [1.0, np.nan, 1.0]):
+        below, at, above = np.array(samples, dtype=np.complex128)
+        peak = fit_sampled_peak(below, at, above)
+        for field in peak:
+            assert np.isnan(field)
 
 
 def test_peaks_recover_a_thin_source():
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm, amplitude, rm, pa0, lam_sq_0 = 40.0, 2.0, 37.3, 30.0, 0.05
-    fdf = thin_fdf(phi_arr, fwhm, amplitude, rm, pa0, lam_sq_0)
+    # A Faraday-thin FDF: an RMSF-shaped lobe carrying the angle the source has
+    # at the reference lambda^2, 2*(pa0 + RM*lam_sq_0). `gaussian` takes the
+    # complex amplitude, so that is the whole spectrum.
+    fdf = gaussian(
+        phi_arr,
+        amplitude * np.exp(2j * (np.deg2rad(pa0) + rm * lam_sq_0)),
+        rm,
+        fwhm=fwhm,
+    ).astype(np.complex128)
 
     peaks = calc_faraday_peaks(
         fdf,
@@ -261,7 +285,7 @@ def test_peaks_recover_a_thin_source():
 def test_peaks_nd_and_axis():
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm = 40.0
-    fdf_1d = thin_fdf(phi_arr, fwhm, 2.0, 37.3, 30.0, 0.05)
+    fdf_1d = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
     peaks_1d = calc_faraday_peaks(fdf_1d, phi_arr, fwhm, fdf_error=0.01)
 
     fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 2, 3))
@@ -279,7 +303,7 @@ def test_peaks_nd_and_axis():
 def test_peaks_dask_matches_numpy():
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm = 40.0
-    fdf_1d = thin_fdf(phi_arr, fwhm, 2.0, 37.3, 30.0, 0.05)
+    fdf_1d = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
     fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 4, 4))
     # Chunked along Faraday depth too: the peak is a reduction, not a per-chunk
     # search, so a split axis must give the same answer.
@@ -314,8 +338,8 @@ def test_peaks_without_a_peak():
 def test_peaks_threshold_blanks_faint_peaks():
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm = 40.0
-    bright = thin_fdf(phi_arr, fwhm, 2.0, 37.3, 30.0, 0.05)
-    faint = thin_fdf(phi_arr, fwhm, 0.05, -100.0, 30.0, 0.05)
+    bright = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
+    faint = gaussian(phi_arr, 0.05, -100.0, fwhm=fwhm).astype(np.complex128)
     fdf = np.stack([bright, faint], axis=-1)
 
     peaks = calc_faraday_peaks(fdf, phi_arr, fwhm, threshold=0.5)
@@ -329,7 +353,7 @@ def test_peaks_threshold_blanks_faint_peaks():
 def test_peaks_blank_what_they_were_not_given():
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm = 40.0
-    fdf = thin_fdf(phi_arr, fwhm, 2.0, 37.3, 30.0, 0.05)
+    fdf = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
 
     bare = calc_faraday_peaks(fdf, phi_arr, fwhm)
     assert np.isfinite(bare.peak_pi)
@@ -352,7 +376,7 @@ def test_peaks_blank_what_they_were_not_given():
 def test_peaks_debias_leaves_low_snr_peaks_alone():
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm = 40.0
-    fdf = thin_fdf(phi_arr, fwhm, 2.0, 37.3, 30.0, 0.05)
+    fdf = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
 
     # Noise a third of the peak: below the 5-sigma cut, so no correction.
     peaks = calc_faraday_peaks(fdf, phi_arr, fwhm, fdf_error=0.67)
@@ -364,7 +388,7 @@ def test_peaks_debias_leaves_low_snr_peaks_alone():
 
 def test_peaks_reject_real_input():
     phi_arr = make_phi_arr(100.0, 1.0)
-    fdf = np.abs(thin_fdf(phi_arr, 20.0, 1.0, 0.0, 30.0, 0.05))
+    fdf = np.abs(gaussian(phi_arr, 1.0, 0.0, fwhm=20.0))
     with pytest.raises(ValueError, match="must be complex"):
         calc_faraday_peaks(fdf, phi_arr, 20.0)
 
