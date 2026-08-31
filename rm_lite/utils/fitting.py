@@ -276,14 +276,7 @@ def best_aic_func(
 
 
 def aic_lsq(ssr: float, n_params: int, n_samples: int) -> float:
-    """AIC of a least-squares fit; inf when the small-sample correction blows up.
-
-    The AICc correction astropy applies below 40 samples per parameter divides by
-    `n_samples - n_params - 1`, which is zero at the shortest fittable spectrum
-    (`n_samples == n_params + 1`) and negative below it. The correction diverges
-    there, so the model can never win a comparison: return inf instead of raising
-    ZeroDivisionError or a nonsense negative penalty.
-    """
+    """AIC of a least-squares fit; inf where the AICc correction blows up."""
     if n_samples - n_params - 1 <= 0:
         return float(np.inf)
     with np.errstate(divide="ignore"):
