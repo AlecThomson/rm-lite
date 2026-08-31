@@ -43,6 +43,7 @@ from rm_lite.utils.synthesis import (
     FDFOptions,
     WeightType,
     calc_faraday_moments,
+    calc_faraday_peaks,
     compute_theoretical_noise,
     derotate_to,
     freq_to_lambda2,
@@ -61,6 +62,7 @@ class SyntheticCube(NamedTuple):
     stokes_q: NDArray[np.float64]
     stokes_u: NDArray[np.float64]
     rm_map: NDArray[np.float64]
+    pa_map: NDArray[np.float64]
 
 
 @pytest.fixture
@@ -91,7 +93,7 @@ def synthetic_cube() -> SyntheticCube:
     stokes_q += RNG.normal(0, 0.01, stokes_q.shape)
     stokes_u += RNG.normal(0, 0.01, stokes_u.shape)
 
-    return SyntheticCube(freq_arr_hz, stokes_q, stokes_u, rm_map)
+    return SyntheticCube(freq_arr_hz, stokes_q, stokes_u, rm_map, pa_map)
 
 
 def _require_cube(cube: da.Array | None) -> da.Array:
@@ -590,6 +592,83 @@ def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
     mom0, mom1 = compute(clean.mom0_map, clean.mom1_map)
     assert (mom0 > 0).any()
     assert np.isfinite(mom1).any()
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_rmclean_3d_peak_maps(synthetic_cube: SyntheticCube):
+    """The peak maps come off the clean result, and match `calc_faraday_peaks`."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+
+    synth = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    clean = run_rmclean(
+        synth.fdf_dirty_cube,
+        synth.rmsf_arr,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+        fdf_noise=synth.theoretical_noise.fdf_error_noise,
+        lam_sq_0_m2=synth.lam_sq_0_map,
+        lambda_sq_arr_m2=synth.lambda_sq_arr_m2,
+    )
+
+    assert isinstance(clean.peak_rm_map, da.Array)
+    assert clean.peak_rm_map.shape == synthetic_cube.rm_map.shape
+
+    ref = calc_faraday_peaks(
+        clean.clean_fdf_cube,
+        synth.phi_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        fdf_error=synth.theoretical_noise.fdf_error_noise,
+        lam_sq_0_m2=synth.lam_sq_0_map,
+        lambda_sq_arr_m2=synth.lambda_sq_arr_m2,
+    )
+    maps = (
+        clean.peak_pi_map,
+        clean.peak_pi_debias_map,
+        clean.peak_pi_error_map,
+        clean.peak_rm_map,
+        clean.peak_rm_error_map,
+        clean.peak_pa_map,
+        clean.peak_pa_error_map,
+        clean.peak_pa0_map,
+        clean.peak_pa0_error_map,
+    )
+    for peak_map, ref_map in zip(compute(*maps), compute(*ref), strict=True):
+        np.testing.assert_allclose(peak_map, ref_map, equal_nan=True)
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+def test_rmclean_3d_from_synth_peak_maps(synthetic_cube: SyntheticCube):
+    """Every pixel holds a bright source, so the peak maps must recover it."""
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+
+    synth = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    clean = run_rmclean_from_synth(synth)
+
+    peak_pi, peak_rm, peak_pa0, peak_rm_error = compute(
+        clean.peak_pi_map,
+        clean.peak_rm_map,
+        clean.peak_pa0_map,
+        clean.peak_rm_error_map,
+    )
+    assert np.isfinite(peak_pi).all()
+    np.testing.assert_allclose(peak_rm, synthetic_cube.rm_map, atol=1.0)
+    np.testing.assert_allclose(peak_pi, 0.7, rtol=0.05)
+    # The intrinsic angle wraps at 180 deg, so compare the wrapped difference.
+    pa0_offset = (peak_pa0 - synthetic_cube.pa_map + 90) % 180 - 90
+    assert np.abs(pa0_offset).max() < 2.0
+    # The depth error scales as the RMSF width over the SNR, so a detection
+    # pins the peak down to better than the RMSF itself.
+    assert (peak_rm_error > 0).all()
+    assert (peak_rm_error < synth.fwhm_rmsf_radm2).all()
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")

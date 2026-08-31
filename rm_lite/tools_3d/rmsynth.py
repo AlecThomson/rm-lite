@@ -70,6 +70,8 @@ class RMSynth3DResults(NamedTuple):
     """Double-length Faraday depth values in rad/m^2, for the RMSF."""
     fwhm_rmsf_radm2: float
     """Analytic RMSF FWHM (per-pixel fitting is not performed in 3D)."""
+    lambda_sq_arr_m2: NDArray[np.float64]
+    """Channel wavelength^2 values in m^2."""
     lam_sq_0_m2: float
     """Reference wavelength^2 in m^2 the FDF is derotated to. With
     `lam_sq_0_m2="per_pixel"` this is the cube-wide value, a common reference to
@@ -744,6 +746,7 @@ def rmsynth_3d(
         phi_arr_radm2=rmsynth_params.phi_arr_radm2,
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
         lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
         lam_sq_0_map=lam_sq_0_map,
         theoretical_noise=theoretical_noise,

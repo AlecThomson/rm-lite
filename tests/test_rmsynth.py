@@ -14,6 +14,7 @@ from rm_lite.utils.fitting import power_law
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     FWHM,
+    calc_faraday_peaks,
     freq_to_lambda2,
     get_fwhm_rmsf,
     lambda2_to_freq,
@@ -169,6 +170,57 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
     assert np.isclose(
         fdf_parameters["mom0_debias"][0], fdf_parameters["mom0"][0], rtol=0.01
     )
+
+
+def test_peak_finders_agree(racs_data: MockData, racs_model: MockModel):
+    """The cube peak finder must land on the same peak as the 1D Gaussian fit.
+
+    `get_fdf_parameters` fits a Gaussian to the main lobe, `calc_faraday_peaks`
+    interpolates a parabola through the brightest three samples; both then share
+    `calc_peak_stats` for the angles and errors, so on a well-sampled RMSF the
+    two must agree.
+    """
+    complex_data = racs_data.stokes_q + 1j * racs_data.stokes_u
+    complex_error = np.full_like(racs_data.stokes_q, 1e-3 + 1e-3j, dtype=np.complex128)
+
+    results = run_rmsynth(
+        freq_arr_hz=racs_data.freqs,
+        complex_pol_arr=complex_data,
+        complex_pol_error=complex_error,
+    )
+    params = results.fdf_parameters
+    fdf_arr = results.fdf_arrs["fdf_dirty_complex_arr"].to_numpy().astype(complex)
+    phi_arr_radm2 = results.fdf_arrs["phi_arr_radm2"].to_numpy()
+
+    peaks = calc_faraday_peaks(
+        fdf_arr,
+        phi_arr_radm2,
+        params["fwhm_rmsf_radm2"][0],
+        fdf_error=params["fdf_error_noise"][0],
+        lam_sq_0_m2=params["lam_sq_0_m2"][0],
+        lambda_sq_arr_m2=racs_data.lsq,
+    )
+
+    assert np.isclose(float(peaks.peak_rm_radm2), racs_model.rm, atol=1)
+    assert np.isclose(float(peaks.peak_rm_radm2), params["peak_rm_fit"][0], atol=1)
+    assert np.isclose(float(peaks.peak_pi), params["peak_pi_fit"][0], rtol=0.05)
+    assert np.isclose(float(peaks.peak_pi_error), params["peak_pi_error"][0])
+    # Angles wrap at 180 deg, so compare the wrapped difference.
+    for peak_deg, column in (
+        (float(peaks.peak_pa_deg), "peak_pa_fit_deg"),
+        (float(peaks.peak_pa0_deg), "peak_pa0_fit_deg"),
+    ):
+        assert abs((peak_deg - params[column][0] + 90) % 180 - 90) < 2.0
+    # The mock spectra use pa_0 as an angle in radians, so wrap it into degrees
+    # before comparing with the recovered intrinsic angle.
+    expected_pa0_deg = np.degrees(racs_model.pa_0) % 180
+    assert abs((float(peaks.peak_pa0_deg) - expected_pa0_deg + 90) % 180 - 90) < 2.0
+    for field, column in (
+        (peaks.peak_rm_error_radm2, "peak_rm_fit_error"),
+        (peaks.peak_pa_error_deg, "peak_pa_fit_deg_error"),
+        (peaks.peak_pa0_error_deg, "peak_pa0_fit_deg_error"),
+    ):
+        assert np.isclose(float(field), params[column][0], rtol=0.05)
 
 
 def test_2d_synth(racs_data: MockData, racs_model: MockModel):

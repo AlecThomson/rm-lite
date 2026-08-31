@@ -7,12 +7,19 @@ import numpy as np
 import pytest
 from numpy.random import Generator
 from numpy.typing import NDArray
-from rm_lite.utils.fitting import StokesIFitOptions, gaussian, gaussian_integrand
+from rm_lite.utils.fitting import (
+    StokesIFitOptions,
+    fit_sampled_peak,
+    gaussian,
+    gaussian_integrand,
+)
 from rm_lite.utils.synthesis import (
     StokesData,
     calc_faraday_moments,
+    calc_faraday_peaks,
     create_fractional_spectra,
     debias_fdf,
+    debias_polarised_intensity,
     freq_to_lambda2,
     lambda2_to_freq,
     make_double_phi_arr,
@@ -210,6 +217,206 @@ def test_moments_dask():
     ):
         assert isinstance(moment_dask, da.Array)
         assert np.allclose(moment_dask.compute(), moment_numpy)
+
+
+def test_debias_polarised_intensity():
+    # A peak well above the noise barely moves; noise-dominated goes to zero.
+    assert np.isclose(debias_polarised_intensity(10.0, 0.1), 10.0, rtol=1e-3)
+    assert debias_polarised_intensity(1.0, 0.1) < 1.0
+    assert debias_polarised_intensity(0.1, 1.0) == 0.0
+
+    amplitudes = np.array([10.0, 1.0, 0.1])
+    debiased = debias_polarised_intensity(amplitudes, 0.1)
+    assert (debiased <= amplitudes).all()
+
+
+def test_fit_sampled_peak_interpolates_between_samples():
+    def parabola(offset: float) -> float:
+        return 2.0 - 0.5 * (offset - 0.25) ** 2
+
+    below, at, above = (
+        np.array(parabola(offset), dtype=np.complex128) for offset in (-1.0, 0.0, 1.0)
+    )
+    peak = fit_sampled_peak(below, at, above)
+
+    # An exact parabola is recovered exactly, peak a quarter sample along.
+    assert np.isclose(float(peak.offset), 0.25)
+    assert np.isclose(float(peak.amplitude), 2.0)
+    # The value is interpolated a quarter of the way to the upper neighbour.
+    assert np.isclose(peak.value, 0.75 * parabola(0.0) + 0.25 * parabola(1.0))
+
+
+def test_fit_sampled_peak_without_a_maximum():
+    # Convex, flat, and a hole where the peak sample should be.
+    for samples in ([1.0, 2.0, 4.0], [1.0, 1.0, 1.0], [1.0, np.nan, 1.0]):
+        below, at, above = np.array(samples, dtype=np.complex128)
+        peak = fit_sampled_peak(below, at, above)
+        for field in peak:
+            assert np.isnan(field)
+
+
+def test_peaks_recover_a_thin_source():
+    phi_arr = make_phi_arr(300.0, 5.0)
+    fwhm, amplitude, rm, pa0, lam_sq_0 = 40.0, 2.0, 37.3, 30.0, 0.05
+    # A Faraday-thin FDF: an RMSF-shaped lobe carrying the angle the source has
+    # at the reference lambda^2, 2*(pa0 + RM*lam_sq_0). `gaussian` takes the
+    # complex amplitude, so that is the whole spectrum.
+    fdf = gaussian(
+        phi_arr,
+        amplitude * np.exp(2j * (np.deg2rad(pa0) + rm * lam_sq_0)),
+        rm,
+        fwhm=fwhm,
+    ).astype(np.complex128)
+
+    peaks = calc_faraday_peaks(
+        fdf,
+        phi_arr,
+        fwhm,
+        fdf_error=0.01,
+        lam_sq_0_m2=lam_sq_0,
+        lambda_sq_arr_m2=np.linspace(0.03, 0.07, 36),
+    )
+
+    # The parabola is sub-sample: the RM lands well inside the 5 rad/m^2 grid.
+    assert np.isclose(float(peaks.peak_pi), amplitude, rtol=1e-3)
+    assert np.isclose(float(peaks.peak_rm_radm2), rm, atol=0.5)
+    assert np.isclose(float(peaks.peak_pa0_deg), pa0, atol=0.5)
+    # Angle at the reference lambda^2 is the intrinsic angle plus the rotation.
+    assert np.isclose(
+        float(peaks.peak_pa_deg), (pa0 + np.degrees(rm * lam_sq_0)) % 180, atol=0.5
+    )
+    # Errors all scale as 1/SNR, so a 200-sigma peak is pinned down tightly.
+    assert np.isclose(float(peaks.peak_pi_error), 0.01)
+    assert 0 < float(peaks.peak_rm_error_radm2) < 1.0
+    assert 0 < float(peaks.peak_pa_error_deg) < 1.0
+    assert 0 < float(peaks.peak_pa0_error_deg) < 5.0
+    # Debiasing a high-SNR peak barely moves it, and never up.
+    assert 0 < float(peaks.peak_pi_debias) <= float(peaks.peak_pi)
+
+
+def test_peaks_nd_and_axis():
+    phi_arr = make_phi_arr(300.0, 5.0)
+    fwhm = 40.0
+    fdf_1d = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
+    peaks_1d = calc_faraday_peaks(fdf_1d, phi_arr, fwhm, fdf_error=0.01)
+
+    fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 2, 3))
+    peaks_3d = calc_faraday_peaks(fdf_3d, phi_arr, fwhm, fdf_error=0.01)
+    for peak_3d, peak_1d in zip(peaks_3d, peaks_1d, strict=True):
+        assert peak_3d.shape == (2, 3)
+        assert np.allclose(peak_3d, peak_1d, equal_nan=True)
+
+    fdf_last = np.moveaxis(fdf_3d, 0, -1)
+    peaks_last = calc_faraday_peaks(fdf_last, phi_arr, fwhm, fdf_error=0.01, axis=-1)
+    for peak_last, peak_3d in zip(peaks_last, peaks_3d, strict=True):
+        assert np.allclose(peak_last, peak_3d, equal_nan=True)
+
+
+def test_peaks_dask_matches_numpy():
+    phi_arr = make_phi_arr(300.0, 5.0)
+    fwhm = 40.0
+    fdf_1d = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
+    fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 4, 4))
+    # Chunked along Faraday depth too: the peak is a reduction, not a per-chunk
+    # search, so a split axis must give the same answer.
+    fdf_dask = da.from_array(fdf_3d, chunks=(len(phi_arr) // 2, 2, 2))
+
+    peaks_numpy = calc_faraday_peaks(fdf_3d, phi_arr, fwhm, fdf_error=0.01)
+    peaks_dask = calc_faraday_peaks(fdf_dask, phi_arr, fwhm, fdf_error=0.01)
+
+    for peak_dask, peak_numpy in zip(peaks_dask, peaks_numpy, strict=True):
+        assert isinstance(peak_dask, da.Array)
+        assert np.allclose(peak_dask.compute(), peak_numpy, equal_nan=True)
+
+
+def test_peaks_without_a_peak():
+    phi_arr = make_phi_arr(100.0, 1.0)
+    flat = np.zeros((len(phi_arr), 3), dtype=np.complex128)
+    all_nan = np.full((len(phi_arr), 3), np.nan, dtype=np.complex128)
+    edge = np.zeros((len(phi_arr), 3), dtype=np.complex128)
+    edge[0] = 5.0
+
+    for fdf in (flat, all_nan, edge):
+        peaks = calc_faraday_peaks(fdf, phi_arr, 20.0, fdf_error=0.01)
+        for name, peak in peaks._asdict().items():
+            # The noise is a property of the observation, not of a detection,
+            # so it is reported whether or not there is a peak to go with it.
+            if name == "peak_pi_error":
+                assert (peak == 0.01).all()
+            else:
+                assert np.isnan(peak).all()
+
+
+def test_peaks_threshold_blanks_faint_peaks():
+    phi_arr = make_phi_arr(300.0, 5.0)
+    fwhm = 40.0
+    bright = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
+    faint = gaussian(phi_arr, 0.05, -100.0, fwhm=fwhm).astype(np.complex128)
+    fdf = np.stack([bright, faint], axis=-1)
+
+    peaks = calc_faraday_peaks(fdf, phi_arr, fwhm, threshold=0.5)
+
+    assert np.isfinite(peaks.peak_pi[0])
+    assert np.isnan(peaks.peak_pi[1])
+    assert np.isnan(peaks.peak_rm_radm2[1])
+    assert np.isnan(peaks.peak_pa_deg[1])
+
+
+def test_peaks_blank_what_they_were_not_given():
+    phi_arr = make_phi_arr(300.0, 5.0)
+    fwhm = 40.0
+    fdf = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
+
+    bare = calc_faraday_peaks(fdf, phi_arr, fwhm)
+    assert np.isfinite(bare.peak_pi)
+    assert np.isfinite(bare.peak_rm_radm2)
+    assert np.isnan(bare.peak_pi_error)
+    assert np.isnan(bare.peak_pi_debias)
+    assert np.isnan(bare.peak_rm_error_radm2)
+    assert np.isnan(bare.peak_pa_error_deg)
+    # An angle needs no noise estimate, an intrinsic angle needs a reference.
+    assert np.isfinite(bare.peak_pa_deg)
+    assert np.isnan(bare.peak_pa0_deg)
+
+    no_channels = calc_faraday_peaks(
+        fdf, phi_arr, fwhm, fdf_error=0.01, lam_sq_0_m2=0.05
+    )
+    assert np.isfinite(no_channels.peak_pa0_deg)
+    assert np.isnan(no_channels.peak_pa0_error_deg)
+
+
+def test_peaks_debias_leaves_low_snr_peaks_alone():
+    phi_arr = make_phi_arr(300.0, 5.0)
+    fwhm = 40.0
+    fdf = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
+
+    # Noise a third of the peak: below the 5-sigma cut, so no correction.
+    peaks = calc_faraday_peaks(fdf, phi_arr, fwhm, fdf_error=0.67)
+    assert float(peaks.peak_pi_debias) == float(peaks.peak_pi)
+
+    peaks = calc_faraday_peaks(fdf, phi_arr, fwhm, fdf_error=0.1)
+    assert float(peaks.peak_pi_debias) < float(peaks.peak_pi)
+
+
+def test_peaks_reject_real_input():
+    phi_arr = make_phi_arr(100.0, 1.0)
+    fdf = np.abs(gaussian(phi_arr, 1.0, 0.0, fwhm=20.0))
+    with pytest.raises(ValueError, match="must be complex"):
+        calc_faraday_peaks(fdf, phi_arr, 20.0)
+
+
+def test_peaks_reject_a_bad_phi_arr():
+    fdf = np.ones(4, dtype=np.complex128)
+    for phi_arr in (np.array([1.0]), np.ones((4, 2))):
+        with pytest.raises(ValueError, match="1D with at least two samples"):
+            calc_faraday_peaks(fdf, phi_arr, 20.0)
+
+
+def test_peaks_shape_mismatch():
+    phi_arr = make_phi_arr(100.0, 1.0)
+    fdf = np.ones(len(phi_arr) + 1, dtype=np.complex128)
+    with pytest.raises(ValueError, match="length"):
+        calc_faraday_peaks(fdf, phi_arr, 20.0)
 
 
 def test_debias_fdf_noise_only():
