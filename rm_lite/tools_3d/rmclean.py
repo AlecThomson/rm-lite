@@ -24,7 +24,7 @@ from rm_lite.utils.clean import (
     rmclean,
 )
 from rm_lite.utils.logging import logger, quiet_logs
-from rm_lite.utils.synthesis import calc_faraday_moments
+from rm_lite.utils.synthesis import calc_faraday_moments, calc_faraday_peaks
 
 
 class RMClean3DResults(NamedTuple):
@@ -45,6 +45,30 @@ class RMClean3DResults(NamedTuple):
     """First Faraday moment (mean Faraday depth, rad/m^2), shape (ny, nx)."""
     mom2_map: da.Array
     """Second Faraday moment (Faraday depth dispersion, rad/m^2), shape (ny, nx)."""
+    peak_pi_map: da.Array
+    """Peak polarised intensity of the clean FDF, shape (ny, nx). See
+    `calc_faraday_peaks`. NaN where no peak was found, or where it is below
+    `moment_threshold`."""
+    peak_pi_debias_map: da.Array
+    """Peak polarised intensity corrected for polarisation bias, shape (ny, nx).
+    NaN without `fdf_noise`."""
+    peak_pi_error_map: da.Array
+    """1-sigma error on the peak, i.e. `fdf_noise` as a map, shape (ny, nx).
+    Reported even where no peak was found. NaN without `fdf_noise`."""
+    peak_rm_map: da.Array
+    """Faraday depth of the peak in rad/m^2, shape (ny, nx)."""
+    peak_rm_error_map: da.Array
+    """1-sigma error on the peak Faraday depth, shape (ny, nx). NaN without `fdf_noise`."""
+    peak_pa_map: da.Array
+    """Polarisation angle at the peak in degrees, at `lam_sq_0_m2`, shape (ny, nx)."""
+    peak_pa_error_map: da.Array
+    """1-sigma error on the polarisation angle, shape (ny, nx). NaN without `fdf_noise`."""
+    peak_pa0_map: da.Array
+    """Derotated (intrinsic) polarisation angle in degrees, shape (ny, nx). NaN
+    without `lam_sq_0_m2`."""
+    peak_pa0_error_map: da.Array
+    """1-sigma error on the intrinsic angle, shape (ny, nx). NaN without
+    `lambda_sq_arr_m2`."""
 
 
 class _RMCleanBlockResult(NamedTuple):
@@ -253,6 +277,8 @@ def run_rmclean(
     gain: float = 0.1,
     moment_threshold: float | NDArray[np.float64] | da.Array | None = None,
     fdf_noise: float | NDArray[np.float64] | da.Array | None = None,
+    lam_sq_0_m2: float | NDArray[np.float64] | da.Array | None = None,
+    lambda_sq_arr_m2: NDArray[np.float64] | None = None,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
     multiscale_scales: NDArray[np.float64] | None = None,
@@ -285,11 +311,19 @@ def run_rmclean(
         moment_threshold (float | None, optional): Amplitude cut (in FDF
             amplitude units) applied to the clean FDF before computing the
             Faraday moment maps, passed to `calc_faraday_moments`. None includes
-            all amplitudes (noise-biased). Defaults to None.
+            all amplitudes (noise-biased). Also blanks peaks below it, so every
+            2D map returned here is cut the same way. Defaults to None.
         fdf_noise (float | None, optional): Theoretical FDF noise; enables the
             adaptive off-source auto-mask (mask contracts off the RMSF sidelobes of
-            bright sources, then relaxes as they subtract). None keeps the
-            fixed-mask behaviour. Defaults to None.
+            bright sources, then relaxes as they subtract) and the peak errors
+            and debiased peak. None keeps the fixed-mask behaviour. Defaults to None.
+        lam_sq_0_m2 (float | NDArray[np.float64] | da.Array | None, optional):
+            Reference wavelength^2 the FDF is derotated to, scalar or a per-pixel
+            map (`RMSynth3DResults.lam_sq_0_map`). Enables the intrinsic
+            polarisation angle map. Defaults to None.
+        lambda_sq_arr_m2 (NDArray[np.float64] | None, optional): Channel
+            lambda^2 in m^2 (`RMSynth3DResults.lambda_sq_arr_m2`), for the
+            intrinsic-angle error map. Defaults to None.
         log_level (int, optional): Log level applied to `rm_lite`'s logger while
             each chunk runs. `rmclean`'s Hogbom loop logs at INFO and WARNING
             per pixel (e.g. "Starting minor loop...", "All channels masked...
@@ -311,7 +345,8 @@ def run_rmclean(
         multiscale_selection_margin (float, optional): Hybrid scale-selection parsimony margin in [0, 1). Among scales within this fraction of the best matched-filter score the smallest is chosen, keeping points on the delta scale. Defaults to 0.08.
 
     Returns:
-        RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
+        RMClean3DResults: Lazy clean/model/residual FDF cubes, iteration-count
+            map, and the Faraday moment and peak maps.
     """
     if fdf_dirty_cube.numblocks[0] != 1:
         msg = (
@@ -381,6 +416,15 @@ def run_rmclean(
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
         threshold=moment_threshold,
     )
+    peaks = calc_faraday_peaks(
+        clean,
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_error=fdf_noise,
+        lam_sq_0_m2=lam_sq_0_m2,
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        threshold=moment_threshold,
+    )
 
     return RMClean3DResults(
         clean_fdf_cube=clean,
@@ -390,6 +434,15 @@ def run_rmclean(
         mom0_map=moments.mom0,
         mom1_map=moments.mom1,
         mom2_map=moments.mom2,
+        peak_pi_map=peaks.peak_pi,
+        peak_pi_debias_map=peaks.peak_pi_debias,
+        peak_pi_error_map=peaks.peak_pi_error,
+        peak_rm_map=peaks.peak_rm_radm2,
+        peak_rm_error_map=peaks.peak_rm_error_radm2,
+        peak_pa_map=peaks.peak_pa_deg,
+        peak_pa_error_map=peaks.peak_pa_error_deg,
+        peak_pa0_map=peaks.peak_pa0_deg,
+        peak_pa0_error_map=peaks.peak_pa0_error_deg,
     )
 
 
@@ -430,7 +483,7 @@ def run_rmclean_from_synth(
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical
             FDF noise) applied to the clean FDF before computing the Faraday
-            moment maps. Defaults to 5.0.
+            moment maps, and below which peaks are blanked. Defaults to 5.0.
         log_level (int, optional): See `run_rmclean`. Defaults to `logging.ERROR`.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
@@ -438,7 +491,10 @@ def run_rmclean_from_synth(
             selection, selection_margin: Multiscale options, see `run_rmclean`.
 
     Returns:
-        RMClean3DResults: Lazy clean/model/residual FDF cubes and iteration-count map.
+        RMClean3DResults: Lazy clean/model/residual FDF cubes, iteration-count
+            map, and the Faraday moment and peak maps. The peak maps carry the
+            errors and intrinsic angle, since the reference wavelength^2 and
+            theoretical noise come with the synthesis results.
     """
     fdf_error_noise = rm_synth_3d_results.theoretical_noise.fdf_error_noise
     mask = auto_mask * fdf_error_noise
@@ -466,6 +522,8 @@ def run_rmclean_from_synth(
         gain=gain,
         moment_threshold=moment_threshold,
         fdf_noise=fdf_error_noise,
+        lam_sq_0_m2=rm_synth_3d_results.lam_sq_0_map,
+        lambda_sq_arr_m2=rm_synth_3d_results.lambda_sq_arr_m2,
         log_level=log_level,
         multiscale=multiscale,
         multiscale_scales=multiscale_scales,

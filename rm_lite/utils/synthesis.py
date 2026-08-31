@@ -207,6 +207,25 @@ def calc_mom2_fdf(
     )
 
 
+def validate_phi_arr(
+    complex_fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    phi_arr_radm2: NDArray[np.float64],
+    axis: int,
+) -> NDArray[np.float64]:
+    """`phi_arr_radm2` as float64, checked against the FDF's Faraday depth axis."""
+    phi_arr_radm2 = np.asarray(phi_arr_radm2, dtype=np.float64)
+    if phi_arr_radm2.ndim != 1 or phi_arr_radm2.shape[0] < 2:
+        msg = "`phi_arr_radm2` must be 1D with at least two samples."
+        raise ValueError(msg)
+    if complex_fdf_arr.shape[axis] != phi_arr_radm2.shape[0]:
+        msg = (
+            f"Axis {axis} of the FDF has length {complex_fdf_arr.shape[axis]}, "
+            f"but `phi_arr_radm2` has length {phi_arr_radm2.shape[0]}."
+        )
+        raise ValueError(msg)
+    return phi_arr_radm2
+
+
 class FaradayMoments(NamedTuple):
     """Moments of the polarised intensity Faraday depth spectrum."""
 
@@ -296,16 +315,7 @@ def calc_faraday_moments(
         msg = "`threshold` and `auto_threshold_sigma` are mutually exclusive."
         raise ValueError(msg)
 
-    phi_arr_radm2 = np.asarray(phi_arr_radm2, dtype=np.float64)
-    if phi_arr_radm2.ndim != 1 or phi_arr_radm2.shape[0] < 2:
-        msg = "`phi_arr_radm2` must be 1D with at least two samples."
-        raise ValueError(msg)
-    if complex_fdf_arr.shape[axis] != phi_arr_radm2.shape[0]:
-        msg = (
-            f"Axis {axis} of the FDF has length {complex_fdf_arr.shape[axis]}, "
-            f"but `phi_arr_radm2` has length {phi_arr_radm2.shape[0]}."
-        )
-        raise ValueError(msg)
+    phi_arr_radm2 = validate_phi_arr(complex_fdf_arr, phi_arr_radm2, axis)
 
     if debias:
         if auto_threshold_sigma is not None:
@@ -392,6 +402,245 @@ def calc_faraday_moments(
         mom0=mom0,
         mom1=np.squeeze(mom1, axis=axis),
         mom2=np.squeeze(mom2, axis=axis),
+    )
+
+
+class FaradayPeaks(NamedTuple):
+    """Peak of the polarised intensity Faraday depth spectrum.
+
+    Every field is shaped like the peak it came from: a scalar for one
+    sightline, a map (numpy or dask) for a cube.
+    """
+
+    peak_pi: NDArray[np.float64]
+    """Peak polarised intensity, in the input FDF amplitude units"""
+    peak_pi_debias: NDArray[np.float64]
+    """Peak polarised intensity corrected for polarisation bias; NaN without `fdf_error`"""
+    peak_pi_error: NDArray[np.float64]
+    """1-sigma error on the peak, i.e. `fdf_error` broadcast to the peak's shape.
+    A property of the observation, so it is reported even where no peak was
+    found. NaN without `fdf_error`"""
+    peak_rm_radm2: NDArray[np.float64]
+    """Faraday depth of the peak in rad/m^2"""
+    peak_rm_error_radm2: NDArray[np.float64]
+    """1-sigma error on the peak Faraday depth; NaN without `fdf_error`"""
+    peak_pa_deg: NDArray[np.float64]
+    """Polarisation angle at the peak in degrees, at the FDF's reference lambda^2"""
+    peak_pa_error_deg: NDArray[np.float64]
+    """1-sigma error on the polarisation angle; NaN without `fdf_error`"""
+    peak_pa0_deg: NDArray[np.float64]
+    """Derotated (intrinsic) polarisation angle in degrees; NaN without `lam_sq_0_m2`"""
+    peak_pa0_error_deg: NDArray[np.float64]
+    """1-sigma error on the intrinsic angle; NaN without `lambda_sq_arr_m2`"""
+
+
+def calc_peak_stats(
+    peak_pi: float | NDArray[np.float64],
+    peak_rm_radm2: float | NDArray[np.float64],
+    peak_fdf: complex | NDArray[np.complex128],
+    fwhm_rmsf_radm2: float | NDArray[np.float64],
+    fdf_error: float | NDArray[np.float64] | None = None,
+    lam_sq_0_m2: float | NDArray[np.float64] | None = None,
+    lambda_sq_arr_m2: NDArray[np.float64] | None = None,
+    bias_correction_snr: float = 5.0,
+) -> FaradayPeaks:
+    """Angles, debiased intensity and errors for an already-located FDF peak.
+
+    Shared by the per-sightline Gaussian fit (`get_fdf_parameters`) and the
+    vectorised cube peak finder (`calc_faraday_peaks`), which differ only in how
+    they locate the peak. Scalars or arrays (numpy or dask); anything needing an
+    argument that was not given comes back NaN.
+
+    Args:
+        peak_pi (float | NDArray[np.float64]): Peak polarised intensity, in FDF amplitude units.
+        peak_rm_radm2 (float | NDArray[np.float64]): Faraday depth of the peak in rad/m^2.
+        peak_fdf (complex | NDArray[np.complex128]): Complex FDF at the peak, for the angle.
+        fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
+        fdf_error (float | NDArray[np.float64] | None, optional): Theoretical FDF noise, scalar
+            or a per-pixel map (`TheoreticalNoise.fdf_error_noise`). Enables the
+            errors and the debiased peak. Defaults to None.
+        lam_sq_0_m2 (float | NDArray[np.float64] | None, optional): Reference wavelength^2 the
+            FDF is derotated to, scalar or a per-pixel map
+            (`RMSynth3DResults.lam_sq_0_map`). Enables the intrinsic angle.
+            Defaults to None.
+        lambda_sq_arr_m2 (NDArray[np.float64] | None, optional): Channel lambda^2 in m^2, for
+            the intrinsic-angle error. Defaults to None.
+        bias_correction_snr (float, optional): Debias only peaks at or above this
+            SNR; below it the raw peak is kept. Defaults to 5.0.
+
+    Returns:
+        FaradayPeaks: Peak intensity, Faraday depth and polarisation angles, with
+            errors, shaped like `peak_pi`.
+    """
+    peak_pa_deg = 0.5 * np.degrees(np.arctan2(peak_fdf.imag, peak_fdf.real)) % 180.0
+    blank = np.full_like(peak_pi, np.nan, dtype=np.float64)
+
+    if fdf_error is None:
+        peak_pi_debias = peak_pi_error = peak_rm_error_radm2 = peak_pa_error_deg = blank
+    else:
+        # Multiplied out rather than assigned, so a scalar noise becomes a map
+        # alongside a map of peaks.
+        peak_pi_error = fdf_error * np.ones_like(peak_pi, dtype=np.float64)
+        # Ricean correction (POSSUM report 11), only where it is meaningful.
+        peak_pi_debias = np.where(
+            peak_pi >= bias_correction_snr * peak_pi_error,
+            np.sqrt(
+                np.clip(
+                    peak_pi**2.0 - POLARISATION_BIAS_FACTOR * peak_pi_error**2.0,
+                    0,
+                    None,
+                )
+            ),
+            peak_pi,
+        )
+        # Faraday depth error from the RMSF width, angle error from Brentjens &
+        # de Bruyn 2005, eq. A.12; both scale as 1/SNR.
+        peak_rm_error_radm2 = fwhm_rmsf_radm2 * peak_pi_error / (2.0 * peak_pi)
+        peak_pa_error_deg = np.degrees(peak_pi_error / (2.0 * peak_pi))
+
+    if lam_sq_0_m2 is None:
+        peak_pa0_deg = blank
+    else:
+        peak_pa0_deg = (
+            np.degrees(np.radians(peak_pa_deg) - peak_rm_radm2 * lam_sq_0_m2) % 180.0
+        )
+
+    if lambda_sq_arr_m2 is None or lam_sq_0_m2 is None or fdf_error is None:
+        peak_pa0_error_deg = blank
+    else:
+        # Brentjens & de Bruyn 2005, eq. A.20: the intrinsic angle is an
+        # extrapolation to lambda^2 = 0, so its error grows with the lever arm
+        # between lam_sq_0_m2 and the spread of the channel lambda^2.
+        lam_sq_arr = lambda_sq_arr_m2[np.isfinite(lambda_sq_arr_m2)]
+        n_chan = lam_sq_arr.size
+        lam_sq_variance = (
+            np.sum(lam_sq_arr**2.0) - np.sum(lam_sq_arr) ** 2.0 / n_chan
+        ) / (n_chan - 1)
+        peak_pa0_error_deg = np.degrees(
+            np.sqrt(
+                peak_pi_error**2.0
+                * n_chan
+                / (4.0 * (n_chan - 2.0) * peak_pi**2.0)
+                * ((n_chan - 1) / n_chan + lam_sq_0_m2**2.0 / lam_sq_variance)
+            )
+        )
+
+    return FaradayPeaks(
+        peak_pi=cast("NDArray[np.float64]", peak_pi),
+        peak_pi_debias=peak_pi_debias,
+        peak_pi_error=peak_pi_error,
+        peak_rm_radm2=cast("NDArray[np.float64]", peak_rm_radm2),
+        peak_rm_error_radm2=peak_rm_error_radm2,
+        peak_pa_deg=peak_pa_deg,
+        peak_pa_error_deg=peak_pa_error_deg,
+        peak_pa0_deg=peak_pa0_deg,
+        peak_pa0_error_deg=peak_pa0_error_deg,
+    )
+
+
+def calc_faraday_peaks(
+    complex_fdf_arr: NDArray[np.complex128],
+    phi_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_radm2: float | NDArray[np.float64],
+    axis: int = 0,
+    fdf_error: float | NDArray[np.float64] | None = None,
+    lam_sq_0_m2: float | NDArray[np.float64] | None = None,
+    lambda_sq_arr_m2: NDArray[np.float64] | None = None,
+    threshold: float | NDArray[np.float64] | None = None,
+    bias_correction_snr: float = 5.0,
+) -> FaradayPeaks:
+    """Locate the peak of a Faraday depth spectrum and measure it.
+
+    The brightest sample and its two neighbours are fitted with a parabola, so
+    the peak amplitude and Faraday depth are sub-sample accurate; Q and U are
+    interpolated linearly to that depth for the polarisation angle.
+    `calc_peak_stats` then turns that peak into the angles and errors, exactly as
+    for the 1D Gaussian fit in `get_fdf_parameters`. Peak finding here is
+    elementwise plus a single reduction over the Faraday depth axis, so numpy or
+    dask arrays of any dimensionality work, chunked however you like.
+
+    Everything is NaN for a spectrum with no interior maximum (peak on an end
+    sample, flat, or no finite samples), and for one whose peak is below
+    `threshold`.
+
+    Args:
+        complex_fdf_arr (NDArray[np.complex128]): Complex FDF. Real input has no
+            polarisation angle, so it is rejected.
+        phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth array in rad/m^2.
+        fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
+            An array must broadcast against the FDF shape with the Faraday depth
+            axis removed.
+        axis (int, optional): Faraday depth axis of `complex_fdf_arr`. Defaults to 0.
+        fdf_error, lam_sq_0_m2, lambda_sq_arr_m2, bias_correction_snr: See
+            `calc_peak_stats`.
+        threshold (float | NDArray[np.float64] | None, optional): Blank peaks below this
+            amplitude (in FDF amplitude units). Defaults to None.
+
+    Returns:
+        FaradayPeaks: Peak intensity, Faraday depth and polarisation angles, with
+            the Faraday depth axis reduced away.
+    """
+    phi_arr_radm2 = validate_phi_arr(complex_fdf_arr, phi_arr_radm2, axis)
+    if not np.iscomplexobj(complex_fdf_arr):
+        msg = "`complex_fdf_arr` must be complex: a real FDF has no polarisation angle."
+        raise ValueError(msg)
+
+    n_phi = phi_arr_radm2.shape[0]
+    phi_step = float(phi_arr_radm2[1] - phi_arr_radm2[0])
+    phi_shape = [1] * complex_fdf_arr.ndim
+    phi_shape[axis] = n_phi
+    sample_index = np.arange(n_phi).reshape(phi_shape)
+
+    abs_fdf_arr = np.abs(complex_fdf_arr)
+    # -inf rather than NaN: argmax has no nan-skipping form that survives an
+    # all-NaN spectrum, and those fall out as NaN below anyway.
+    peak_index = np.argmax(
+        np.where(np.isfinite(abs_fdf_arr), abs_fdf_arr, -np.inf), axis=axis
+    )
+    peak_index_nd = np.expand_dims(peak_index, axis)
+
+    def sample_offset_from_peak(offset: int) -> NDArray[np.complex128]:
+        """The FDF sample `offset` samples along from each spectrum's peak.
+
+        A masked sum rather than a fancy-index gather: it dispatches to dask
+        unchanged, and an offset off the end of the axis simply matches nothing.
+        """
+        picked = np.where(sample_index == peak_index_nd + offset, complex_fdf_arr, 0)
+        return cast(
+            "NDArray[np.complex128]",
+            np.squeeze(np.sum(picked, axis=axis, keepdims=True), axis=axis),
+        )
+
+    fdf_below, fdf_at, fdf_above = (sample_offset_from_peak(o) for o in (-1, 0, 1))
+    amp_below, amp_at, amp_above = np.abs(fdf_below), np.abs(fdf_at), np.abs(fdf_above)
+
+    # Three-point parabola through the peak sample. A real maximum curves down,
+    # so anything else (an end sample, a flat or an all-NaN spectrum) is not one.
+    curvature = amp_below - 2.0 * amp_at + amp_above
+    is_peak = (peak_index > 0) & (peak_index < n_phi - 1) & (curvature < 0)
+    peak_offset = 0.5 * (amp_below - amp_above) / np.where(is_peak, curvature, np.nan)
+    peak_pi = amp_at - 0.25 * (amp_below - amp_above) * peak_offset
+    if threshold is not None:
+        peak_pi = np.where(peak_pi >= threshold, peak_pi, np.nan)
+        peak_offset = np.where(np.isfinite(peak_pi), peak_offset, np.nan)
+    peak_rm_radm2 = phi_arr_radm2[0] + (peak_index + peak_offset) * phi_step
+
+    # Q and U interpolated to the fitted depth, between the peak sample and
+    # whichever neighbour the fit moved towards.
+    neighbour_weight = np.abs(peak_offset)
+    peak_fdf = (1.0 - neighbour_weight) * fdf_at + neighbour_weight * np.where(
+        peak_offset >= 0, fdf_above, fdf_below
+    )
+
+    return calc_peak_stats(
+        peak_pi=peak_pi,
+        peak_rm_radm2=peak_rm_radm2,
+        peak_fdf=peak_fdf,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_error=fdf_error,
+        lam_sq_0_m2=lam_sq_0_m2,
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        bias_correction_snr=bias_correction_snr,
     )
 
 
@@ -1820,11 +2069,6 @@ def get_fdf_parameters(
             mad_std(np.concatenate([fdf_arr[mask].real, fdf_arr[mask].imag]))
         )
 
-    n_good_phi = np.isfinite(fdf_arr).sum()
-    lambda_sq_arr_m2_variance = (
-        np.sum(lambda_sq_arr_m2**2.0) - np.sum(lambda_sq_arr_m2) ** 2.0 / n_good_phi
-    ) / (n_good_phi - 1)
-
     good_chan_idx = np.isfinite(freq_arr_hz)
     n_good_chan = good_chan_idx.sum()
 
@@ -1853,44 +2097,25 @@ def get_fdf_parameters(
         peak_rm_fit = np.nan
         peak_pi_fit = np.nan
 
-    # Error on fitted Faraday depth (RM) is same as channel, but using fitted PI
-    peak_rm_fit_err = (
-        fwhm_rmsf_radm2 * theoretical_noise.fdf_error_noise / (2.0 * peak_pi_fit)
-    )
-
-    # Correct the peak for polarisation bias (POSSUM report 11)
-    peak_pi_fit_debias = peak_pi_fit
-    if peak_pi_fit_snr >= bias_correction_snr:
-        peak_pi_fit_debias = np.sqrt(
-            peak_pi_fit**2.0
-            - POLARISATION_BIAS_FACTOR * theoretical_noise.fdf_error_noise**2.0
-        )
-
-    # Calculate the polarisation angle from the fitted peak
-    # Uncertainty from Eqn A.12 in Brentjens & De Bruyn 2005
+    # Q and U at the fitted peak, for the polarisation angle
     peak_pi_fit_index = np.interp(
         peak_rm_fit, phi_arr_radm2, np.arange(phi_arr_radm2.shape[-1], dtype="f4")
     )
     peak_u_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_arr.imag)
     peak_q_fit = np.interp(peak_rm_fit, phi_arr_radm2, fdf_arr.real)
-    peak_pa_fit_deg = 0.5 * np.degrees(np.arctan2(peak_u_fit, peak_q_fit)) % 180
-    peak_pa_fit_deg_err = np.degrees(
-        theoretical_noise.fdf_error_noise / (2.0 * peak_pi_fit)
+    # Angles, debiasing and errors are the same for one sightline as for a whole
+    # cube, so they come from the shared `calc_peak_stats`.
+    peak_stats = calc_peak_stats(
+        peak_pi=peak_pi_fit,
+        peak_rm_radm2=peak_rm_fit,
+        peak_fdf=peak_q_fit + 1j * peak_u_fit,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_error=theoretical_noise.fdf_error_noise,
+        lam_sq_0_m2=lam_sq_0_m2,
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        bias_correction_snr=bias_correction_snr,
     )
-
-    # Calculate the derotated polarisation angle and uncertainty
-    # Uncertainty from Eqn A.20 in Brentjens & De Bruyn 2005
-    peak_pa0_fit_deg = (
-        float(np.degrees(np.radians(peak_pa_fit_deg) - peak_rm_fit * lam_sq_0_m2))
-        % 180.0
-    )
-    peak_pa0_fit_rad_err = np.sqrt(
-        theoretical_noise.fdf_error_noise**2.0
-        * n_good_phi
-        / (4.0 * (n_good_phi - 2.0) * peak_pi_fit**2.0)
-        * ((n_good_phi - 1) / n_good_phi + lam_sq_0_m2**2.0 / lambda_sq_arr_m2_variance)
-    )
-    peak_pa0_fit_deg_err = float(np.degrees(peak_pa0_fit_rad_err))
+    peak_pi_fit_debias = float(peak_stats.peak_pi_debias)
 
     moment_threshold = moment_threshold_snr * theoretical_noise.fdf_error_noise
     moments = calc_faraday_moments(
@@ -1926,7 +2151,7 @@ def get_fdf_parameters(
         complex_pol_arr=complex_pol_arr,
         complex_pol_error=complex_pol_error,
         frac_pol=peak_pi_fit_debias / stokes_i_reference_flux,
-        psi0_deg=peak_pa0_fit_deg,
+        psi0_deg=float(peak_stats.peak_pa0_deg),
         rm_radm2=peak_rm_fit,
     )
 
@@ -1935,20 +2160,20 @@ def get_fdf_parameters(
             {
                 "fdf_error_mad": fdf_error_mad,
                 "peak_pi_fit": peak_pi_fit,
-                "peak_pi_error": theoretical_noise.fdf_error_noise,
+                "peak_pi_error": float(peak_stats.peak_pi_error),
                 "peak_pi_fit_debias": peak_pi_fit_debias,
                 "peak_pi_fit_snr": peak_pi_fit_snr,
                 "peak_pi_fit_index": int(peak_pi_fit_index)
                 if np.isfinite(peak_pi_fit_index)
                 else -1,
                 "peak_rm_fit": peak_rm_fit,
-                "peak_rm_fit_error": peak_rm_fit_err,
+                "peak_rm_fit_error": float(peak_stats.peak_rm_error_radm2),
                 "peak_q_fit": peak_q_fit,
                 "peak_u_fit": peak_u_fit,
-                "peak_pa_fit_deg": peak_pa_fit_deg,
-                "peak_pa_fit_deg_error": peak_pa_fit_deg_err,
-                "peak_pa0_fit_deg": peak_pa0_fit_deg,
-                "peak_pa0_fit_deg_error": peak_pa0_fit_deg_err,
+                "peak_pa_fit_deg": float(peak_stats.peak_pa_deg),
+                "peak_pa_fit_deg_error": float(peak_stats.peak_pa_error_deg),
+                "peak_pa0_fit_deg": float(peak_stats.peak_pa0_deg),
+                "peak_pa0_fit_deg_error": float(peak_stats.peak_pa0_error_deg),
                 "fit_function": fit_function,
                 "lam_sq_0_m2": lam_sq_0_m2,
                 "ref_freq_hz": lambda2_to_freq(lam_sq_0_m2),
