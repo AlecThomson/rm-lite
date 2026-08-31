@@ -369,6 +369,13 @@ def test_peaks_reject_real_input():
         calc_faraday_peaks(fdf, phi_arr, 20.0)
 
 
+def test_peaks_reject_a_bad_phi_arr():
+    fdf = np.ones(4, dtype=np.complex128)
+    for phi_arr in (np.array([1.0]), np.ones((4, 2))):
+        with pytest.raises(ValueError, match="1D with at least two samples"):
+            calc_faraday_peaks(fdf, phi_arr, 20.0)
+
+
 def test_peaks_shape_mismatch():
     phi_arr = make_phi_arr(100.0, 1.0)
     fdf = np.ones(len(phi_arr) + 1, dtype=np.complex128)
