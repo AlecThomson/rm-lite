@@ -18,6 +18,7 @@ from rm_lite.tools_3d.rmsynth import rmsynth_3d
 from rm_lite.utils.dask_io import estimate_single_stokes_channel_noise
 from rm_lite.utils.fitting import (
     StokesIFitOptions,
+    best_aic_func,
     coefficient_errors,
     coefficient_names,
     fit_stokes_i_model,
@@ -978,6 +979,27 @@ def test_shortest_fittable_spectrum_does_not_divide_by_zero(fit_order: int) -> N
     assert np.isfinite(model).all()
     if fit_order > 0:  # order 0 is a constant, it cannot follow the slope
         np.testing.assert_allclose(model, stokes_i, rtol=1e-3)
+
+
+def test_all_unscoreable_orders_pick_the_fewest_parameters() -> None:
+    """Every order unscoreable must not warn its way out of the comparison.
+
+    `aic_lsq` returns inf where the AICc correction diverges, so `aics` can be
+    all-inf; `best_aic_func` then took `aics - best_aic`, and `inf - inf` raises
+    `RuntimeWarning: invalid value encountered in subtract`. Whether a spectrum
+    reaches that state depends on the astropy version, which is why CI saw it on
+    three interpreters and not the fourth.
+    """
+    n_param = np.array([1, 2, 3])
+    best_aic, best_n, best_idx = best_aic_func(np.full(3, np.inf), n_param)
+    assert best_n == 1
+    assert best_idx == 0
+    assert not np.isfinite(best_aic)
+
+    # A finite winner still wins, and an unscoreable order never beats it.
+    best_aic, best_n, _ = best_aic_func(np.array([10.0, np.inf, np.inf]), n_param)
+    assert best_aic == 10.0
+    assert best_n == 1
 
 
 def test_shortest_fittable_spectrum_picks_a_lower_order() -> None:
