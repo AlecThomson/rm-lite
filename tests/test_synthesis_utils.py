@@ -19,6 +19,7 @@ from rm_lite.utils.synthesis import (
     calc_faraday_peaks,
     create_fractional_spectra,
     debias_fdf,
+    debias_polarised_intensity,
     freq_to_lambda2,
     lambda2_to_freq,
     make_double_phi_arr,
@@ -216,6 +217,17 @@ def test_moments_dask():
     ):
         assert isinstance(moment_dask, da.Array)
         assert np.allclose(moment_dask.compute(), moment_numpy)
+
+
+def test_debias_polarised_intensity():
+    # A peak well above the noise barely moves; noise-dominated goes to zero.
+    assert np.isclose(debias_polarised_intensity(10.0, 0.1), 10.0, rtol=1e-3)
+    assert debias_polarised_intensity(1.0, 0.1) < 1.0
+    assert debias_polarised_intensity(0.1, 1.0) == 0.0
+
+    amplitudes = np.array([10.0, 1.0, 0.1])
+    debiased = debias_polarised_intensity(amplitudes, 0.1)
+    assert (debiased <= amplitudes).all()
 
 
 def test_fit_sampled_peak_interpolates_between_samples():

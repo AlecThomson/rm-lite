@@ -406,6 +406,88 @@ def calc_faraday_moments(
     )
 
 
+def debias_polarised_intensity(
+    amplitude: float | NDArray[np.float64], error: float | NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Polarised intensity corrected for Ricean bias, `sqrt(P^2 - 2.3 sigma^2)`.
+
+    POSSUM report 11. Clipped at zero, where the noise accounts for the whole
+    amplitude. Which amplitudes are worth debiasing is the caller's call: below
+    a few sigma the correction is unreliable.
+    """
+    return cast(
+        "NDArray[np.float64]",
+        np.sqrt(
+            np.clip(amplitude**2.0 - POLARISATION_BIAS_FACTOR * error**2.0, 0, None)
+        ),
+    )
+
+
+def polarisation_angle_deg(
+    complex_pol: complex | NDArray[np.complex128],
+) -> NDArray[np.float64]:
+    """Polarisation angle of Q + iU in degrees, wrapped into [0, 180)."""
+    return 0.5 * np.degrees(np.arctan2(complex_pol.imag, complex_pol.real)) % 180.0
+
+
+def derotate_angle_deg(
+    pa_deg: float | NDArray[np.float64],
+    rm_radm2: float | NDArray[np.float64],
+    lam_sq_0_m2: float | NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """`pa_deg` derotated from `lam_sq_0_m2` to lambda^2 = 0: the intrinsic angle."""
+    return np.degrees(np.radians(pa_deg) - rm_radm2 * lam_sq_0_m2) % 180.0
+
+
+def polarisation_angle_error_deg(
+    amplitude: float | NDArray[np.float64], error: float | NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """1-sigma polarisation angle error in degrees, `sigma / 2P`.
+
+    Brentjens & de Bruyn 2005, eq. A.12.
+    """
+    return cast("NDArray[np.float64]", np.degrees(error / (2.0 * amplitude)))
+
+
+def faraday_depth_error_radm2(
+    amplitude: float | NDArray[np.float64],
+    error: float | NDArray[np.float64],
+    fwhm_rmsf_radm2: float | NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """1-sigma Faraday depth error: the RMSF width over twice the SNR."""
+    return cast("NDArray[np.float64]", fwhm_rmsf_radm2 * error / (2.0 * amplitude))
+
+
+def intrinsic_angle_error_deg(
+    amplitude: float | NDArray[np.float64],
+    error: float | NDArray[np.float64],
+    lam_sq_0_m2: float | NDArray[np.float64],
+    lambda_sq_arr_m2: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """1-sigma error in degrees on the derotated (intrinsic) angle.
+
+    Brentjens & de Bruyn 2005, eq. A.20: extrapolating the angle to lambda^2 = 0
+    costs a lever arm between `lam_sq_0_m2` and the spread of the channel
+    lambda^2, so a narrow band pays for it.
+    """
+    lam_sq_arr = lambda_sq_arr_m2[np.isfinite(lambda_sq_arr_m2)]
+    n_chan = lam_sq_arr.size
+    lam_sq_variance = (np.sum(lam_sq_arr**2.0) - np.sum(lam_sq_arr) ** 2.0 / n_chan) / (
+        n_chan - 1
+    )
+    return cast(
+        "NDArray[np.float64]",
+        np.degrees(
+            np.sqrt(
+                error**2.0
+                * n_chan
+                / (4.0 * (n_chan - 2.0) * amplitude**2.0)
+                * ((n_chan - 1) / n_chan + lam_sq_0_m2**2.0 / lam_sq_variance)
+            )
+        ),
+    )
+
+
 class FaradayPeaks(NamedTuple):
     """Peak of the polarised intensity Faraday depth spectrum.
 
@@ -473,7 +555,7 @@ def calc_peak_stats(
         FaradayPeaks: Peak intensity, Faraday depth and polarisation angles, with
             errors, shaped like `peak_pi`.
     """
-    peak_pa_deg = 0.5 * np.degrees(np.arctan2(peak_fdf.imag, peak_fdf.real)) % 180.0
+    peak_pa_deg = polarisation_angle_deg(peak_fdf)
     blank = np.full_like(peak_pi, np.nan, dtype=np.float64)
 
     if fdf_error is None:
@@ -482,48 +564,27 @@ def calc_peak_stats(
         # Multiplied out rather than assigned, so a scalar noise becomes a map
         # alongside a map of peaks.
         peak_pi_error = fdf_error * np.ones_like(peak_pi, dtype=np.float64)
-        # Ricean correction (POSSUM report 11), only where it is meaningful.
+        # Debiasing a faint peak is unreliable, so keep the raw one there.
         peak_pi_debias = np.where(
             peak_pi >= bias_correction_snr * peak_pi_error,
-            np.sqrt(
-                np.clip(
-                    peak_pi**2.0 - POLARISATION_BIAS_FACTOR * peak_pi_error**2.0,
-                    0,
-                    None,
-                )
-            ),
+            debias_polarised_intensity(peak_pi, peak_pi_error),
             peak_pi,
         )
-        # Faraday depth error from the RMSF width, angle error from Brentjens &
-        # de Bruyn 2005, eq. A.12; both scale as 1/SNR.
-        peak_rm_error_radm2 = fwhm_rmsf_radm2 * peak_pi_error / (2.0 * peak_pi)
-        peak_pa_error_deg = np.degrees(peak_pi_error / (2.0 * peak_pi))
+        peak_rm_error_radm2 = faraday_depth_error_radm2(
+            peak_pi, peak_pi_error, fwhm_rmsf_radm2
+        )
+        peak_pa_error_deg = polarisation_angle_error_deg(peak_pi, peak_pi_error)
 
     if lam_sq_0_m2 is None:
         peak_pa0_deg = blank
     else:
-        peak_pa0_deg = (
-            np.degrees(np.radians(peak_pa_deg) - peak_rm_radm2 * lam_sq_0_m2) % 180.0
-        )
+        peak_pa0_deg = derotate_angle_deg(peak_pa_deg, peak_rm_radm2, lam_sq_0_m2)
 
     if lambda_sq_arr_m2 is None or lam_sq_0_m2 is None or fdf_error is None:
         peak_pa0_error_deg = blank
     else:
-        # Brentjens & de Bruyn 2005, eq. A.20: the intrinsic angle is an
-        # extrapolation to lambda^2 = 0, so its error grows with the lever arm
-        # between lam_sq_0_m2 and the spread of the channel lambda^2.
-        lam_sq_arr = lambda_sq_arr_m2[np.isfinite(lambda_sq_arr_m2)]
-        n_chan = lam_sq_arr.size
-        lam_sq_variance = (
-            np.sum(lam_sq_arr**2.0) - np.sum(lam_sq_arr) ** 2.0 / n_chan
-        ) / (n_chan - 1)
-        peak_pa0_error_deg = np.degrees(
-            np.sqrt(
-                peak_pi_error**2.0
-                * n_chan
-                / (4.0 * (n_chan - 2.0) * peak_pi**2.0)
-                * ((n_chan - 1) / n_chan + lam_sq_0_m2**2.0 / lam_sq_variance)
-            )
+        peak_pa0_error_deg = intrinsic_angle_error_deg(
+            peak_pi, peak_pi_error, lam_sq_0_m2, lambda_sq_arr_m2
         )
 
     return FaradayPeaks(
@@ -2125,13 +2186,8 @@ def get_fdf_parameters(
     # (same Ricean correction as the fitted peak) before integrating. The cut
     # is deliberately on the raw amplitude, not the debiased one, so it selects
     # the same samples as `mom0` above; the debiased value is what gets summed.
-    abs_fdf_debias_arr = np.sqrt(
-        np.clip(
-            abs_fdf_arr**2.0
-            - POLARISATION_BIAS_FACTOR * theoretical_noise.fdf_error_noise**2.0,
-            0,
-            None,
-        )
+    abs_fdf_debias_arr = debias_polarised_intensity(
+        abs_fdf_arr, theoretical_noise.fdf_error_noise
     )
     mom0_debias = float(
         calc_faraday_moments(
