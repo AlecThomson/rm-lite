@@ -250,6 +250,12 @@ def best_aic_func(
     best_aic = float(aics[best_aic_idx])
     best_n = int(n_param[best_aic_idx])
     logger.debug(f"Lowest AIC is {best_aic}, with {best_n} params.")
+    if not np.isfinite(best_aic):
+        # Every model is unscoreable (`aic_lsq` returns inf where the AICc
+        # correction diverges), so the comparison below is meaningless and
+        # `inf - inf` would warn. Occam's razor: take the fewest parameters.
+        fewest_idx = int(np.argmin(n_param))
+        return float(aics[fewest_idx]), int(n_param[fewest_idx]), fewest_idx
     # Check if lower have diff < 2 in AIC
     aic_abs_diff = np.abs(aics - best_aic)
     bool_min_idx = np.zeros_like(aics).astype(bool)
@@ -267,6 +273,16 @@ def best_aic_func(
         f"Model within 2 of lowest AIC found. Occam says to take AIC of {bestest_aic}, with {bestest_n} params."
     )
     return bestest_aic, bestest_n, bestest_aic_idx
+
+
+def aic_lsq(ssr: float, n_params: int, n_samples: int) -> float:
+    """AIC of a least-squares fit; inf where the AICc correction blows up."""
+    if n_samples - n_params - 1 <= 0:
+        return float(np.inf)
+    with np.errstate(divide="ignore"):
+        return float(
+            akaike_info_criterion_lsq(ssr=ssr, n_params=n_params, n_samples=n_samples)
+        )
 
 
 def static_fit(
@@ -335,10 +351,7 @@ def static_fit(
             pcov = np.zeros((fit_order + 1, fit_order + 1))
     stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
     ssr = float(np.sum((stokes_i_arr - stokes_i_model_arr) ** 2))
-    with np.errstate(divide="ignore"):
-        aic = akaike_info_criterion_lsq(
-            ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz)
-        )
+    aic = aic_lsq(ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz))
 
     errors = np.sqrt(np.diag(pcov))
     fit_vals = [f"{p:.3g} +/- {e:.3g}" for p, e in zip(popt, errors, strict=False)]
@@ -547,7 +560,9 @@ def fit_stokes_i_model(
     channels remain (`< abs(options.fit_order) + 2`) or, when `options.snr_cut`
     is given, the frequency-averaged SNR is below it -- letting the caller
     impose a flat model for that spectrum. A fit that cannot converge does not
-    raise: `static_fit` falls back to a flat (mean) model.
+    raise: `static_fit` falls back to a flat (mean) model. Right at the minimum
+    channel count the fit is real but its AIC is inf (see `aic_lsq`), so a
+    negative `fit_order` settles on a lower order there.
     """
     fit_order = options.fit_order
     good = np.isfinite(stokes_i_arr) & np.isfinite(stokes_i_error_arr)

@@ -43,6 +43,36 @@ def broadcast_over_channels(
     return arr_1d.reshape(arr_1d.shape[0], *([1] * (target.ndim - 1)))
 
 
+def divide_quiet(numerator: da.Array, denominator: da.Array) -> da.Array:
+    """Elementwise divide, quiet where the denominator is a blank NaN pixel."""
+
+    def _block(
+        numerator_block: NDArray[np.complexfloating],
+        denominator_block: NDArray[np.floating],
+    ) -> NDArray[np.complexfloating]:
+        with np.errstate(invalid="ignore"):
+            return numerator_block / denominator_block
+
+    return da.map_blocks(
+        _block,
+        numerator,
+        denominator,
+        dtype=np.result_type(numerator.dtype, denominator.dtype),
+    )
+
+
+def error_from_weight_cube(weight_arr: da.Array) -> da.Array:
+    """Weight cube to the error cube it implies, `error = 1/sqrt(weight)`."""
+
+    def _block(block: NDArray[np.floating]) -> NDArray[np.floating]:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return cast(NDArray[np.floating], 1.0 / np.sqrt(block))
+
+    return da.map_blocks(
+        _block, weight_arr, dtype=np.result_type(weight_arr.dtype, np.float32)
+    )
+
+
 def float_if_scalar(value: Any) -> float | NDArray[np.float64] | da.Array:
     """A plain float for a 0-d value; anything else is left alone, and lazy."""
     if np.ndim(value) == 0:
