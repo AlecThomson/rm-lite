@@ -269,6 +269,23 @@ def best_aic_func(
     return bestest_aic, bestest_n, bestest_aic_idx
 
 
+def aic_lsq(ssr: float, n_params: int, n_samples: int) -> float:
+    """AIC of a least-squares fit; inf when the small-sample correction blows up.
+
+    The AICc correction astropy applies below 40 samples per parameter divides by
+    `n_samples - n_params - 1`, which is zero at the shortest fittable spectrum
+    (`n_samples == n_params + 1`) and negative below it. The correction diverges
+    there, so the model can never win a comparison: return inf instead of raising
+    ZeroDivisionError or a nonsense negative penalty.
+    """
+    if n_samples - n_params - 1 <= 0:
+        return float(np.inf)
+    with np.errstate(divide="ignore"):
+        return float(
+            akaike_info_criterion_lsq(ssr=ssr, n_params=n_params, n_samples=n_samples)
+        )
+
+
 def static_fit(
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
@@ -335,10 +352,7 @@ def static_fit(
             pcov = np.zeros((fit_order + 1, fit_order + 1))
     stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
     ssr = float(np.sum((stokes_i_arr - stokes_i_model_arr) ** 2))
-    with np.errstate(divide="ignore"):
-        aic = akaike_info_criterion_lsq(
-            ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz)
-        )
+    aic = aic_lsq(ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz))
 
     errors = np.sqrt(np.diag(pcov))
     fit_vals = [f"{p:.3g} +/- {e:.3g}" for p, e in zip(popt, errors, strict=False)]
@@ -547,7 +561,9 @@ def fit_stokes_i_model(
     channels remain (`< abs(options.fit_order) + 2`) or, when `options.snr_cut`
     is given, the frequency-averaged SNR is below it -- letting the caller
     impose a flat model for that spectrum. A fit that cannot converge does not
-    raise: `static_fit` falls back to a flat (mean) model.
+    raise: `static_fit` falls back to a flat (mean) model. Right at the minimum
+    channel count the fit is real but its AIC is inf (see `aic_lsq`), so a
+    negative `fit_order` settles on a lower order there.
     """
     fit_order = options.fit_order
     good = np.isfinite(stokes_i_arr) & np.isfinite(stokes_i_error_arr)

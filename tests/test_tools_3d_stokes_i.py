@@ -950,3 +950,82 @@ def test_coefficient_errors_are_the_covariance_diagonal():
     """The reported per-term error is sqrt(diag(pcov)), padded like the terms."""
     pcov = np.array([[4.0, 1.5], [1.5, 9.0]])
     np.testing.assert_allclose(coefficient_errors(pcov, 3), [2.0, 3.0, 0.0])
+
+
+@pytest.mark.parametrize("fit_order", [0, 1, 2, 3])
+def test_shortest_fittable_spectrum_does_not_divide_by_zero(fit_order: int) -> None:
+    """The shortest spectrum the fitter accepts still fits, with an infinite AIC.
+
+    `fit_stokes_i_model` fits down to `abs(fit_order) + 2` channels, which is
+    exactly where astropy's small-sample AIC correction divides by zero. The fit
+    itself is fine, so it must come back usable rather than raise.
+    """
+    n_chan = fit_order + 2
+    freq_arr_hz = np.linspace(800e6, 1800e6, n_chan)
+    ref_freq_hz = float(np.median(freq_arr_hz))
+    stokes_i = 2.0 * (freq_arr_hz / ref_freq_hz) ** -0.8
+
+    fit = fit_stokes_i_model(
+        freq_arr_hz,
+        ref_freq_hz,
+        stokes_i,
+        np.full_like(stokes_i, 1e-3),
+        options=StokesIFitOptions(fit_order=fit_order, snr_cut=None),
+    )
+    assert fit is not None
+    assert fit.aic == np.inf  # correction undefined here, not a real preference
+    model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt))
+    assert np.isfinite(model).all()
+    if fit_order > 0:  # order 0 is a constant, it cannot follow the slope
+        np.testing.assert_allclose(model, stokes_i, rtol=1e-3)
+
+
+def test_shortest_fittable_spectrum_picks_a_lower_order() -> None:
+    """With the top order's AIC undefined, the dynamic fit takes an order whose
+    AIC is real instead of crashing or preferring the degenerate fit."""
+    freq_arr_hz = np.linspace(800e6, 1800e6, 4)
+    ref_freq_hz = float(np.median(freq_arr_hz))
+    stokes_i = 2.0 * (freq_arr_hz / ref_freq_hz) ** -0.8
+
+    fit = fit_stokes_i_model(
+        freq_arr_hz,
+        ref_freq_hz,
+        stokes_i,
+        np.full_like(stokes_i, 1e-3),
+        options=StokesIFitOptions(fit_order=-2, snr_cut=None),
+    )
+    assert fit is not None
+    assert np.isfinite(fit.aic)
+    assert len(np.asarray(fit.popt)) < 3  # order 2 would need 4 samples to score
+
+
+def test_pixel_with_barely_enough_channels_fits() -> None:
+    """A pixel left with exactly `fit_order + 2` finite channels must not take
+    the whole chunk down. Regression for the ZeroDivisionError out of the AIC."""
+    rng = np.random.default_rng(20260831)
+    n_freq, ny, nx = 32, 2, 2
+    freq = np.linspace(800e6, 1800e6, n_freq)
+    stokes_i = np.broadcast_to(
+        (freq / freq.mean())[:, None, None] ** -0.8, (n_freq, ny, nx)
+    ).copy()
+    stokes_i[4:, 0, 0] = np.nan  # 4 finite channels left, fit_order 2 needs 4
+    q = rng.normal(0, 0.02, (n_freq, ny, nx))
+    u = rng.normal(0, 0.02, (n_freq, ny, nx))
+
+    result = rmsynth_3d(
+        da.from_array(q, chunks=(n_freq, ny, nx)),
+        da.from_array(u, chunks=(n_freq, ny, nx)),
+        freq,
+        stokes_i=da.from_array(stokes_i, chunks=(n_freq, ny, nx)),
+        stokes_i_error=np.full(n_freq, 1e-3),
+        fit_order=2,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    model = np.asarray(_require(result.stokes_i_model_cube).compute())
+    alpha = np.asarray(_require(result.stokes_i_alpha_map).compute())
+
+    assert np.isfinite(model).all()
+    assert np.isfinite(alpha).all()
+    # The short pixel is fitted from its 4 good channels, not flattened.
+    np.testing.assert_allclose(model[:4, 0, 0], stokes_i[:4, 0, 0], rtol=1e-3)
