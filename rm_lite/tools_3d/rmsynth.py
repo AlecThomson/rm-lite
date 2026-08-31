@@ -11,7 +11,11 @@ import numpy as np
 from dask.base import compute
 from numpy.typing import NDArray
 
-from rm_lite.utils.arrays import zero_nonfinite
+from rm_lite.utils.arrays import (
+    divide_quiet,
+    error_from_weight_cube,
+    zero_nonfinite,
+)
 from rm_lite.utils.dask_io import (
     DEFAULT_TARGET_CHUNK_MB,
     complex_pol_dask,
@@ -674,7 +678,7 @@ def rmsynth_3d(
         alpha_error_map = fit_cubes.alpha_error_map
 
     if stokes_i_model_cube is not None:
-        pol_cube = _divide_by_model_cube(pol_cube, stokes_i_model_cube)
+        pol_cube = divide_quiet(pol_cube, stokes_i_model_cube)
         ref_flux_map = da.map_blocks(
             ref_flux_from_block,
             stokes_i_model_cube,
@@ -840,65 +844,6 @@ def get_weight_arr_from_fits(
     return 1.0 / noise_arr**2
 
 
-def _divide_by_model_cube(pol_cube: da.Array, model_cube: da.Array) -> da.Array:
-    """Divide Q+iU by the Stokes I model, quiet where the model is blank.
-
-    A pixel with no finite channels keeps a NaN model, and a complex array
-    divided by NaN raises `invalid value encountered in divide`. That is the
-    intended answer (the pixel's FDF comes back NaN), but the warning fires once
-    per chunk, so a field blanked over most of its area buries the log in it.
-
-    In practice that is the same pixels `_error_from_weight_cube` blanks: a zero
-    weight gives an infinite error in every channel, and the fit's `good` mask
-    wants finite data *and* finite error. Pixels rejected for low SNR or an
-    unusable model are not this case -- they fall back to a flat mean model,
-    which divides without complaint.
-
-    Only `invalid` is suppressed: an exactly-zero model would mean the fit
-    guard let a bad model through, and that divide-by-zero is worth seeing.
-    In the block for the same reason as `_error_from_weight_cube`: the division
-    is lazy, so an `errstate` around it has exited before `compute()` runs it.
-    """
-
-    def _block(
-        pol_block: NDArray[np.complexfloating], model_block: NDArray[np.floating]
-    ) -> NDArray[np.complexfloating]:
-        with np.errstate(invalid="ignore"):
-            return pol_block / model_block
-
-    return da.map_blocks(
-        _block,
-        pol_cube,
-        model_cube,
-        dtype=np.result_type(pol_cube.dtype, model_cube.dtype),
-    )
-
-
-def _error_from_weight_cube(weight_arr: da.Array) -> da.Array:
-    """Turn a weight cube into the error cube it implies, `error = 1/sqrt(weight)`.
-
-    A linmos weight is zero everywhere outside the primary-beam cutoff, so this
-    divides by zero over most of the field. That is the answer we want -- an
-    infinite error drops the pixel from the Stokes I fit and its maps come back
-    NaN -- but numpy warns about it once per chunk, which buries the log on a
-    RACS-sized field. The suppression has to sit inside the block, where the
-    division actually runs: `1 / da.sqrt(...)` only builds a graph node, so an
-    `errstate` wrapped around it has long since exited by the time `compute()`
-    evaluates the division. Wrapping the caller's `compute()` instead would work
-    under the threaded scheduler, which copies the calling context into its
-    workers, but not under `processes`, and it would put the burden on every
-    caller.
-    """
-
-    def _block(block: NDArray[np.floating]) -> NDArray[np.floating]:
-        with np.errstate(divide="ignore", invalid="ignore"):
-            return cast(NDArray[np.floating], 1.0 / np.sqrt(block))
-
-    return da.map_blocks(
-        _block, weight_arr, dtype=np.result_type(weight_arr.dtype, np.float32)
-    )
-
-
 def rmsynth_3d_from_fits(
     stokes_q_file: str | Path,
     stokes_u_file: str | Path,
@@ -1017,7 +962,7 @@ def rmsynth_3d_from_fits(
                 logger.warning(
                     "Interpreting Stokes I error file as weight! Will sqrt & invert"
                 )
-                stokes_i_error = _error_from_weight_cube(stokes_i_error)
+                stokes_i_error = error_from_weight_cube(stokes_i_error)
         elif estimate_stokes_i_noise:
             # Same reason as the Q/U noise above: a frequency-chunked read.
             i_planes, _ = read_fits_cube_channel_chunks(

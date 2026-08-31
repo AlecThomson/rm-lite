@@ -250,6 +250,12 @@ def best_aic_func(
     best_aic = float(aics[best_aic_idx])
     best_n = int(n_param[best_aic_idx])
     logger.debug(f"Lowest AIC is {best_aic}, with {best_n} params.")
+    if not np.isfinite(best_aic):
+        # Every model is unscoreable (`aic_lsq` returns inf where the AICc
+        # correction diverges), so the comparison below is meaningless and
+        # `inf - inf` would warn. Occam's razor: take the fewest parameters.
+        fewest_idx = int(np.argmin(n_param))
+        return float(aics[fewest_idx]), int(n_param[fewest_idx]), fewest_idx
     # Check if lower have diff < 2 in AIC
     aic_abs_diff = np.abs(aics - best_aic)
     bool_min_idx = np.zeros_like(aics).astype(bool)
