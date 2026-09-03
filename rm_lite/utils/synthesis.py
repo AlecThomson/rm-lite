@@ -1255,10 +1255,52 @@ def error_from_weight(
 
 
 def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Natural (inverse-variance) weights; all ones if no noise is given."""
-    if (real_qu_error == 0).all():
+    """Natural (inverse-variance) weights, `1/error**2`.
+
+    An error that is not finite and positive carries no information, so it
+    weights zero. That is the counterpart of ``error_from_weight``'s infinite
+    error for a zero weight, and it is zero rather than the `1/0` infinity on
+    purpose: ``weighted_lam_sq_0`` sums with `nansum`, which keeps infinities,
+    so an infinite weight makes lambda^2_0 NaN and ``compute_rmsynth_params``
+    fall back to the unweighted mean lambda^2. That silently moves the FDF's
+    phase reference and rotates the polarisation angle by phi times the shift.
+
+    Raises:
+        ValueError: An error is negative, which is a caller bug rather than missing data
+    """
+    negative = real_qu_error < 0
+    if negative.any():
+        msg = (
+            f"{int(negative.sum())} of {negative.size} errors are negative "
+            f"(minimum {float(np.min(real_qu_error))}). A noise cannot be "
+            "negative, so this is a caller bug rather than missing data."
+        )
+        raise ValueError(msg)
+
+    # A wholly zero error means no noise was given at all, so weight equally. A
+    # partly zero one means those samples alone carry no information, the
+    # opposite reading of the same value, so the two are kept apart deliberately
+    # rather than falling out of whichever branch a bare `.all()` lands in.
+    if np.all(real_qu_error == 0):
+        logger.debug("No noise given, so weighting every sample equally")
         return np.ones_like(real_qu_error)
-    return 1.0 / real_qu_error**2
+
+    usable = np.isfinite(real_qu_error) & (real_qu_error > 0)
+    n_unusable = int((~usable).sum())
+    if n_unusable:
+        # A blanked pixel is ordinary in a per-pixel (3D) error, and warning per
+        # chunk about it buries the log on a mostly-blank field. A channel
+        # dropped from a per-channel error leaves every pixel's synthesis.
+        log = logger.warning if real_qu_error.ndim == 1 else logger.debug
+        log(
+            f"{n_unusable} of {usable.size} weights are zero: the error there "
+            "is zero or blank, so those samples carry no information"
+        )
+
+    weight = np.zeros_like(real_qu_error)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        np.divide(1.0, real_qu_error**2, out=weight, where=usable)
+    return weight
 
 
 def uniform_lsq_weight(

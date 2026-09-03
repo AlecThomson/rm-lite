@@ -12,9 +12,11 @@ from rm_lite.utils.synthesis import (
     _lambda_sq_density,
     briggs_weight,
     compute_rmsynth_params,
+    error_from_weight,
     freq_to_lambda2,
     natural_weight,
     uniform_lsq_weight,
+    weighted_lam_sq_0,
 )
 
 # Uniform-in-frequency band (real channelised data): dense in lambda^2 at the
@@ -23,6 +25,10 @@ FREQ_HZ = np.linspace(700e6, 1800e6, 300)
 LAMBDA_SQ = freq_to_lambda2(FREQ_HZ)
 ONES = np.ones_like(FREQ_HZ)
 CELL_M2 = float(np.sqrt(3.0) / 300.0)  # lambda^2 gridding cell
+# Rising toward the low-frequency end, as a real per-channel RMS does. Constant
+# noise would weight lambda^2 evenly and make the weighted mean equal the
+# unweighted one, so the lambda^2_0 tests would pass without the fix.
+VARYING_ERROR = np.linspace(2e-3, 0.8e-3, FREQ_HZ.size)
 
 
 def _rmsf_fwhm(weight_arr: NDArray[np.float64]) -> float:
@@ -44,6 +50,68 @@ def test_natural_equals_variance() -> None:
     np.testing.assert_array_equal(
         natural_weight(np.zeros_like(FREQ_HZ)), np.ones_like(FREQ_HZ)
     )
+
+
+def test_natural_weight_drops_unusable_errors() -> None:
+    """A zero or blank error carries no information, so it weights zero rather
+    than the 1/0 infinity."""
+    error = VARYING_ERROR.copy()
+    error[7] = 0.0
+    error[9] = np.nan
+    error[11] = np.inf
+
+    weight = natural_weight(error)
+
+    assert np.array_equal(weight[[7, 9, 11]], np.zeros(3))
+    assert np.isfinite(weight).all(), "an unusable error leaked an inf or nan"
+    # Every other channel is untouched
+    kept = np.setdiff1d(np.arange(error.size), [7, 9, 11])
+    np.testing.assert_allclose(weight[kept], 1.0 / error[kept] ** 2)
+
+
+def test_natural_weight_keeps_lam_sq_0_weighted() -> None:
+    """A zero-error channel must not cost lambda^2_0 its weighting.
+
+    An infinite weight makes ``weighted_lam_sq_0`` NaN (`nansum` keeps
+    infinities), and ``compute_rmsynth_params`` then falls back to the
+    unweighted mean lambda^2. That moves the FDF's phase reference and rotates
+    the polarisation angle by phi times the shift.
+    """
+    error = VARYING_ERROR.copy()
+    error[7] = 0.0
+
+    lam_sq_0 = weighted_lam_sq_0(natural_weight(error), LAMBDA_SQ)
+
+    assert np.isfinite(lam_sq_0)
+    unweighted = float(np.nanmean(LAMBDA_SQ))
+    assert not np.isclose(lam_sq_0, unweighted), (
+        "lambda^2_0 fell back to the unweighted mean"
+    )
+    # It is the weighted reference of the channels that survived
+    expected = weighted_lam_sq_0(
+        natural_weight(np.delete(error, 7)), np.delete(LAMBDA_SQ, 7)
+    )
+    np.testing.assert_allclose(lam_sq_0, expected)
+
+
+def test_natural_weight_rejects_negative_error() -> None:
+    """A negative noise is a caller bug, not missing data, and 1/error**2 would
+    silently turn a small one into a huge weight."""
+    error = VARYING_ERROR.copy()
+    error[5] = -6.1e-5
+
+    with pytest.raises(ValueError, match="negative"):
+        natural_weight(error)
+
+
+def test_natural_weight_round_trips_error_from_weight() -> None:
+    """The two directions agree on what no information means: zero weight <->
+    infinite error."""
+    weight = np.array([4.0, 0.0, 1.0, 0.25])
+
+    error = error_from_weight(weight)
+    assert np.array_equal(np.asarray(error).real, [0.5, np.inf, 1.0, 2.0])
+    np.testing.assert_allclose(natural_weight(np.asarray(error).real), weight)
 
 
 def test_uniform_lsq_narrows_rmsf() -> None:
