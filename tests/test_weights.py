@@ -25,10 +25,15 @@ FREQ_HZ = np.linspace(700e6, 1800e6, 300)
 LAMBDA_SQ = freq_to_lambda2(FREQ_HZ)
 ONES = np.ones_like(FREQ_HZ)
 CELL_M2 = float(np.sqrt(3.0) / 300.0)  # lambda^2 gridding cell
-# Rising toward the low-frequency end, as a real per-channel RMS does. Constant
-# noise would weight lambda^2 evenly and make the weighted mean equal the
-# unweighted one, so the lambda^2_0 tests would pass without the fix.
-VARYING_ERROR = np.linspace(2e-3, 0.8e-3, FREQ_HZ.size)
+
+
+def _varying_error() -> NDArray[np.float64]:
+    """Per-channel RMS rising toward the low-frequency end, as real data does.
+
+    Constant noise weights lambda^2 evenly, which makes the weighted and
+    unweighted means equal, so the lambda^2_0 tests would pass without the fix.
+    """
+    return np.linspace(2e-3, 0.8e-3, FREQ_HZ.size)
 
 
 def _rmsf_fwhm(weight_arr: NDArray[np.float64]) -> float:
@@ -55,7 +60,7 @@ def test_natural_equals_variance() -> None:
 def test_natural_weight_drops_unusable_errors() -> None:
     """A zero or blank error carries no information, so it weights zero rather
     than the 1/0 infinity."""
-    error = VARYING_ERROR.copy()
+    error = _varying_error()
     error[7] = 0.0
     error[9] = np.nan
     error[11] = np.inf
@@ -77,7 +82,7 @@ def test_natural_weight_keeps_lam_sq_0_weighted() -> None:
     unweighted mean lambda^2. That moves the FDF's phase reference and rotates
     the polarisation angle by phi times the shift.
     """
-    error = VARYING_ERROR.copy()
+    error = _varying_error()
     error[7] = 0.0
 
     lam_sq_0 = weighted_lam_sq_0(natural_weight(error), LAMBDA_SQ)
@@ -97,7 +102,7 @@ def test_natural_weight_keeps_lam_sq_0_weighted() -> None:
 def test_natural_weight_rejects_negative_error() -> None:
     """A negative noise is a caller bug, not missing data, and 1/error**2 would
     silently turn a small one into a huge weight."""
-    error = VARYING_ERROR.copy()
+    error = _varying_error()
     error[5] = -6.1e-5
 
     with pytest.raises(ValueError, match="negative"):

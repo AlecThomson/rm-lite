@@ -1258,15 +1258,10 @@ def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
     """Natural (inverse-variance) weights, `1/error**2`.
 
     An error that is not finite and positive carries no information, so it
-    weights zero. That is the counterpart of ``error_from_weight``'s infinite
-    error for a zero weight, and it is zero rather than the `1/0` infinity on
-    purpose: ``weighted_lam_sq_0`` sums with `nansum`, which keeps infinities,
-    so an infinite weight makes lambda^2_0 NaN and ``compute_rmsynth_params``
-    fall back to the unweighted mean lambda^2. That silently moves the FDF's
-    phase reference and rotates the polarisation angle by phi times the shift.
+    weights zero rather than infinity, the counterpart of ``error_from_weight``.
 
     Raises:
-        ValueError: An error is negative, which is a caller bug rather than missing data
+        ValueError: If an error is negative.
     """
     negative = real_qu_error < 0
     if negative.any():
@@ -1277,10 +1272,8 @@ def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
         )
         raise ValueError(msg)
 
-    # A wholly zero error means no noise was given at all, so weight equally. A
-    # partly zero one means those samples alone carry no information, the
-    # opposite reading of the same value, so the two are kept apart deliberately
-    # rather than falling out of whichever branch a bare `.all()` lands in.
+    # Wholly zero means no noise was given, partly zero means those samples
+    # carry none. Opposite readings of the same value, so kept apart explicitly.
     if np.all(real_qu_error == 0):
         logger.debug("No noise given, so weighting every sample equally")
         return np.ones_like(real_qu_error)
@@ -1288,9 +1281,8 @@ def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
     usable = np.isfinite(real_qu_error) & (real_qu_error > 0)
     n_unusable = int((~usable).sum())
     if n_unusable:
-        # A blanked pixel is ordinary in a per-pixel (3D) error, and warning per
-        # chunk about it buries the log on a mostly-blank field. A channel
-        # dropped from a per-channel error leaves every pixel's synthesis.
+        # A dropped channel leaves every pixel's synthesis; a blanked pixel is
+        # ordinary, and warning per chunk buries the log (see #73).
         log = logger.warning if real_qu_error.ndim == 1 else logger.debug
         log(
             f"{n_unusable} of {usable.size} weights are zero: the error there "
