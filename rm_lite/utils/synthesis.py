@@ -1268,7 +1268,7 @@ def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
         msg = (
             f"{int(negative.sum())} of {negative.size} errors are negative "
             f"(minimum {float(np.min(real_qu_error))}). A noise cannot be "
-            "negative, so this is a caller bug rather than missing data."
+            "negative."
         )
         raise ValueError(msg)
 
