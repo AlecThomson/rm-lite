@@ -1255,10 +1255,44 @@ def error_from_weight(
 
 
 def natural_weight(real_qu_error: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Natural (inverse-variance) weights; all ones if no noise is given."""
-    if (real_qu_error == 0).all():
+    """Natural (inverse-variance) weights, `1/error**2`.
+
+    An error that is not finite and positive carries no information, so it
+    weights zero rather than infinity, the counterpart of ``error_from_weight``.
+
+    Raises:
+        ValueError: If an error is negative.
+    """
+    negative = real_qu_error < 0
+    if negative.any():
+        msg = (
+            f"{int(negative.sum())} of {negative.size} errors are negative "
+            f"(minimum {float(np.min(real_qu_error))}). A noise cannot be "
+            "negative."
+        )
+        raise ValueError(msg)
+
+    # Wholly zero means no noise was given, partly zero means those samples
+    # carry none. Opposite readings of the same value, so kept apart explicitly.
+    if np.all(real_qu_error == 0):
+        logger.debug("No noise given, so weighting every sample equally")
         return np.ones_like(real_qu_error)
-    return 1.0 / real_qu_error**2
+
+    usable = np.isfinite(real_qu_error) & (real_qu_error > 0)
+    n_unusable = int((~usable).sum())
+    if n_unusable:
+        # A dropped channel leaves every pixel's synthesis; a blanked pixel is
+        # ordinary, and warning per chunk buries the log (see #73).
+        log = logger.warning if real_qu_error.ndim == 1 else logger.debug
+        log(
+            f"{n_unusable} of {usable.size} weights are zero: the error there "
+            "is zero or blank, so those samples carry no information"
+        )
+
+    weight = np.zeros_like(real_qu_error)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        np.divide(1.0, real_qu_error**2, out=weight, where=usable)
+    return weight
 
 
 def uniform_lsq_weight(
