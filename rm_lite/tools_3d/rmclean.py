@@ -42,8 +42,8 @@ class RMClean3DResults(NamedTuple):
     """Zeroth Faraday moment (total polarised intensity) of the clean FDF,
     lazy dask array of shape (ny, nx). See `calc_faraday_moments`."""
     mom0_debias_map: da.Array
-    """`mom0_map` with the noise's own contribution removed, shape (ny, nx).
-    NaN without `fdf_noise`."""
+    """`mom0_map` less the noise's own contribution, shape (ny, nx). NaN
+    without `fdf_noise`."""
     mom0_error_map: da.Array
     """1-sigma error on `mom0_map`, shape (ny, nx). NaN without `fdf_noise`."""
     mom1_map: da.Array
@@ -56,9 +56,9 @@ class RMClean3DResults(NamedTuple):
     """1-sigma error on `mom2_map` in rad/m^2, shape (ny, nx). NaN without `fdf_noise`."""
     pi_lam_sq_0_map: da.Array
     """Polarised intensity at the reference lambda^2, on the `mom0_map` scale,
-    shape (ny, nx). `mom0_map` ignores the phase; this keeps it, so the ratio of
-    the two is the depolarisation there. A per-pixel `lam_sq_0_m2` measures each
-    pixel at a different wavelength, so pin one reference for a map."""
+    shape (ny, nx). `mom0_map` drops the phase, this keeps it, so the ratio is
+    the depolarisation there. Pin one `lam_sq_0_m2` for a map: per-pixel puts
+    every pixel at a different wavelength."""
     pi_lam_sq_0_debias_map: da.Array
     """`pi_lam_sq_0_map` corrected for polarisation bias, shape (ny, nx). NaN
     without `fdf_noise`."""
@@ -333,12 +333,10 @@ def run_rmclean(
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
         moment_threshold (float | None, optional): Amplitude cut (in FDF
-            amplitude units) applied to the clean FDF before the Faraday moment
-            maps, passed to `calc_faraday_moments`. mom1 and mom2 need it:
-            unbounded, the noise sits at lever arm `phi_max` and mom2 reports
-            the grid's width rather than the source's. None keeps every
-            amplitude, which `mom0_debias_map` handles but mom1/mom2 do not.
-            Peak maps are never cut. Defaults to None.
+            amplitude units) applied before the Faraday moment maps, passed to
+            `calc_faraday_moments`. mom1 and mom2 need it: uncut, mom2 reports
+            the grid's width rather than the source's. `mom0_debias_map` does
+            not. Peak maps are never cut. Defaults to None.
         fdf_noise (float | None, optional): Theoretical FDF noise; enables the
             adaptive off-source auto-mask (mask contracts off the RMSF sidelobes of
             bright sources, then relaxes as they subtract) and the peak errors

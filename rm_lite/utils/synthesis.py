@@ -237,8 +237,7 @@ class FaradayMoments(NamedTuple):
     mom0: NDArray[np.float64]
     """Zeroth moment: total polarised intensity, in the input FDF amplitude units"""
     mom0_debias: NDArray[np.float64]
-    """`mom0` with the noise's own contribution to the sum removed; NaN
-    without `fdf_error`"""
+    """`mom0` less the noise's own contribution; NaN without `fdf_error`"""
     mom0_error: NDArray[np.float64]
     """1-sigma error on `mom0`; NaN without `fdf_error`"""
     mom1: NDArray[np.float64]
@@ -251,8 +250,8 @@ class FaradayMoments(NamedTuple):
     """1-sigma error on `mom2` in rad/m^2; NaN without `fdf_error`"""
     pi_lam_sq_0: NDArray[np.float64]
     """Polarised intensity at the reference lambda^2, `|sum(FDF)|` on the `mom0`
-    scale. `mom0` ignores the phase; this keeps it, so the ratio of the two is
-    the depolarisation there. NaN for real input"""
+    scale. `mom0` drops the phase, this keeps it, so `pi_lam_sq_0 / mom0` is the
+    depolarisation there. NaN for real input"""
     pi_lam_sq_0_debias: NDArray[np.float64]
     """`pi_lam_sq_0` corrected for polarisation bias; NaN without `fdf_error`"""
     pi_lam_sq_0_error: NDArray[np.float64]
@@ -312,8 +311,8 @@ def calc_faraday_moments(
             An array must broadcast against the FDF shape with the Faraday depth axis removed.
         axis (int, optional): Faraday depth axis of `complex_fdf_arr`. Defaults to 0.
         fdf_error (float | NDArray[np.float64] | None, optional): 1-sigma FDF
-            noise per component (e.g. `TheoreticalNoise.fdf_error_noise`).
-            Every error and debiased field is NaN without it. Defaults to None.
+            noise per component (e.g. `TheoreticalNoise.fdf_error_noise`). Every
+            error and debiased field is NaN without it. Defaults to None.
         threshold (float | None, optional): Exclude amplitudes below this value
             (in FDF amplitude units). Not supported with `debias=True`. Defaults to None.
         auto_threshold_sigma (float | None, optional): Exclude amplitudes below this
@@ -342,11 +341,10 @@ def calc_faraday_moments(
             reference lambda^2, and an error for each. Spectra with no valid
             amplitude have mom0 = 0 and mom1 = mom2 = NaN.
 
-    Errors are first-order propagation of `fdf_error`, scaled by
-    `fwhm_rmsf_radm2 / delta_phi` because the FDF noise is correlated over one
-    RMSF width. Good to ~20% where the summed samples carry signal;
-    conservative by ~1.5x over the whole grid, and for mom1 within a few sigma
-    of the detection limit.
+    Errors propagate `fdf_error` to first order, scaled by
+    `fwhm_rmsf_radm2 / delta_phi` since the noise is correlated over one RMSF
+    width. Good to ~20% on samples carrying signal, ~1.5x conservative over the
+    whole grid and for mom1 near the detection limit.
     """
     if threshold is not None and auto_threshold_sigma is not None:
         msg = "`threshold` and `auto_threshold_sigma` are mutually exclusive."
@@ -433,7 +431,7 @@ def calc_faraday_moments(
     )
     mom2 = np.sqrt(np.where(mom2_variance >= 0, mom2_variance, np.nan))
 
-    # The noise terms scale with the Faraday depth actually summed, not the grid
+    # Noise terms scale with the Faraday depth summed, not the grid
     valid = np.isfinite(abs_fdf_arr)
     n_used = np.sum(valid, axis=axis, keepdims=True)
     # Lever arms about mom1, for the mom1/mom2 errors
@@ -450,14 +448,13 @@ def calc_faraday_moments(
     mom0 = np.squeeze(weight_sum, axis=axis) * delta_phi / rmsf_area
     mom1_out = np.squeeze(mom1, axis=axis)
     mom2_out = np.squeeze(mom2, axis=axis)
-    # RMSF areas integrated, the scale factor for the noise terms
+    # RMSF areas integrated: the noise terms all scale with this
     areas = np.squeeze(n_used, axis=axis) * delta_phi / rmsf_area
 
     is_complex = bool(np.iscomplexobj(complex_fdf_arr))
     if is_complex:
-        # Summing the complex FDF keeps the phase, so on a deconvolved FDF this
-        # is exactly `sum_k P_k exp(2i(psi_k + phi_k lam_sq_0))`, the source's
-        # polarisation at the reference lambda^2.
+        # Keeping the phase makes this exactly `sum_k P_k exp(2i(psi_k + phi_k
+        # lam_sq_0))` on a deconvolved FDF: the polarisation at lam_sq_0.
         coherent_sum = np.squeeze(
             np.sum(np.where(valid, complex_fdf_arr, 0), axis=axis, keepdims=True),
             axis=axis,
@@ -478,16 +475,14 @@ def calc_faraday_moments(
         pa_lam_sq_0_error = pa_lam_sq_0 * np.nan
     else:
         mom0_error = fdf_error * np.sqrt(areas)
-        # `np.abs` rectifies, so each RMSF-width cell in the summed range adds
-        # E|noise| = sigma sqrt(pi/2) with the same sign and the noise piles up
-        # instead of cancelling. Signed input is already zero-mean in noise.
+        # `np.abs` rectifies, so each RMSF-width cell adds sigma sqrt(pi/2) with
+        # the same sign and noise piles up. Signed input is already zero-mean.
         if is_complex and not debias:
             mom0_debias = mom0 - np.sqrt(np.pi / 2) * fdf_error * areas
         else:
             mom0_debias = mom0
-        # Denominators are NaN, not zero, where they degenerate, so NaN
-        # propagates quietly instead of warning per pixel. `np.errstate` cannot
-        # do this job: it never reaches a dask worker at compute time.
+        # NaN denominators, not zero, so degenerate spectra go quietly NaN.
+        # `np.errstate` cannot do this: it never reaches a dask worker.
         weights = np.squeeze(safe_weight_sum, axis=axis)
         n_corr = np.sqrt(fwhm_rmsf_radm2 / delta_phi)
         mom1_error = (
@@ -501,7 +496,7 @@ def calc_faraday_moments(
         )
         mom2_error = variance_error / np.where(mom2_out > 0, 2.0 * mom2_out, np.nan)
         # One complex quantity, so the peak's Ricean debias applies unchanged.
-        # Reusing the mom0 error is ~17% conservative here.
+        # Reusing the mom0 error is ~17% conservative.
         pi_lam_sq_0_error = fdf_error * np.sqrt(areas)
         pi_lam_sq_0_debias = debias_polarised_intensity(pi_lam_sq_0, pi_lam_sq_0_error)
         pa_lam_sq_0_error = polarisation_angle_error_deg(
@@ -2217,9 +2212,9 @@ def get_fdf_parameters(
     below `moment_threshold_snr` times the theoretical FDF noise excluded.
     Pass `deconvolved=True` for a clean FDF; a dirty one carries RMSF sidelobe
     flux into mom0 and warns.
-    `mom0_debias` removes the noise's own contribution to that sum.
-    `pi_lam_sq_0` sums the complex FDF rather than its amplitude, giving the
-    polarised intensity at `lam_sq_0_m2`.
+    `mom0_debias` removes the noise's own contribution. `pi_lam_sq_0` sums the
+    complex FDF rather than its amplitude, giving the polarised intensity at
+    `lam_sq_0_m2`.
     """
 
     abs_fdf_arr = np.abs(fdf_arr)
@@ -2298,9 +2293,8 @@ def get_fdf_parameters(
     peak_pi_fit_debias = float(peak_stats.peak_pi_debias)
 
     if not deconvolved:
-        # |RMSF| sidelobes are all positive, so summing a dirty FDF's amplitude
-        # sums them too: mom0 reads high by `int|RMSF|` over the main-lobe area,
-        # 1.6x to 2.8x across a plausible `phi_max`. No cut reaches it, since a
+        # |RMSF| sidelobes are positive, so a dirty FDF sums them into mom0:
+        # 1.6x to 2.8x high across a plausible `phi_max`. No cut reaches it, a
         # bright source's sidelobes clear any sensible threshold.
         logger.warning(
             "Faraday moments are being measured on a dirty FDF: mom0 and "
