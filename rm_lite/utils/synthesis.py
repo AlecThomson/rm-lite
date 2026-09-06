@@ -2209,8 +2209,6 @@ def get_fdf_parameters(
 
     Faraday moments (see `calc_faraday_moments`) are computed with amplitudes
     below `moment_threshold_snr` times the theoretical FDF noise excluded.
-    The moments want a clean FDF: |RMSF| sidelobes are positive, so a dirty one
-    sums them into mom0 and reads 1.6x to 2.8x high.
     `mom0_debias` removes the noise's own contribution. `pi_lam_sq_0` sums the
     complex FDF rather than its amplitude, giving the polarised intensity at
     `lam_sq_0_m2`.
