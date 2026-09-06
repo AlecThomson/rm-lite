@@ -716,10 +716,9 @@ def test_fractional_spectra_falls_back_rather_than_raising() -> None:
 
 
 def test_moments_noise_flux_closed_form():
-    # Under noise alone, abs() rectifies: each independent RMSF-width cell in
-    # the summed range contributes E|noise| = sigma sqrt(pi/2) with the same
-    # sign, so mom0 grows linearly with the range. mom0_debias removes exactly
-    # that, and must sit on zero.
+    # abs() rectifies, so each RMSF-width cell in the summed range adds
+    # sigma sqrt(pi/2) with the same sign and mom0 grows with the range.
+    # mom0_debias removes exactly that and must sit on zero.
     rng = np.random.default_rng(20240904)
     fwhm = 57.4
     sigma = 0.05
@@ -740,10 +739,9 @@ def test_moments_noise_flux_closed_form():
 
 
 def test_moments_pi_lam_sq_0_is_polarisation_at_reference():
-    # Summing the complex FDF keeps the phase, so on a deconvolved FDF the
-    # result is the source's polarisation at lam_sq_0: sum_k P_k exp(2i(psi_k +
-    # phi_k lam_sq_0)). Built here as a restored clean FDF, which is what the
-    # pipelines hand to `calc_faraday_moments`.
+    # Summing the complex FDF keeps the phase, so on a deconvolved FDF it gives
+    # the source's polarisation at lam_sq_0, sum_k P_k exp(2i(psi_k + phi_k
+    # lam_sq_0)). Built as a restored clean FDF, what the pipelines pass in.
     phi_arr = make_phi_arr(600.0, 1.0)
     fwhm = 60.0
     lam_sq_0_m2 = 0.1
@@ -771,9 +769,8 @@ def test_moments_pi_lam_sq_0_is_polarisation_at_reference():
 
 def test_moments_pi_lam_sq_0_cancels_where_mom0_does_not():
     # Polarisation phase is 2*psi, so two equal components 90 deg apart in
-    # intrinsic angle are antiparallel and cancel in the coherent sum, while
-    # the amplitude sum is unchanged. This is the one thing in the output set
-    # that is sensitive to the relative angle between components.
+    # intrinsic angle are antiparallel and cancel in the coherent sum while the
+    # amplitude sum is unchanged. Nothing else here sees the relative angle.
     phi_arr = make_phi_arr(600.0, 1.0)
     fwhm = 60.0
 
@@ -841,14 +838,14 @@ def test_moments_errors_need_fdf_error():
         assert np.isfinite(getattr(witherr, field)), field
 
 
-def _clean_fdf_realisation(
+def clean_fdf_realisation(
     rng: Generator, amplitude: float, rm_radm2: float = 40.0
 ) -> tuple[NDArray[np.complex128], NDArray[np.float64], float, float]:
-    """A realistic clean FDF: restored component plus RM-synthesis residual noise.
+    """Restored component plus RM-synthesis residual noise.
 
-    The residual has to come through RM-synthesis, not be drawn in Faraday
-    depth: FDF noise is correlated over one RMSF width and the moment errors
-    are derived for exactly that covariance.
+    The residual has to come through RM-synthesis rather than be drawn in
+    Faraday depth: FDF noise is correlated over one RMSF width, which is the
+    covariance the moment errors assume.
     """
     freq_arr_hz = np.linspace(0.8e9, 1.1e9, 288)
     n_chan = freq_arr_hz.size
@@ -878,18 +875,16 @@ def _clean_fdf_realisation(
 
 
 def test_moments_errors_track_monte_carlo_scatter():
-    # The reported errors are first-order propagation with a correlation factor
-    # of one RMSF width. With a threshold in place, so the summed samples carry
-    # signal, they track the realised scatter to within ~25%. Near the
-    # detection limit which samples clear the cut becomes the dominant
-    # variance, which first-order propagation cannot see, so mom1 degrades to
-    # ~1.5x; pin that too rather than leave it to be discovered.
+    # With a threshold in place, so the summed samples carry signal, the errors
+    # track the realised scatter to within ~25%. Near the detection limit which
+    # samples clear the cut dominates the variance, which first-order
+    # propagation cannot see, so mom1 degrades to ~1.5x. Pin both.
     def ratios(amplitude: float) -> NDArray[np.float64]:
         rng = np.random.default_rng(4)
         realised = []
         reported = []
         for _ in range(120):
-            fdf, phi_arr, fwhm, sigma = _clean_fdf_realisation(rng, amplitude)
+            fdf, phi_arr, fwhm, sigma = clean_fdf_realisation(rng, amplitude)
             moments = calc_faraday_moments(
                 fdf, phi_arr, fwhm, fdf_error=sigma, threshold=5 * sigma
             )
@@ -913,16 +908,15 @@ def test_moments_errors_track_monte_carlo_scatter():
 
 
 def test_moments_errors_are_conservative_without_a_cut():
-    # Noise-only samples scatter by sqrt(2 - pi/2) sigma rather than a full
-    # sigma, so summing the whole grid makes the reported errors too large
-    # rather than too small. Erring that way is the safe direction, but the
-    # margin is worth pinning: no cut must never under-report.
+    # Noise-only amplitudes scatter by sqrt(2 - pi/2) sigma, not a full sigma,
+    # so summing the whole grid over-reports the errors. That is the safe
+    # direction, but pin the margin: no cut must never under-report.
     rng = np.random.default_rng(5)
 
     realised = []
     reported = []
     for _ in range(120):
-        fdf, phi_arr, fwhm, sigma = _clean_fdf_realisation(rng, amplitude=1.0)
+        fdf, phi_arr, fwhm, sigma = clean_fdf_realisation(rng, amplitude=1.0)
         moments = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_error=sigma)
         realised.append([float(moments.mom0), float(moments.pi_lam_sq_0)])
         reported.append([float(moments.mom0_error), float(moments.pi_lam_sq_0_error)])
@@ -931,9 +925,8 @@ def test_moments_errors_are_conservative_without_a_cut():
 
 
 def test_moments_span_sets_the_noise_terms():
-    # Both the noise flux and the errors scale with the Faraday depth actually
-    # summed, not with the grid: a threshold that keeps fewer samples must
-    # shrink them.
+    # The noise flux and the errors scale with the Faraday depth actually
+    # summed, not the grid, so a threshold that keeps fewer samples shrinks them.
     rng = np.random.default_rng(11)
     phi_arr = make_phi_arr(500.0, 2.0)
     fwhm = 60.0
