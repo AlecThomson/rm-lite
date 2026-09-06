@@ -275,6 +275,45 @@ def _require_single_chunk_on_axis(arr: Any, axis: int, reason: str) -> None:
         raise ValueError(msg)
 
 
+def coherent_polarisation(
+    complex_fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    valid: NDArray[np.bool_],
+    axis: int,
+    scale: float | NDArray[np.float64],
+    nan_like: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """`|sum(FDF)|` and its polarisation angle, scaled to the `mom0` units.
+
+    Real input carries no phase, so both are NaN.
+    """
+    if not np.iscomplexobj(complex_fdf_arr):
+        return nan_like * np.nan, nan_like * np.nan
+    # Keeping the phase makes this exactly `sum_k P_k exp(2i(psi_k + phi_k
+    # lam_sq_0))` on a deconvolved FDF: the polarisation at lam_sq_0.
+    total = (
+        np.squeeze(
+            np.sum(np.where(valid, complex_fdf_arr, 0), axis=axis, keepdims=True),
+            axis=axis,
+        )
+        * scale
+    )
+    return np.abs(total), polarisation_angle_deg(total)
+
+
+def weighted_moment_error(
+    fdf_error: float | NDArray[np.float64],
+    deviation_sq_sum: NDArray[np.float64],
+    weight_sum: NDArray[np.float64],
+    n_correlated: float | NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """1-sigma error on a weight-normalised sum of squared deviations.
+
+    `n_correlated` is how many samples the noise is correlated over, so an
+    independent-sample sum can be scaled up to the real covariance.
+    """
+    return fdf_error * np.sqrt(n_correlated * deviation_sq_sum) / weight_sum
+
+
 def calc_faraday_moments(
     complex_fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
     phi_arr_radm2: NDArray[np.float64],
@@ -451,57 +490,40 @@ def calc_faraday_moments(
     # RMSF areas integrated: the noise terms all scale with this
     areas = np.squeeze(n_used, axis=axis) * delta_phi / rmsf_area
 
-    is_complex = bool(np.iscomplexobj(complex_fdf_arr))
-    if is_complex:
-        # Keeping the phase makes this exactly `sum_k P_k exp(2i(psi_k + phi_k
-        # lam_sq_0))` on a deconvolved FDF: the polarisation at lam_sq_0.
-        coherent_sum = np.squeeze(
-            np.sum(np.where(valid, complex_fdf_arr, 0), axis=axis, keepdims=True),
-            axis=axis,
-        ) * (delta_phi / rmsf_area)
-        pi_lam_sq_0 = np.abs(coherent_sum)
-        pa_lam_sq_0 = polarisation_angle_deg(coherent_sum)
-    else:
-        pi_lam_sq_0 = mom0 * np.nan
-        pa_lam_sq_0 = mom0 * np.nan
+    pi_lam_sq_0, pa_lam_sq_0 = coherent_polarisation(
+        complex_fdf_arr, valid, axis, delta_phi / rmsf_area, mom0
+    )
 
+    # An unknown noise is a NaN noise: every formula below then returns NaN on
+    # its own, with no separate branch for it.
     if fdf_error is None:
-        mom0_debias = mom0 * np.nan
-        mom0_error = mom0 * np.nan
-        mom1_error = mom1_out * np.nan
-        mom2_error = mom2_out * np.nan
-        pi_lam_sq_0_debias = pi_lam_sq_0 * np.nan
-        pi_lam_sq_0_error = pi_lam_sq_0 * np.nan
-        pa_lam_sq_0_error = pa_lam_sq_0 * np.nan
-    else:
-        mom0_error = fdf_error * np.sqrt(areas)
-        # `np.abs` rectifies, so each RMSF-width cell adds sigma sqrt(pi/2) with
-        # the same sign and noise piles up. Signed input is already zero-mean.
-        if is_complex and not debias:
-            mom0_debias = mom0 - np.sqrt(np.pi / 2) * fdf_error * areas
-        else:
-            mom0_debias = mom0
-        # NaN denominators, not zero, so degenerate spectra go quietly NaN.
-        # `np.errstate` cannot do this: it never reaches a dask worker.
-        weights = np.squeeze(safe_weight_sum, axis=axis)
-        n_corr = np.sqrt(fwhm_rmsf_radm2 / delta_phi)
-        mom1_error = (
-            fdf_error * n_corr * np.sqrt(np.squeeze(lever_sq_sum, axis=axis)) / weights
-        )
-        variance_error = (
-            fdf_error
-            * n_corr
-            * np.sqrt(np.squeeze(var_dev_sq_sum, axis=axis))
-            / weights
-        )
-        mom2_error = variance_error / np.where(mom2_out > 0, 2.0 * mom2_out, np.nan)
-        # One complex quantity, so the peak's Ricean debias applies unchanged.
-        # Reusing the mom0 error is ~17% conservative.
-        pi_lam_sq_0_error = fdf_error * np.sqrt(areas)
-        pi_lam_sq_0_debias = debias_polarised_intensity(pi_lam_sq_0, pi_lam_sq_0_error)
-        pa_lam_sq_0_error = polarisation_angle_error_deg(
-            np.where(pi_lam_sq_0 > 0, pi_lam_sq_0, np.nan), pi_lam_sq_0_error
-        )
+        fdf_error = np.nan
+    # `np.abs` rectifies, so each RMSF-width cell adds sigma sqrt(pi/2) with the
+    # same sign and noise piles up. Signed input is already zero-mean, so there
+    # is nothing to take off.
+    rectification = (
+        np.sqrt(np.pi / 2) if np.iscomplexobj(complex_fdf_arr) and not debias else 0.0
+    )
+    mom0_error = fdf_error * np.sqrt(areas)
+    mom0_debias = mom0 - rectification * fdf_error * areas
+    # NaN denominators, not zero, so degenerate spectra go quietly NaN.
+    # `np.errstate` cannot do this: it never reaches a dask worker.
+    weights = np.squeeze(safe_weight_sum, axis=axis)
+    n_correlated = fwhm_rmsf_radm2 / delta_phi
+    mom1_error = weighted_moment_error(
+        fdf_error, np.squeeze(lever_sq_sum, axis=axis), weights, n_correlated
+    )
+    variance_error = weighted_moment_error(
+        fdf_error, np.squeeze(var_dev_sq_sum, axis=axis), weights, n_correlated
+    )
+    mom2_error = variance_error / np.where(mom2_out > 0, 2.0 * mom2_out, np.nan)
+    # One complex quantity, so the peak's Ricean debias applies unchanged.
+    # Reusing the mom0 error is ~17% conservative.
+    pi_lam_sq_0_error = fdf_error * np.sqrt(areas)
+    pi_lam_sq_0_debias = debias_polarised_intensity(pi_lam_sq_0, pi_lam_sq_0_error)
+    pa_lam_sq_0_error = polarisation_angle_error_deg(
+        np.where(pi_lam_sq_0 > 0, pi_lam_sq_0, np.nan), pi_lam_sq_0_error
+    )
 
     return FaradayMoments(
         mom0=mom0,
