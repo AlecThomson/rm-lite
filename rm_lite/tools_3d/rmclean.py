@@ -41,14 +41,38 @@ class RMClean3DResults(NamedTuple):
     mom0_map: da.Array
     """Zeroth Faraday moment (total polarised intensity) of the clean FDF,
     lazy dask array of shape (ny, nx). See `calc_faraday_moments`."""
+    mom0_debias_map: da.Array
+    """`mom0_map` less the noise's own contribution, shape (ny, nx). NaN
+    without `fdf_noise`."""
+    mom0_error_map: da.Array
+    """1-sigma error on `mom0_map`, shape (ny, nx). NaN without `fdf_noise`."""
     mom1_map: da.Array
     """First Faraday moment (mean Faraday depth, rad/m^2), shape (ny, nx)."""
+    mom1_error_map: da.Array
+    """1-sigma error on `mom1_map` in rad/m^2, shape (ny, nx). NaN without `fdf_noise`."""
     mom2_map: da.Array
     """Second Faraday moment (Faraday depth dispersion, rad/m^2), shape (ny, nx)."""
+    mom2_error_map: da.Array
+    """1-sigma error on `mom2_map` in rad/m^2, shape (ny, nx). NaN without `fdf_noise`."""
+    pi_lam_sq_0_map: da.Array
+    """Polarised intensity at the reference lambda^2, on the `mom0_map` scale,
+    shape (ny, nx). `mom0_map` drops the phase, this keeps it, so the ratio is
+    the depolarisation there. Pin one `lam_sq_0_m2` for a map: per-pixel puts
+    every pixel at a different wavelength."""
+    pi_lam_sq_0_debias_map: da.Array
+    """`pi_lam_sq_0_map` corrected for polarisation bias, shape (ny, nx). NaN
+    without `fdf_noise`."""
+    pi_lam_sq_0_error_map: da.Array
+    """1-sigma error on `pi_lam_sq_0_map`, shape (ny, nx). NaN without `fdf_noise`."""
+    pa_lam_sq_0_map: da.Array
+    """Polarisation angle of `pi_lam_sq_0_map` in degrees, shape (ny, nx)."""
+    pa_lam_sq_0_error_map: da.Array
+    """1-sigma error on `pa_lam_sq_0_map` in degrees, shape (ny, nx). NaN
+    without `fdf_noise`."""
     peak_pi_map: da.Array
     """Peak polarised intensity of the clean FDF, shape (ny, nx). See
-    `calc_faraday_peaks`. NaN where no peak was found, or where it is below
-    `moment_threshold`."""
+    `calc_faraday_peaks`. NaN where no peak was found. No detection cut is
+    applied, so select on `peak_pi_map / peak_pi_error_map`."""
     peak_pi_debias_map: da.Array
     """Peak polarised intensity corrected for polarisation bias, shape (ny, nx).
     NaN without `fdf_noise`."""
@@ -309,10 +333,10 @@ def run_rmclean(
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
         moment_threshold (float | None, optional): Amplitude cut (in FDF
-            amplitude units) applied to the clean FDF before computing the
-            Faraday moment maps, passed to `calc_faraday_moments`. None includes
-            all amplitudes (noise-biased). Also blanks peaks below it, so every
-            2D map returned here is cut the same way. Defaults to None.
+            amplitude units) applied before the Faraday moment maps, passed to
+            `calc_faraday_moments`. mom1 and mom2 need it: uncut, mom2 reports
+            the grid's width rather than the source's. `mom0_debias_map` does
+            not. Peak maps are never cut. Defaults to None.
         fdf_noise (float | None, optional): Theoretical FDF noise; enables the
             adaptive off-source auto-mask (mask contracts off the RMSF sidelobes of
             bright sources, then relaxes as they subtract) and the peak errors
@@ -414,6 +438,7 @@ def run_rmclean(
         clean,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_error=fdf_noise,
         threshold=moment_threshold,
     )
     peaks = calc_faraday_peaks(
@@ -423,7 +448,6 @@ def run_rmclean(
         fdf_error=fdf_noise,
         lam_sq_0_m2=lam_sq_0_m2,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
-        threshold=moment_threshold,
     )
 
     return RMClean3DResults(
@@ -432,8 +456,17 @@ def run_rmclean(
         resid_fdf_cube=resid,
         iter_count_map=iter_count,
         mom0_map=moments.mom0,
+        mom0_debias_map=moments.mom0_debias,
+        mom0_error_map=moments.mom0_error,
         mom1_map=moments.mom1,
+        mom1_error_map=moments.mom1_error,
         mom2_map=moments.mom2,
+        mom2_error_map=moments.mom2_error,
+        pi_lam_sq_0_map=moments.pi_lam_sq_0,
+        pi_lam_sq_0_debias_map=moments.pi_lam_sq_0_debias,
+        pi_lam_sq_0_error_map=moments.pi_lam_sq_0_error,
+        pa_lam_sq_0_map=moments.pa_lam_sq_0,
+        pa_lam_sq_0_error_map=moments.pa_lam_sq_0_error,
         peak_pi_map=peaks.peak_pi,
         peak_pi_debias_map=peaks.peak_pi_debias,
         peak_pi_error_map=peaks.peak_pi_error,
@@ -482,8 +515,9 @@ def run_rmclean_from_synth(
         max_iter (int, optional): Maximum CLEAN iterations. Defaults to 1000.
         gain (float, optional): CLEAN loop gain. Defaults to 0.1.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical
-            FDF noise) applied to the clean FDF before computing the Faraday
-            moment maps, and below which peaks are blanked. Defaults to 5.0.
+            FDF noise) applied before the Faraday moment maps, see
+            `run_rmclean`. Peak maps are never cut; select on
+            `peak_pi_map / peak_pi_error_map`. Defaults to 5.0.
         log_level (int, optional): See `run_rmclean`. Defaults to `logging.ERROR`.
         multiscale (bool, optional): Use multiscale RM-CLEAN (recovers
             Faraday-thick structure). Defaults to False.
@@ -492,7 +526,7 @@ def run_rmclean_from_synth(
 
     Returns:
         RMClean3DResults: Lazy clean/model/residual FDF cubes, iteration-count
-            map, and the Faraday moment and peak maps. The peak maps carry the
+            map, and the Faraday moment and peak maps, each with errors. The peak maps carry the
             errors and intrinsic angle, since the reference wavelength^2 and
             theoretical noise come with the synthesis results.
     """
