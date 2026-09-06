@@ -170,7 +170,6 @@ def run_rmclean_from_synth(
 
     fdf_parameters = get_fdf_parameters(
         fdf_arr=rm_clean_results.clean_fdf_arr,
-        deconvolved=True,
         phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
         fwhm_rmsf_radm2=float(
             fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float).squeeze()

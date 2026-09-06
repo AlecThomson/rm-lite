@@ -330,6 +330,11 @@ def _run_rmsynth(
 
     # Measure the parameters of the dirty FDF
     # Use the theoretical noise to calculate uncertainties
+    logger.warning(
+        "Measuring Faraday moments on a dirty FDF: mom0 and pi_lam_sq_0 carry "
+        "RMSF sidelobe flux and read high. Run RM-CLEAN and take the moments "
+        "from the clean FDF."
+    )
     fdf_parameters = get_fdf_parameters(
         fdf_arr=fdf_dirty_arr,
         phi_arr_radm2=rmsynth_params.phi_arr_radm2,

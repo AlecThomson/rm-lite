@@ -2200,7 +2200,6 @@ def get_fdf_parameters(
     fit_function: Literal["log", "linear"],
     bias_correction_snr: float = 5.0,
     moment_threshold_snr: float = 5.0,
-    deconvolved: bool = False,
 ) -> pl.DataFrame:
     """
     Measure standard parameters from a complex Faraday Dispersion Function.
@@ -2210,8 +2209,8 @@ def get_fdf_parameters(
 
     Faraday moments (see `calc_faraday_moments`) are computed with amplitudes
     below `moment_threshold_snr` times the theoretical FDF noise excluded.
-    Pass `deconvolved=True` for a clean FDF; a dirty one carries RMSF sidelobe
-    flux into mom0 and warns.
+    The moments want a clean FDF: |RMSF| sidelobes are positive, so a dirty one
+    sums them into mom0 and reads 1.6x to 2.8x high.
     `mom0_debias` removes the noise's own contribution. `pi_lam_sq_0` sums the
     complex FDF rather than its amplitude, giving the polarised intensity at
     `lam_sq_0_m2`.
@@ -2292,15 +2291,6 @@ def get_fdf_parameters(
     )
     peak_pi_fit_debias = float(peak_stats.peak_pi_debias)
 
-    if not deconvolved:
-        # |RMSF| sidelobes are positive, so a dirty FDF sums them into mom0:
-        # 1.6x to 2.8x high across a plausible `phi_max`. No cut reaches it, a
-        # bright source's sidelobes clear any sensible threshold.
-        logger.warning(
-            "Faraday moments are being measured on a dirty FDF: mom0 and "
-            "pi_lam_sq_0 carry RMSF sidelobe flux and read high. Run RM-CLEAN "
-            "and take the moments from the clean FDF."
-        )
     moment_threshold = moment_threshold_snr * theoretical_noise.fdf_error_noise
     moments = calc_faraday_moments(
         complex_fdf_arr=fdf_arr,
