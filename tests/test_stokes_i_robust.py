@@ -1,8 +1,8 @@
 """Tests for bad-channel robustness in the Stokes I fit.
 
-A bad flux is handled by `robust_loss`, a bad error by `usable_error_mask`, so
-both are covered. They are separate because the fit follows a channel whose
-error is too small, leaving it no residual for the loss to catch it by.
+`robust_loss` covers a channel bad in flux or in error, since either way it ends
+up far from the model in sigma. Errors that cannot weight a fit at all (zero,
+negative, non-finite) are dropped before it.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from rm_lite.utils.fitting import (
     power_law,
     static_fit,
     stokes_i_snr,
-    usable_error_mask,
 )
 from scipy import optimize
 
@@ -117,13 +116,12 @@ def test_robust_loss_costs_nothing_on_clean_data() -> None:
     assert robust < 2 * plain
 
 
-@pytest.mark.parametrize("robust_loss", ["cauchy", "soft_l1", "huber"])
-def test_every_robust_loss_beats_plain_least_squares(robust_loss: RobustLoss) -> None:
+def test_robust_loss_beats_plain_least_squares() -> None:
     _, _, _, stokes_i_arr, stokes_i_error_arr = _clean_spectrum()
     contaminated = stokes_i_arr.copy()
     contaminated[BAD_CHAN] *= 20.0
 
-    robust = _fit_error(contaminated, stokes_i_error_arr, robust_loss=robust_loss)
+    robust = _fit_error(contaminated, stokes_i_error_arr)
     plain = _fit_error(contaminated, stokes_i_error_arr, robust_loss="linear")
     assert robust < 0.02
     assert robust < plain / 10
@@ -132,41 +130,21 @@ def test_every_robust_loss_beats_plain_least_squares(robust_loss: RobustLoss) ->
 # ---------------------------------------------------------------- bad errors
 
 
-def _over_trusted_spectrum() -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """A mildly offset channel whose error says to trust it 1000x too much."""
+def test_an_over_trusted_channel_does_not_bend_the_fit() -> None:
+    """An error 1000x too small makes plain least squares follow that channel.
+
+    Note it leaves the channel a *small* residual, so this is not caught by
+    spotting outliers in the residuals; the loss handles it by dropping far-out
+    channels to zero weight.
+    """
     _, _, _, stokes_i_arr, stokes_i_error_arr = _clean_spectrum()
     contaminated = stokes_i_arr.copy()
     contaminated[BAD_CHAN] += 5 * NOISE
     bad_error = stokes_i_error_arr.copy()
     bad_error[BAD_CHAN] = NOISE / 1000
-    return contaminated, bad_error
 
-
-@pytest.mark.parametrize("robust_loss", ["linear", "huber", "soft_l1"])
-def test_an_over_trusted_channel_needs_the_error_mask(
-    robust_loss: RobustLoss,
-) -> None:
-    """The fit follows a channel whose error is too small, so it leaves no big
-    residual and huber/soft_l1 are still pulled. Hence the mask."""
-    contaminated, bad_error = _over_trusted_spectrum()
-    masked = _fit_error(contaminated, bad_error, robust_loss=robust_loss)
-    unmasked = _fit_error(
-        contaminated, bad_error, robust_loss=robust_loss, error_outlier_factor=None
-    )
-    assert masked < 0.01
-    assert unmasked > 10 * masked
-
-
-def test_cauchy_alone_also_survives_an_over_trusted_channel() -> None:
-    """Cauchy drops far-out channels to zero weight, so it is the one loss that
-    copes unaided. Pinned because it is why the defaults are safe together."""
-    contaminated, bad_error = _over_trusted_spectrum()
-    assert (
-        _fit_error(
-            contaminated, bad_error, robust_loss="cauchy", error_outlier_factor=None
-        )
-        < 0.01
-    )
+    assert _fit_error(contaminated, bad_error) < 0.01
+    assert _fit_error(contaminated, bad_error, robust_loss="linear") > 0.02
 
 
 def test_one_zero_error_channel_keeps_the_rest_weighted() -> None:
@@ -193,48 +171,23 @@ def test_one_zero_error_channel_keeps_the_rest_weighted() -> None:
     np.testing.assert_allclose(gap_err, ref_err, rtol=0.1)
 
 
-def test_usable_error_mask_drops_both_tails() -> None:
-    """Errors far either side of the median one are untrustworthy."""
-    error_arr = np.full(10, 0.01)
-    error_arr[2] = 0.01 / 1000  # over-trusted
-    error_arr[5] = 0.01 * 1000  # wrecks an rms SNR
-    mask = usable_error_mask(error_arr, error_outlier_factor=10.0)
-    assert not mask[2]
-    assert not mask[5]
-    assert mask.sum() == 8
-
-
-def test_usable_error_mask_drops_unusable_values() -> None:
-    error_arr = np.array([0.01, 0.0, -0.01, np.nan, np.inf, 0.01])
-    mask = usable_error_mask(error_arr)
-    np.testing.assert_array_equal(mask, [True, False, False, False, False, True])
-
-
-def test_usable_error_mask_keeps_a_heteroscedastic_band() -> None:
-    """Noisier band edges are real, not bad channels."""
-    error_arr = NOISE * (1 + 3 * np.linspace(-1, 1, N_CHAN) ** 2)
-    assert usable_error_mask(error_arr, error_outlier_factor=10.0).all()
-
-
-def test_usable_error_mask_is_all_true_without_a_usable_error() -> None:
-    """All-zero errors are how the callers say "no error given"."""
-    assert usable_error_mask(np.zeros(10)).all()
-    assert usable_error_mask(np.full(10, np.nan)).all()
-
-
-def test_usable_error_mask_factor_none_keeps_every_positive_error() -> None:
-    error_arr = np.array([0.01, 1e-9, 1e9, 0.0])
-    np.testing.assert_array_equal(
-        usable_error_mask(error_arr, error_outlier_factor=None),
-        [True, True, True, False],
+@pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf])
+def test_errors_that_cannot_weight_a_fit_are_dropped(bad: float) -> None:
+    freq_arr_hz, ref_freq_hz, truth, stokes_i_arr, stokes_i_error_arr = (
+        _clean_spectrum()
     )
-
-
-def test_usable_error_mask_falls_back_when_nothing_survives() -> None:
-    """A bimodal error map leaves the finite errors rather than nothing."""
-    error_arr = np.array([1e-6, 1e-6, 1.0, 1.0])
-    mask = usable_error_mask(error_arr, error_outlier_factor=1.5)
-    assert mask.all()
+    error_arr = stokes_i_error_arr.copy()
+    error_arr[BAD_CHAN] = bad
+    fit = fit_stokes_i_model(
+        freq_arr_hz,
+        ref_freq_hz,
+        stokes_i_arr,
+        error_arr,
+        StokesIFitOptions(snr_cut=None),
+    )
+    assert fit is not None
+    model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt))
+    assert float(np.abs(model - truth).max() / truth.max()) < 0.01
 
 
 # ------------------------------------------------------------------ robust AIC
@@ -327,11 +280,9 @@ def test_snr_only_counts_usable_channels() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
-        ({"robust_loss": "arctan"}, "robust_loss must be one of"),
+        ({"robust_loss": "arctan"}, "robust_loss must be 'cauchy' or 'linear'"),
         ({"f_scale": 0.0}, "f_scale must be positive"),
         ({"f_scale": -1.0}, "f_scale must be positive"),
-        ({"error_outlier_factor": 1.0}, "error_outlier_factor must be greater than 1"),
-        ({"error_outlier_factor": 0.5}, "error_outlier_factor must be greater than 1"),
     ],
 )
 def test_options_reject_nonsense(kwargs: dict[str, object], match: str) -> None:
@@ -344,7 +295,6 @@ def test_option_defaults_are_robust() -> None:
     options = StokesIFitOptions()
     assert options.robust_loss == "cauchy"
     assert options.f_scale == 3.0
-    assert options.error_outlier_factor == 10.0
 
 
 # ------------------------------------------------- the unweighted (no error) path

@@ -16,8 +16,8 @@ from rm_lite.utils.logging import logger, quiet_logs
 
 GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
 
-RobustLoss: TypeAlias = Literal["linear", "cauchy", "soft_l1", "huber"]
-"""Stokes I fit loss; "linear" is plain least squares, the rest downweight outliers"""
+RobustLoss: TypeAlias = Literal["cauchy", "linear"]
+"""Stokes I fit loss, passed to `scipy.optimize.least_squares`"""
 
 
 class StokesIModel(Protocol):
@@ -57,8 +57,6 @@ class StokesIFitOptions:
     """Downweight channels far from the model; "linear" is plain least squares"""
     f_scale: float = 3.0
     """How far, in sigma, before a channel is downweighted. Flat from 1 to 10"""
-    error_outlier_factor: float | None = 10.0
-    """Drop channels whose error is this far off the median one; None keeps all"""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -70,20 +68,11 @@ class StokesIFitOptions:
         if self.n_error_samples < 1:
             msg = f"n_error_samples must be >= 1, got {self.n_error_samples}."
             raise ValueError(msg)
-        if self.robust_loss not in ("linear", "cauchy", "soft_l1", "huber"):
-            msg = (
-                "robust_loss must be one of 'linear', 'cauchy', 'soft_l1', "
-                f"'huber', got {self.robust_loss!r}."
-            )
+        if self.robust_loss not in ("cauchy", "linear"):
+            msg = f"robust_loss must be 'cauchy' or 'linear', got {self.robust_loss!r}."
             raise ValueError(msg)
         if self.f_scale <= 0:
             msg = f"f_scale must be positive, got {self.f_scale}."
-            raise ValueError(msg)
-        if self.error_outlier_factor is not None and self.error_outlier_factor <= 1:
-            msg = (
-                "error_outlier_factor must be greater than 1 (it is a ratio either "
-                f"side of the median error), got {self.error_outlier_factor}."
-            )
             raise ValueError(msg)
 
 
@@ -349,37 +338,6 @@ def aic_lsq(ssr: float, n_params: int, n_samples: int) -> float:
         )
 
 
-def usable_error_mask(
-    stokes_i_error_arr: NDArray[np.float64],
-    error_outlier_factor: float | None = 10.0,
-) -> NDArray[np.bool_]:
-    """Channels whose Stokes I error can be trusted to weight the fit.
-
-    An error much smaller than the rest makes the fit follow that channel, so it
-    ends up with a small residual and `robust_loss` never sees it. One much
-    larger is harmless to the fit but skews an rms SNR. Both go, along with
-    errors that are not finite and positive.
-
-    All True when nothing is usable, which is how the callers say "no error
-    given" and gives an unweighted fit. Too few channels left to fit is the
-    caller's problem (`fit_stokes_i_model` returns None).
-    """
-    err = np.asarray(stokes_i_error_arr, dtype=np.float64)
-    usable = np.isfinite(err) & (err > 0)
-    if not usable.any():
-        return np.ones(err.shape, dtype=np.bool_)
-    if error_outlier_factor is None:
-        return usable
-    median_err = float(np.median(err[usable]))
-    keep = (
-        usable
-        & (err > median_err / error_outlier_factor)
-        & (err < median_err * error_outlier_factor)
-    )
-    # A bimodal error map can leave nothing; the finite errors are the better bet.
-    return keep if keep.any() else usable
-
-
 def _robust_aic(
     resid: NDArray[np.float64],
     sigma_arr: NDArray[np.float64] | None,
@@ -445,9 +403,8 @@ def static_fit(
         [np.inf] * (fit_order + 1),
     )
     bounds[0][0] = 0.0
-    # Callers pass all-zero errors to mean "no error given"; individually bad
-    # errors are already dropped by `usable_error_mask`. Without an error there
-    # is no sigma for `f_scale` to count, so the loss goes back to plain.
+    # Callers pass all-zero errors to mean "no error given". Without an error
+    # there is no sigma for `f_scale` to count, so the loss goes back to plain.
     x_arr = freq_arr_hz / ref_freq_hz
     sigma_arr: NDArray[np.float64] | None = stokes_i_error_arr
     if not bool(np.all(np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0))):
@@ -719,24 +676,22 @@ def fit_stokes_i_model(
 ) -> FitResult | None:
     """Fit a Stokes I spectrum, or return None when it should not be fitted.
 
-    Masks non-finite channels and untrustworthy errors (see `usable_error_mask`),
-    then returns None if too few channels remain (`< abs(options.fit_order) + 2`)
-    or, when `options.snr_cut` is given, the frequency-averaged SNR is below it,
-    letting the caller impose a flat model. A fit that cannot converge does not
-    raise: `static_fit` falls back to a flat (mean) model. Right at the minimum
-    channel count the fit is real but its AIC is inf (see `aic_lsq`), so a
-    negative `fit_order` settles on a lower order there.
-
-    A bad *error* is dropped here, since the fit would follow that channel and
-    leave it no residual to be caught by. A bad *flux* is left to
-    `options.robust_loss` in `static_fit`, which needs no threshold set up front.
+    Masks channels that cannot be fitted, then returns None if too few remain
+    (`< abs(options.fit_order) + 2`) or, when `options.snr_cut` is given, the
+    frequency-averaged SNR is below it, letting the caller impose a flat model. A
+    fit that cannot converge does not raise: `static_fit` falls back to a flat
+    (mean) model. Right at the minimum channel count the fit is real but its AIC
+    is inf (see `aic_lsq`), so a negative `fit_order` settles on a lower order
+    there. A bad flux is left to `options.robust_loss` in `static_fit`.
     """
     fit_order = options.fit_order
-    good = (
-        np.isfinite(stokes_i_arr)
-        & np.isfinite(stokes_i_error_arr)
-        & usable_error_mask(stokes_i_error_arr, options.error_outlier_factor)
-    )
+    # An error of zero or less cannot weight a fit, so those channels go. All of
+    # them at once is how the callers say "no error given", and then the whole
+    # spectrum is kept and fitted unweighted.
+    weightable = np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0)
+    if not weightable.any():
+        weightable = np.isfinite(stokes_i_error_arr)
+    good = np.isfinite(stokes_i_arr) & weightable
     if int(good.sum()) < abs(fit_order) + 2:
         return None
     if (

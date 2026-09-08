@@ -1096,8 +1096,8 @@ def test_bad_channel_does_not_corrupt_the_3d_alpha_map() -> None:
 
 
 def test_stokes_i_robust_options_reach_the_fit() -> None:
-    """The 3D keywords are plumbed through to `StokesIFitOptions`, so a bad
-    error channel is masked rather than silently over-trusted."""
+    """The 3D keywords are plumbed through to `StokesIFitOptions`, so a channel
+    with an error 1000x too small does not bend every pixel's model."""
     cube = _make_cube(ny=2, nx=2, alpha=-0.8, noise=0.005)
     stokes_i = cube.stokes_i.copy()
     stokes_i[30] += 5 * 0.005
@@ -1110,20 +1110,20 @@ def test_stokes_i_robust_options_reach_the_fit() -> None:
         "stokes_i": _chunked(stokes_i),
         "stokes_i_error": _chunked(error_cube),
         "stokes_i_snr_cut": None,
-        "stokes_i_robust_loss": "linear",
     }
-    masked = rmsynth_3d(
+    robust = rmsynth_3d(
         _chunked(cube.stokes_q), _chunked(cube.stokes_u), cube.freq_arr_hz, **common
     )
-    kept = rmsynth_3d(
+    plain = rmsynth_3d(
         _chunked(cube.stokes_q),
         _chunked(cube.stokes_u),
         cube.freq_arr_hz,
-        stokes_i_error_outlier_factor=None,
+        stokes_i_robust_loss="linear",
+        stokes_i_f_scale=3.0,
         **common,
     )
 
-    masked_alpha = np.asarray(_require(masked.stokes_i_alpha_map).compute())
-    kept_alpha = np.asarray(_require(kept.stokes_i_alpha_map).compute())
-    np.testing.assert_allclose(masked_alpha, -0.8, atol=0.05)
-    assert np.abs(kept_alpha - (-0.8)).max() > np.abs(masked_alpha - (-0.8)).max()
+    robust_alpha = np.asarray(_require(robust.stokes_i_alpha_map).compute())
+    plain_alpha = np.asarray(_require(plain.stokes_i_alpha_map).compute())
+    np.testing.assert_allclose(robust_alpha, -0.8, atol=0.05)
+    assert np.abs(plain_alpha - (-0.8)).max() > np.abs(robust_alpha - (-0.8)).max()

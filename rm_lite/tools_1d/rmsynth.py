@@ -136,7 +136,6 @@ def run_rmsynth(
     fit_order: int = 2,
     stokes_i_robust_loss: RobustLoss = "cauchy",
     stokes_i_f_scale: float = 3.0,
-    stokes_i_error_outlier_factor: float | None = 10.0,
     ignore_stokes_i: bool = False,
     moment_threshold_snr: float = 5.0,
 ) -> RMSynth1DResults:
@@ -173,9 +172,6 @@ def run_rmsynth(
             Defaults to "cauchy".
         stokes_i_f_scale (float, optional): How far out, in sigma, before a
             channel is downweighted. Flat from 1 to 10. Defaults to 3.0.
-        stokes_i_error_outlier_factor (float | None, optional): Drop channels
-            whose Stokes I error is this far off the median one. None keeps every
-            finite, positive error. Defaults to 10.0.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
 
     Returns:
@@ -216,7 +212,6 @@ def run_rmsynth(
         snr_cut=None,
         robust_loss=stokes_i_robust_loss,
         f_scale=stokes_i_f_scale,
-        error_outlier_factor=stokes_i_error_outlier_factor,
     )
 
     if (
