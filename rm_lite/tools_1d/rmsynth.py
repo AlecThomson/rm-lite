@@ -12,6 +12,7 @@ from scipy import interpolate
 
 from rm_lite.utils.fitting import (
     FitResult,
+    RobustLoss,
     StokesIFitOptions,
     coefficient_errors,
     coefficient_names,
@@ -133,6 +134,8 @@ def run_rmsynth(
     do_fit_rmsf_real: bool = False,
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
+    stokes_i_robust_loss: RobustLoss = "cauchy",
+    stokes_i_f_scale: float = 3.0,
     ignore_stokes_i: bool = False,
     moment_threshold_snr: float = 5.0,
 ) -> RMSynth1DResults:
@@ -162,6 +165,13 @@ def run_rmsynth(
         do_fit_rmsf_real (bool, optional): Fit only the real part of the RMSF. Defaults to False.
         fit_function ("log" | "linear", optional): RMSF fit function. Defaults to "log".
         fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
+        stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
+            the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
+            (default), "soft_l1" or "huber"; "linear" is plain least squares.
+            Needs an error to measure against, else it reverts to "linear".
+            Defaults to "cauchy".
+        stokes_i_f_scale (float, optional): How far out, in sigma, before a
+            channel is downweighted. Flat from 1 to 10. Defaults to 3.0.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
 
     Returns:
@@ -200,6 +210,8 @@ def run_rmsynth(
         fit_order=fit_order,
         fit_function=fit_function,
         snr_cut=None,
+        robust_loss=stokes_i_robust_loss,
+        f_scale=stokes_i_f_scale,
     )
 
     if (

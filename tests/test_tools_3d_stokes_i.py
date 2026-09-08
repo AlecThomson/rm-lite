@@ -1051,3 +1051,79 @@ def test_pixel_with_barely_enough_channels_fits() -> None:
     assert np.isfinite(alpha).all()
     # The short pixel is fitted from its 4 good channels, not flattened.
     np.testing.assert_allclose(model[:4, 0, 0], stokes_i[:4, 0, 0], rtol=1e-3)
+
+
+def test_bad_channel_does_not_corrupt_the_3d_alpha_map() -> None:
+    """One bad channel in the cube must not bend every pixel's fitted model.
+
+    The failure this guards against is silent: with plain least squares every
+    pixel still reports as fitted, with a finite model and a finite alpha, and
+    only the values are wrong. So the assertion is on accuracy, not on any
+    blanking or warning.
+    """
+    cube = _make_cube(ny=3, nx=4, alpha=-0.8, noise=0.005)
+    stokes_i = cube.stokes_i.copy()
+    stokes_i[30] *= 5.0  # a whole bad channel plane, as RFI arrives
+    error_arr = np.full(cube.freq_arr_hz.size, 0.005)
+
+    common: dict[str, Any] = {
+        "d_phi_radm2": D_PHI_RADM2,
+        "weight_type": "uniform",
+        "stokes_i": _chunked(stokes_i),
+        "stokes_i_error": error_arr,
+        "stokes_i_snr_cut": None,
+    }
+    robust = rmsynth_3d(
+        _chunked(cube.stokes_q), _chunked(cube.stokes_u), cube.freq_arr_hz, **common
+    )
+    plain = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i_robust_loss="linear",
+        **common,
+    )
+
+    robust_alpha = np.asarray(_require(robust.stokes_i_alpha_map).compute())
+    plain_alpha = np.asarray(_require(plain.stokes_i_alpha_map).compute())
+
+    # Both "succeed": the plain fit is simply wrong, which is the whole problem.
+    assert np.isfinite(robust_alpha).all()
+    assert np.isfinite(plain_alpha).all()
+
+    np.testing.assert_allclose(robust_alpha, -0.8, atol=0.05)
+    assert np.abs(plain_alpha - (-0.8)).max() > 0.15
+
+
+def test_stokes_i_robust_options_reach_the_fit() -> None:
+    """The 3D keywords are plumbed through to `StokesIFitOptions`, so a channel
+    with an error 1000x too small does not bend every pixel's model."""
+    cube = _make_cube(ny=2, nx=2, alpha=-0.8, noise=0.005)
+    stokes_i = cube.stokes_i.copy()
+    stokes_i[30] += 5 * 0.005
+    error_cube = np.full_like(stokes_i, 0.005)
+    error_cube[30] = 0.005 / 1000  # over-trusted channel, every pixel
+
+    common: dict[str, Any] = {
+        "d_phi_radm2": D_PHI_RADM2,
+        "weight_type": "uniform",
+        "stokes_i": _chunked(stokes_i),
+        "stokes_i_error": _chunked(error_cube),
+        "stokes_i_snr_cut": None,
+    }
+    robust = rmsynth_3d(
+        _chunked(cube.stokes_q), _chunked(cube.stokes_u), cube.freq_arr_hz, **common
+    )
+    plain = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i_robust_loss="linear",
+        stokes_i_f_scale=3.0,
+        **common,
+    )
+
+    robust_alpha = np.asarray(_require(robust.stokes_i_alpha_map).compute())
+    plain_alpha = np.asarray(_require(plain.stokes_i_alpha_map).compute())
+    np.testing.assert_allclose(robust_alpha, -0.8, atol=0.05)
+    assert np.abs(plain_alpha - (-0.8)).max() > np.abs(robust_alpha - (-0.8)).max()

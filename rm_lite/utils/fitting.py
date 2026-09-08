@@ -16,6 +16,9 @@ from rm_lite.utils.logging import logger, quiet_logs
 
 GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
 
+RobustLoss: TypeAlias = Literal["cauchy", "linear"]
+"""Stokes I fit loss, passed to `scipy.optimize.least_squares`"""
+
 
 class StokesIModel(Protocol):
     def __call__(
@@ -50,6 +53,10 @@ class StokesIFitOptions:
     """Also compute the per-pixel model error (3D fit path only)"""
     n_error_samples: int = 1000
     """Monte-Carlo samples for the model error"""
+    robust_loss: RobustLoss = "cauchy"
+    """Downweight channels far from the model; "linear" is plain least squares"""
+    f_scale: float = 3.0
+    """How far, in sigma, before a channel is downweighted. Flat from 1 to 10"""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -60,6 +67,12 @@ class StokesIFitOptions:
             raise ValueError(msg)
         if self.n_error_samples < 1:
             msg = f"n_error_samples must be >= 1, got {self.n_error_samples}."
+            raise ValueError(msg)
+        if self.robust_loss not in ("cauchy", "linear"):
+            msg = f"robust_loss must be 'cauchy' or 'linear', got {self.robust_loss!r}."
+            raise ValueError(msg)
+        if self.f_scale <= 0:
+            msg = f"f_scale must be positive, got {self.f_scale}."
             raise ValueError(msg)
 
 
@@ -325,6 +338,31 @@ def aic_lsq(ssr: float, n_params: int, n_samples: int) -> float:
         )
 
 
+def _robust_aic(
+    resid: NDArray[np.float64],
+    sigma_arr: NDArray[np.float64] | None,
+    n_params: int,
+    robust_loss: RobustLoss,
+    f_scale: float,
+) -> float:
+    """AIC with each residual capped at `f_scale`, so one bad channel cannot
+    pick the order.
+
+    Uncapped, a bad channel inflates every order's residual by about the same
+    amount; the scores land within 2 of each other and `dynamic_fit` takes the
+    fewest parameters, i.e. a flat model. `n_samples` stays the channel count,
+    which is the same for every order and so cannot tilt the comparison.
+
+    Not capped for "linear", where the whole point is the plain fit, and where a
+    missing error would leave `f_scale` in flux units rather than sigma.
+    """
+    scaled = resid if sigma_arr is None else resid / sigma_arr
+    if robust_loss != "linear":
+        scaled = np.clip(np.abs(scaled), None, f_scale)
+    ssr = float(np.sum(scaled**2))
+    return aic_lsq(ssr=ssr, n_params=n_params, n_samples=int(np.size(scaled)))
+
+
 def static_fit(
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
@@ -332,7 +370,16 @@ def static_fit(
     stokes_i_error_arr: NDArray[np.float64],
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
+    robust_loss: RobustLoss = "cauchy",
+    f_scale: float = 3.0,
 ) -> FitResult:
+    """Fit one Stokes I spectrum at a fixed order.
+
+    `robust_loss` is passed to `scipy.optimize.least_squares` through
+    `curve_fit`, so a channel more than `f_scale` sigma out is downweighted
+    instead of dragging the model. The bounds already pick `method="trf"`, the
+    one method that takes a loss.
+    """
     msg = f"Fitting Stokes I model of type {fit_function} with order {fit_order}."
     logger.info(msg)
     if fit_function == "linear":
@@ -356,26 +403,35 @@ def static_fit(
         [np.inf] * (fit_order + 1),
     )
     bounds[0][0] = 0.0
+    # Callers pass all-zero errors to mean "no error given". Without an error
+    # there is no sigma for `f_scale` to count, so the loss goes back to plain.
+    x_arr = freq_arr_hz / ref_freq_hz
     sigma_arr: NDArray[np.float64] | None = stokes_i_error_arr
-    if (stokes_i_error_arr == 0).all():
+    if not bool(np.all(np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0))):
         sigma_arr = None
+        robust_loss = "linear"
+    loss_kwargs: dict[str, Any] = (
+        {} if robust_loss == "linear" else {"loss": robust_loss, "f_scale": f_scale}
+    )
+    fitted = True
 
     try:
         popt, pcov = optimize.curve_fit(
             fit_func,
-            freq_arr_hz / ref_freq_hz,
+            x_arr,
             stokes_i_arr,
             sigma=sigma_arr,
             absolute_sigma=True,
             p0=initial_guess,
             bounds=bounds,
+            **loss_kwargs,
         )
     except (ValueError, RuntimeError) as e:
         logger.warning(f"Stokes I fit with errors failed ({e}); retrying unweighted.")
         try:
             popt, pcov = optimize.curve_fit(
                 fit_func,
-                freq_arr_hz / ref_freq_hz,
+                x_arr,
                 stokes_i_arr,
                 p0=initial_guess,
             )
@@ -389,9 +445,20 @@ def static_fit(
             popt = np.zeros(fit_order + 1)
             popt[0] = mean_spectrum
             pcov = np.zeros((fit_order + 1, fit_order + 1))
-    stokes_i_model_arr = fit_func(freq_arr_hz / ref_freq_hz, *popt)
-    ssr = float(np.sum((stokes_i_arr - stokes_i_model_arr) ** 2))
-    aic = aic_lsq(ssr=ssr, n_params=fit_order + 1, n_samples=len(freq_arr_hz))
+            fitted = False
+    stokes_i_model_arr = fit_func(x_arr, *popt)
+    # Nothing converged, so there is no fit for `dynamic_fit` to rank.
+    aic = (
+        _robust_aic(
+            resid=stokes_i_arr - stokes_i_model_arr,
+            sigma_arr=sigma_arr,
+            n_params=fit_order + 1,
+            robust_loss=robust_loss,
+            f_scale=f_scale,
+        )
+        if fitted
+        else float(np.inf)
+    )
 
     errors = np.sqrt(np.diag(pcov))
     fit_vals = [f"{p:.3g} +/- {e:.3g}" for p, e in zip(popt, errors, strict=False)]
@@ -412,6 +479,8 @@ def dynamic_fit(
     stokes_i_error_arr: NDArray[np.float64],
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
+    robust_loss: RobustLoss = "cauchy",
+    f_scale: float = 3.0,
 ) -> FitResult:
     msg = f"Iteratively fitting Stokes I model of type {fit_function} with max order {fit_order}."
     logger.info(msg)
@@ -427,6 +496,8 @@ def dynamic_fit(
             stokes_i_error_arr,
             int(order),
             fit_function,
+            robust_loss,
+            f_scale,
         )
         fit_results.append(fit_result)
 
@@ -442,17 +513,26 @@ def dynamic_fit(
 
 
 def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> float:
-    """Frequency-averaged Stokes I SNR: `mean(I) * sqrt(n) / rms(error)`.
+    """Frequency-averaged Stokes I SNR: `median(I) * sqrt(n) / median(error)`.
 
     Averaging `n` channels beats the noise down by `sqrt(n)`, hence the factor.
     Returns inf when there is no usable noise (all-zero or non-finite error), so
     an SNR cut becomes a no-op instead of rejecting everything.
+
+    Medians, not the mean and rms: one oversized error channel took an rms SNR
+    from 1200 to 1.4 and skipped a good pixel, and one negative flux spike made
+    it negative. Only usable channels count, as in the fit.
     """
-    n = e_spec.size
-    rms_err = float(np.sqrt(np.mean(e_spec**2))) if n else 0.0
-    if not np.isfinite(rms_err) or rms_err <= 0:
+    i_arr = np.asarray(i_spec, dtype=np.float64)
+    e_arr = np.asarray(e_spec, dtype=np.float64)
+    usable = np.isfinite(i_arr) & np.isfinite(e_arr) & (e_arr > 0)
+    n = int(usable.sum())
+    if not n:
         return np.inf
-    return float(np.mean(i_spec) * np.sqrt(n) / rms_err)
+    median_err = float(np.median(e_arr[usable]))
+    if not np.isfinite(median_err) or median_err <= 0:
+        return np.inf
+    return float(np.median(i_arr[usable]) * np.sqrt(n) / median_err)
 
 
 def check_snr_cut_has_error(
@@ -596,16 +676,22 @@ def fit_stokes_i_model(
 ) -> FitResult | None:
     """Fit a Stokes I spectrum, or return None when it should not be fitted.
 
-    Masks non-finite channels first, then returns None if too few finite
-    channels remain (`< abs(options.fit_order) + 2`) or, when `options.snr_cut`
-    is given, the frequency-averaged SNR is below it -- letting the caller
-    impose a flat model for that spectrum. A fit that cannot converge does not
-    raise: `static_fit` falls back to a flat (mean) model. Right at the minimum
-    channel count the fit is real but its AIC is inf (see `aic_lsq`), so a
-    negative `fit_order` settles on a lower order there.
+    Masks channels that cannot be fitted, then returns None if too few remain
+    (`< abs(options.fit_order) + 2`) or, when `options.snr_cut` is given, the
+    frequency-averaged SNR is below it, letting the caller impose a flat model. A
+    fit that cannot converge does not raise: `static_fit` falls back to a flat
+    (mean) model. Right at the minimum channel count the fit is real but its AIC
+    is inf (see `aic_lsq`), so a negative `fit_order` settles on a lower order
+    there. A bad flux is left to `options.robust_loss` in `static_fit`.
     """
     fit_order = options.fit_order
-    good = np.isfinite(stokes_i_arr) & np.isfinite(stokes_i_error_arr)
+    # An error of zero or less cannot weight a fit, so those channels go. All of
+    # them at once is how the callers say "no error given", and then the whole
+    # spectrum is kept and fitted unweighted.
+    weightable = np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0)
+    if not weightable.any():
+        weightable = np.isfinite(stokes_i_error_arr)
+    good = np.isfinite(stokes_i_arr) & weightable
     if int(good.sum()) < abs(fit_order) + 2:
         return None
     if (
@@ -619,9 +705,25 @@ def fit_stokes_i_model(
     e_g = stokes_i_error_arr[good]
     if fit_order < 0:
         return dynamic_fit(
-            freq_g, ref_freq_hz, i_g, e_g, abs(fit_order), options.fit_function
+            freq_g,
+            ref_freq_hz,
+            i_g,
+            e_g,
+            abs(fit_order),
+            options.fit_function,
+            options.robust_loss,
+            options.f_scale,
         )
-    return static_fit(freq_g, ref_freq_hz, i_g, e_g, fit_order, options.fit_function)
+    return static_fit(
+        freq_g,
+        ref_freq_hz,
+        i_g,
+        e_g,
+        fit_order,
+        options.fit_function,
+        options.robust_loss,
+        options.f_scale,
+    )
 
 
 class StokesIFitCubes(NamedTuple):

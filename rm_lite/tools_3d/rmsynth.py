@@ -26,6 +26,7 @@ from rm_lite.utils.dask_io import (
     read_fits_cube_dask,
 )
 from rm_lite.utils.fitting import (
+    RobustLoss,
     StokesIFitOptions,
     alpha_from_model_block,
     coefficient_names,
@@ -481,6 +482,8 @@ def rmsynth_3d(
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_snr_cut: float | None = 5.0,
+    stokes_i_robust_loss: RobustLoss = "cauchy",
+    stokes_i_f_scale: float = 3.0,
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     per_pixel_rmsf: bool = False,
@@ -532,6 +535,13 @@ def rmsynth_3d(
             Needs a Stokes I error to measure SNR against, so raises unless one
             of `stokes_i_error` / `estimate_stokes_i_noise` is given.
             Defaults to 5.0.
+        stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
+            the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
+            (default), "soft_l1" or "huber"; "linear" is plain least squares.
+            Needs an error to measure against, else it reverts to "linear". Fit
+            path only. Defaults to "cauchy".
+        stokes_i_f_scale (float, optional): How far out, in sigma, before a
+            channel is downweighted. Flat from 1 to 10. Defaults to 3.0.
         compute_model_error (bool, optional): Also compute a per-pixel model error
             cube via Monte-Carlo over the fit covariance, in the same fit pass.
             Logs a warning about the compute coupling when enabled. Defaults to False.
@@ -578,6 +588,8 @@ def rmsynth_3d(
         fit_order=fit_order,
         fit_function=fit_function,
         snr_cut=stokes_i_snr_cut,
+        robust_loss=stokes_i_robust_loss,
+        f_scale=stokes_i_f_scale,
         compute_model_error=compute_model_error,
         n_error_samples=n_error_samples,
     )
@@ -867,6 +879,8 @@ def rmsynth_3d_from_fits(
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_snr_cut: float | None = 5.0,
+    stokes_i_robust_loss: RobustLoss = "cauchy",
+    stokes_i_f_scale: float = 3.0,
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     per_pixel_rmsf: bool = False,
@@ -908,6 +922,8 @@ def rmsynth_3d_from_fits(
         fit_order (int, optional): See `rmsynth_3d`. Defaults to 2.
         fit_function ("log", "linear", optional): See `rmsynth_3d`. Defaults to "log".
         stokes_i_snr_cut (float | None, optional): See `rmsynth_3d`. Defaults to 5.0.
+        stokes_i_robust_loss (RobustLoss, optional): See `rmsynth_3d`. Defaults to "cauchy".
+        stokes_i_f_scale (float, optional): See `rmsynth_3d`. Defaults to 3.0.
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
         n_error_samples (int, optional): See `rmsynth_3d`. Defaults to 1000.
         per_pixel_rmsf (bool, optional): See `rmsynth_3d`. Defaults to False.
@@ -991,6 +1007,8 @@ def rmsynth_3d_from_fits(
         fit_order=fit_order,
         fit_function=fit_function,
         stokes_i_snr_cut=stokes_i_snr_cut,
+        stokes_i_robust_loss=stokes_i_robust_loss,
+        stokes_i_f_scale=stokes_i_f_scale,
         compute_model_error=compute_model_error,
         n_error_samples=n_error_samples,
         per_pixel_rmsf=per_pixel_rmsf,
