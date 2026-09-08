@@ -166,18 +166,16 @@ def run_rmsynth(
         do_fit_rmsf_real (bool, optional): Fit only the real part of the RMSF. Defaults to False.
         fit_function ("log" | "linear", optional): RMSF fit function. Defaults to "log".
         fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
-        stokes_i_robust_loss (RobustLoss, optional): Loss for the Stokes I
-            fit. "cauchy" (default), "soft_l1" or "huber" discount a channel
-            by how far it sits from the model, so one bad channel cannot drag
-            the fit; "linear" is the plain least squares of earlier versions.
+        stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
+            the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
+            (default), "soft_l1" or "huber"; "linear" is plain least squares.
+            Needs an error to measure against, else it reverts to "linear".
             Defaults to "cauchy".
-        stokes_i_f_scale (float, optional): Residual, in sigma, beyond which
-            `stokes_i_robust_loss` starts discounting a channel. Defaults to 3.0.
+        stokes_i_f_scale (float, optional): How far out, in sigma, before a
+            channel is downweighted. Flat from 1 to 10. Defaults to 3.0.
         stokes_i_error_outlier_factor (float | None, optional): Drop channels
-            whose Stokes I error sits more than this factor either side of the
-            band median error. An over-trusted channel bends the model onto
-            itself, leaving no large residual for the loss to act on. None keeps
-            every channel with a positive, finite error. Defaults to 10.0.
+            whose Stokes I error is this far off the median one. None keeps every
+            finite, positive error. Defaults to 10.0.
         moment_threshold_snr (float, optional): SNR cut (times the theoretical FDF noise) applied to FDF amplitudes before computing the Faraday moments. Defaults to 5.0.
 
     Returns:

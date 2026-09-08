@@ -16,13 +16,8 @@ from rm_lite.utils.logging import logger, quiet_logs
 
 GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
 
-MAD_TO_SIGMA = 1.4826
-"""Median absolute deviation to a Gaussian sigma"""
-
 RobustLoss: TypeAlias = Literal["linear", "cauchy", "soft_l1", "huber"]
-"""Loss for the Stokes I fit. "linear" is plain least squares, the rest are the
-M-estimators `scipy.optimize.least_squares` implements, which bound how far one
-bad channel can pull the model."""
+"""Stokes I fit loss; "linear" is plain least squares, the rest downweight outliers"""
 
 
 class StokesIModel(Protocol):
@@ -59,11 +54,11 @@ class StokesIFitOptions:
     n_error_samples: int = 1000
     """Monte-Carlo samples for the model error"""
     robust_loss: RobustLoss = "cauchy"
-    """Loss for the fit; "linear" is the plain least squares of earlier versions"""
+    """Downweight channels far from the model; "linear" is plain least squares"""
     f_scale: float = 3.0
-    """Residual, in sigma, beyond which `robust_loss` starts discounting a channel"""
+    """How far, in sigma, before a channel is downweighted. Flat from 1 to 10"""
     error_outlier_factor: float | None = 10.0
-    """Drop channels whose error is this far either side of the band median; None keeps all"""
+    """Drop channels whose error is this far off the median one; None keeps all"""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -360,19 +355,14 @@ def usable_error_mask(
 ) -> NDArray[np.bool_]:
     """Channels whose Stokes I error can be trusted to weight the fit.
 
-    A non-finite or non-positive error cannot weight anything. Past that, an
-    error far *below* the band median over-trusts its channel, which is not a
-    case to leave to the loss: least squares bends the model onto the
-    over-trusted point, so the bad channel ends up with a *small* residual and
-    the good ones carry the damage. Only a redescending loss ("cauchy") also
-    survives that unaided; "huber" and "soft_l1" keep a bounded but non-zero
-    influence and are still pulled. An error far above the median barely moves
-    the fit but does wreck an rms-based SNR, so it goes too.
+    An error much smaller than the rest makes the fit follow that channel, so it
+    ends up with a small residual and `robust_loss` never sees it. One much
+    larger is harmless to the fit but skews an rms SNR. Both go, along with
+    errors that are not finite and positive.
 
-    All True when no channel has a usable error, which is how the callers say
-    "no error given" (see `_pixel_stokes_i_error`) and leaves the spectrum to be
-    fitted unweighted. A cut that would leave too few channels to fit is handled
-    by the caller (`fit_stokes_i_model` returns None, giving a flat model).
+    All True when nothing is usable, which is how the callers say "no error
+    given" and gives an unweighted fit. Too few channels left to fit is the
+    caller's problem (`fit_stokes_i_model` returns None).
     """
     err = np.asarray(stokes_i_error_arr, dtype=np.float64)
     usable = np.isfinite(err) & (err > 0)
@@ -390,31 +380,6 @@ def usable_error_mask(
     return keep if keep.any() else usable
 
 
-def robust_weights(
-    scaled_resid: NDArray[np.float64],
-    robust_loss: RobustLoss,
-    f_scale: float,
-) -> NDArray[np.float64]:
-    """Per-channel weight `robust_loss` gives each squared residual.
-
-    `rho'(z)` for the losses `scipy.optimize.least_squares` implements, at
-    `z = (scaled_resid / f_scale)**2`. scipy applies these internally; they are
-    recomputed here only to score the fit (see `_robust_aic`), so a bad channel
-    cannot drive model selection after the fit already discounted it.
-    """
-    z_sq = (np.asarray(scaled_resid, dtype=np.float64) / f_scale) ** 2
-    if robust_loss == "linear":
-        return np.ones_like(z_sq)
-    if robust_loss == "cauchy":
-        return 1.0 / (1.0 + z_sq)
-    if robust_loss == "soft_l1":
-        return 1.0 / np.sqrt(1.0 + z_sq)
-    if robust_loss == "huber":
-        return np.where(z_sq <= 1.0, 1.0, 1.0 / np.sqrt(np.where(z_sq > 0, z_sq, 1.0)))
-    msg = f"Unknown robust_loss {robust_loss!r}."  # type: ignore[unreachable]
-    raise ValueError(msg)
-
-
 def _robust_aic(
     resid: NDArray[np.float64],
     sigma_arr: NDArray[np.float64] | None,
@@ -422,65 +387,22 @@ def _robust_aic(
     robust_loss: RobustLoss,
     f_scale: float,
 ) -> float:
-    """AIC scored the way the fit was weighted.
+    """AIC with each residual capped at `f_scale`, so one bad channel cannot
+    pick the order.
 
-    A plain sum of squares lets one bad channel dominate every order's residual
-    equally, which collapses the AIC differences and makes `dynamic_fit` fall
-    back to the fewest parameters (a flat model) on exactly the contaminated
-    spectra that need a real fit. Weighting the residuals the way the loss did
-    drops that channel out of the comparison instead.
+    Uncapped, a bad channel inflates every order's residual by about the same
+    amount; the scores land within 2 of each other and `dynamic_fit` takes the
+    fewest parameters, i.e. a flat model. `n_samples` stays the channel count,
+    which is the same for every order and so cannot tilt the comparison.
 
-    The sample size stays the channel count, not the summed weights: an order
-    too low to describe the spectrum makes *every* residual large, so an
-    effective sample size would collapse below the parameter count and leave
-    every order unscoreable. The count is the same for every order anyway, so it
-    cannot bias the comparison the AIC is being asked to make.
-
-    Without an error the residuals are already in flux units and every weight is
-    one, so this is the plain least-squares AIC.
+    Not capped for "linear", where the whole point is the plain fit, and where a
+    missing error would leave `f_scale` in flux units rather than sigma.
     """
     scaled = resid if sigma_arr is None else resid / sigma_arr
-    weights = robust_weights(scaled, robust_loss, f_scale)
-    ssr = float(np.sum(weights * scaled**2))
+    if robust_loss != "linear":
+        scaled = np.clip(np.abs(scaled), None, f_scale)
+    ssr = float(np.sum(scaled**2))
     return aic_lsq(ssr=ssr, n_params=n_params, n_samples=int(np.size(scaled)))
-
-
-def _self_scaled_sigma(
-    fit_func: StokesIModel,
-    x_arr: NDArray[np.float64],
-    stokes_i_arr: NDArray[np.float64],
-    initial_guess: NDArray[np.float64],
-    bounds: tuple[list[float], list[float]],
-) -> NDArray[np.float64] | None:
-    """A stand-in sigma for a robust fit with no error, from the data's own spread.
-
-    `f_scale` is a residual in sigma, so without an error there is nothing for it
-    to be a multiple of and a fixed value silently becomes an absolute flux cut:
-    the same spectrum in mJy and in Jy would be fitted differently, and at large
-    flux scales every channel gets discounted at once. A plain fit gives the
-    residual spread (by MAD, so the outliers being looked for do not set it), and
-    a constant sigma at that spread puts `f_scale` back in sigma.
-
-    None when the pre-fit cannot run, or the residuals have no spread worth
-    speaking of: a spectrum the model already describes to within rounding has
-    nothing for the loss to key off, and scaling by its round-off would have the
-    loss discount channels over floating-point noise. Either way the caller
-    fits unweighted with a plain loss rather than an arbitrary one.
-    """
-    try:
-        popt, _ = optimize.curve_fit(
-            fit_func, x_arr, stokes_i_arr, p0=initial_guess, bounds=bounds
-        )
-    except (ValueError, RuntimeError):
-        return None
-    resid = stokes_i_arr - fit_func(x_arr, *popt)
-    scale = float(np.median(np.abs(resid - np.median(resid))) * MAD_TO_SIGMA)
-    # Relative to the data, so the test means the same at any flux scale. The
-    # threshold sits far above float64 round-off and far below any real noise.
-    floor = 1e-8 * float(np.median(np.abs(stokes_i_arr)))
-    if not np.isfinite(scale) or scale <= floor:
-        return None
-    return np.full(stokes_i_arr.shape, scale, dtype=np.float64)
 
 
 def static_fit(
@@ -495,10 +417,10 @@ def static_fit(
 ) -> FitResult:
     """Fit one Stokes I spectrum at a fixed order.
 
-    `robust_loss` other than "linear" hands `scipy.optimize.least_squares` an
-    M-estimator, so a channel further than `f_scale` sigma from the model is
-    discounted rather than allowed to drag it. The bounds already select
-    `method="trf"`, which is the method that supports a loss.
+    `robust_loss` is passed to `scipy.optimize.least_squares` through
+    `curve_fit`, so a channel more than `f_scale` sigma out is downweighted
+    instead of dragging the model. The bounds already pick `method="trf"`, the
+    one method that takes a loss.
     """
     msg = f"Fitting Stokes I model of type {fit_function} with order {fit_order}."
     logger.info(msg)
@@ -523,25 +445,14 @@ def static_fit(
         [np.inf] * (fit_order + 1),
     )
     bounds[0][0] = 0.0
-    # An error that is not positive everywhere cannot weight the fit. Channels
-    # whose error is individually unusable are dropped upstream by
-    # `usable_error_mask`, so what is left here is the all-or-nothing case: the
-    # callers pass all-zero errors to mean "no error given".
+    # Callers pass all-zero errors to mean "no error given"; individually bad
+    # errors are already dropped by `usable_error_mask`. Without an error there
+    # is no sigma for `f_scale` to count, so the loss goes back to plain.
     x_arr = freq_arr_hz / ref_freq_hz
     sigma_arr: NDArray[np.float64] | None = stokes_i_error_arr
-    absolute_sigma = True
     if not bool(np.all(np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0))):
         sigma_arr = None
-        if robust_loss != "linear":
-            # No error, so `f_scale` needs a spread to be a multiple of.
-            sigma_arr = _self_scaled_sigma(
-                fit_func, x_arr, stokes_i_arr, initial_guess, bounds
-            )
-            if sigma_arr is None:
-                robust_loss = "linear"
-            # The sigma is a spread, not a calibrated error, so let `curve_fit`
-            # rescale pcov by the fit's own residuals as it does with no sigma.
-            absolute_sigma = False
+        robust_loss = "linear"
     loss_kwargs: dict[str, Any] = (
         {} if robust_loss == "linear" else {"loss": robust_loss, "f_scale": f_scale}
     )
@@ -553,7 +464,7 @@ def static_fit(
             x_arr,
             stokes_i_arr,
             sigma=sigma_arr,
-            absolute_sigma=absolute_sigma,
+            absolute_sigma=True,
             p0=initial_guess,
             bounds=bounds,
             **loss_kwargs,
@@ -579,8 +490,7 @@ def static_fit(
             pcov = np.zeros((fit_order + 1, fit_order + 1))
             fitted = False
     stokes_i_model_arr = fit_func(x_arr, *popt)
-    # A model nothing converged to is not a candidate `dynamic_fit` should be
-    # comparing on merit, so it goes in unscoreable, as `flat_fit_result` does.
+    # Nothing converged, so there is no fit for `dynamic_fit` to rank.
     aic = (
         _robust_aic(
             resid=stokes_i_arr - stokes_i_model_arr,
@@ -652,11 +562,9 @@ def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> fl
     Returns inf when there is no usable noise (all-zero or non-finite error), so
     an SNR cut becomes a no-op instead of rejecting everything.
 
-    Medians rather than the mean and rms, because both tails of a bad channel
-    reach this statistic: one over-estimated error channel took an rms-based SNR
-    from 1200 to 1.4 (skipping a perfectly good pixel), and one negative flux
-    spike made it negative. Only the usable channels count, so a spectrum is not
-    judged on channels the fit will not see.
+    Medians, not the mean and rms: one oversized error channel took an rms SNR
+    from 1200 to 1.4 and skipped a good pixel, and one negative flux spike made
+    it negative. Only usable channels count, as in the fit.
     """
     i_arr = np.asarray(i_spec, dtype=np.float64)
     e_arr = np.asarray(e_spec, dtype=np.float64)
@@ -811,20 +719,17 @@ def fit_stokes_i_model(
 ) -> FitResult | None:
     """Fit a Stokes I spectrum, or return None when it should not be fitted.
 
-    Masks non-finite channels and channels whose error cannot be trusted (see
-    `usable_error_mask`), then returns None if too few channels remain
-    (`< abs(options.fit_order) + 2`) or, when `options.snr_cut` is given, the
-    frequency-averaged SNR is below it -- letting the caller impose a flat model
-    for that spectrum. A fit that cannot converge does not raise: `static_fit`
-    falls back to a flat (mean) model. Right at the minimum channel count the fit
-    is real but its AIC is inf (see `aic_lsq`), so a negative `fit_order` settles
-    on a lower order there.
+    Masks non-finite channels and untrustworthy errors (see `usable_error_mask`),
+    then returns None if too few channels remain (`< abs(options.fit_order) + 2`)
+    or, when `options.snr_cut` is given, the frequency-averaged SNR is below it,
+    letting the caller impose a flat model. A fit that cannot converge does not
+    raise: `static_fit` falls back to a flat (mean) model. Right at the minimum
+    channel count the fit is real but its AIC is inf (see `aic_lsq`), so a
+    negative `fit_order` settles on a lower order there.
 
-    Bad channels are handled in two places because they arrive two ways. A wrong
-    *error* is masked here: a channel trusted far too much bends the model onto
-    itself, so it leaves no large residual for a loss to act on. A wrong *flux*
-    is left to `options.robust_loss` in `static_fit`, which discounts it by how
-    far it sits from the model and so needs no threshold picked in advance.
+    A bad *error* is dropped here, since the fit would follow that channel and
+    leave it no residual to be caught by. A bad *flux* is left to
+    `options.robust_loss` in `static_fit`, which needs no threshold set up front.
     """
     fit_order = options.fit_order
     good = (

@@ -536,19 +536,18 @@ def rmsynth_3d(
             Needs a Stokes I error to measure SNR against, so raises unless one
             of `stokes_i_error` / `estimate_stokes_i_noise` is given.
             Defaults to 5.0.
-        stokes_i_robust_loss (RobustLoss, optional): Loss for the Stokes I fit.
-            "cauchy" (default), "soft_l1" or "huber" discount a channel by how
-            far it sits from the model, so one bad channel cannot drag the fit;
-            "linear" is the plain least squares of earlier versions. Fit path
-            only. Defaults to "cauchy".
-        stokes_i_f_scale (float, optional): Residual, in sigma, beyond which
-            `stokes_i_robust_loss` starts discounting a channel. Defaults to 3.0.
+        stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
+            the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
+            (default), "soft_l1" or "huber"; "linear" is plain least squares.
+            Needs an error to measure against, else it reverts to "linear". Fit
+            path only. Defaults to "cauchy".
+        stokes_i_f_scale (float, optional): How far out, in sigma, before a
+            channel is downweighted. Flat from 1 to 10. Defaults to 3.0.
         stokes_i_error_outlier_factor (float | None, optional): Drop channels
-            whose Stokes I error sits more than this factor either side of the
-            band median error. An over-trusted channel bends the model onto
-            itself and so leaves no large residual for the loss to act on, which
-            is why this is separate from `stokes_i_robust_loss`. None keeps every
-            channel with a positive, finite error. Defaults to 10.0.
+            whose Stokes I error is this far off the median one. Separate from
+            `stokes_i_robust_loss` because the fit follows a channel whose error
+            is too small, leaving it no residual to be caught by. None keeps
+            every finite, positive error. Defaults to 10.0.
         compute_model_error (bool, optional): Also compute a per-pixel model error
             cube via Monte-Carlo over the fit covariance, in the same fit pass.
             Logs a warning about the compute coupling when enabled. Defaults to False.

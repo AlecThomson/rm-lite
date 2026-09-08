@@ -1,28 +1,26 @@
 """Tests for bad-channel robustness in the Stokes I fit.
 
-Bad channels arrive two ways and are handled in two places, so both are covered
-here: a wrong flux is discounted by `StokesIFitOptions.robust_loss`, a wrong
-error is masked by `usable_error_mask`. The split matters because least squares
-bends the model onto an over-trusted channel, leaving it with a *small*
-residual, so a bounded-influence loss still gets pulled by it. Only the
-redescending default (cauchy) survives that on its own.
+A bad flux is handled by `robust_loss`, a bad error by `usable_error_mask`, so
+both are covered. They are separate because the fit follows a channel whose
+error is too small, leaving it no residual for the loss to catch it by.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
+from astropy.stats import akaike_info_criterion_lsq
 from numpy.typing import NDArray
 from rm_lite.utils.fitting import (
     RobustLoss,
     StokesIFitOptions,
     fit_stokes_i_model,
-    polynomial,
     power_law,
-    robust_weights,
+    static_fit,
     stokes_i_snr,
     usable_error_mask,
 )
+from scipy import optimize
 
 N_CHAN = 144
 NOISE = 0.01
@@ -36,7 +34,11 @@ def _band() -> tuple[NDArray[np.float64], float]:
 
 
 def _clean_spectrum() -> tuple[
-    NDArray[np.float64], float, NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
+    NDArray[np.float64],
+    float,
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
 ]:
     """Frequencies, reference, truth, a noisy realisation of it, and its error."""
     freq_arr_hz, ref_freq_hz = _band()
@@ -71,11 +73,7 @@ def _fit_error(
 
 @pytest.mark.parametrize("amplitude", [5.0, 20.0, 100.0])
 def test_robust_loss_shrugs_off_a_flux_outlier(amplitude: float) -> None:
-    """One boosted channel wrecks a plain fit but not a robust one.
-
-    Plain least squares is off by 6% for a x5 channel and 30% for x20; the
-    default loss holds the model to its clean-data accuracy.
-    """
+    """One boosted channel wrecks a plain fit but not a robust one."""
     _, _, _, stokes_i_arr, stokes_i_error_arr = _clean_spectrum()
     contaminated = stokes_i_arr.copy()
     contaminated[BAD_CHAN] *= amplitude
@@ -148,14 +146,8 @@ def _over_trusted_spectrum() -> tuple[NDArray[np.float64], NDArray[np.float64]]:
 def test_an_over_trusted_channel_needs_the_error_mask(
     robust_loss: RobustLoss,
 ) -> None:
-    """A too-small error is not a case the loss can be relied on to see.
-
-    Least squares bends the model onto the over-trusted channel, so the bad
-    channel ends up with a *small* residual and the good channels carry the
-    error. A loss whose influence stays bounded but non-zero (huber, soft_l1)
-    still gets pulled, which is why `usable_error_mask` exists rather than
-    leaving this to the loss.
-    """
+    """The fit follows a channel whose error is too small, so it leaves no big
+    residual and huber/soft_l1 are still pulled. Hence the mask."""
     contaminated, bad_error = _over_trusted_spectrum()
     masked = _fit_error(contaminated, bad_error, robust_loss=robust_loss)
     unmasked = _fit_error(
@@ -166,11 +158,8 @@ def test_an_over_trusted_channel_needs_the_error_mask(
 
 
 def test_cauchy_alone_also_survives_an_over_trusted_channel() -> None:
-    """The default loss redescends, so it is the one that does not need the mask.
-
-    Worth pinning: it is why the default pairing is safe even where the error
-    map is wrong in a way the mask's median test happens to miss.
-    """
+    """Cauchy drops far-out channels to zero weight, so it is the one loss that
+    copes unaided. Pinned because it is why the defaults are safe together."""
     contaminated, bad_error = _over_trusted_spectrum()
     assert (
         _fit_error(
@@ -181,13 +170,9 @@ def test_cauchy_alone_also_survives_an_over_trusted_channel() -> None:
 
 
 def test_one_zero_error_channel_keeps_the_rest_weighted() -> None:
-    """A single zero error used to discard the weighting for the whole spectrum.
-
-    `curve_fit` raises "Residuals are not finite in the initial point" on a zero
-    sigma, and the old code caught that and refitted every channel unweighted.
-    The channel is dropped now, so the remaining errors still weight the fit.
-    """
-    freq_arr_hz, ref_freq_hz, _, stokes_i_arr, stokes_i_error_arr = _clean_spectrum()
+    """A single zero error used to unweight the whole spectrum: `curve_fit`
+    raised on it and the retry dropped every weight. Now just that channel goes."""
+    freq_arr_hz, ref_freq_hz, _, stokes_i_arr, _ = _clean_spectrum()
     # A band whose noise varies, so dropping the weights is measurable.
     varying_error = NOISE * (1 + 3 * np.linspace(0, 1, N_CHAN) ** 2)
     with_zero = varying_error.copy()
@@ -209,7 +194,7 @@ def test_one_zero_error_channel_keeps_the_rest_weighted() -> None:
 
 
 def test_usable_error_mask_drops_both_tails() -> None:
-    """Errors far either side of the band median are untrustworthy."""
+    """Errors far either side of the median one are untrustworthy."""
     error_arr = np.full(10, 0.01)
     error_arr[2] = 0.01 / 1000  # over-trusted
     error_arr[5] = 0.01 * 1000  # wrecks an rms SNR
@@ -252,88 +237,12 @@ def test_usable_error_mask_falls_back_when_nothing_survives() -> None:
     assert mask.all()
 
 
-# ------------------------------------------------------------- robust weights
-
-
-@pytest.mark.parametrize(
-    ("robust_loss", "expected"),
-    [
-        ("linear", 1.0),
-        ("cauchy", 1.0 / 2.0),
-        ("soft_l1", 1.0 / np.sqrt(2.0)),
-        ("huber", 1.0),
-    ],
-)
-def test_robust_weights_at_one_f_scale(robust_loss: RobustLoss, expected: float) -> None:
-    """At exactly `f_scale` the losses take their documented values."""
-    weight = robust_weights(np.array([3.0]), robust_loss, f_scale=3.0)
-    np.testing.assert_allclose(weight, [expected])
-
-
-@pytest.mark.parametrize("robust_loss", ["cauchy", "soft_l1", "huber"])
-def test_robust_weights_decrease_with_residual(robust_loss: RobustLoss) -> None:
-    scaled = np.array([0.0, 1.0, 3.0, 10.0, 100.0])
-    weights = robust_weights(scaled, robust_loss, f_scale=3.0)
-    np.testing.assert_allclose(weights[0], 1.0)
-    assert np.all(np.diff(weights) <= 0)
-    assert weights[-1] < 0.2
-
-
-def test_linear_weights_are_all_one() -> None:
-    weights = robust_weights(np.array([0.0, 5.0, 500.0]), "linear", f_scale=3.0)
-    np.testing.assert_allclose(weights, 1.0)
-
-
-@pytest.mark.parametrize("robust_loss", ["cauchy", "soft_l1", "huber"])
-def test_robust_weights_match_what_scipy_minimised(robust_loss: RobustLoss) -> None:
-    """The fitted parameters satisfy the M-estimator's stationarity condition.
-
-    Minimising `sum rho((r/sigma)**2)` is stationary where
-    `sum w * r * J / sigma**2 == 0` with `w = rho'`, so if `robust_weights`
-    really is scipy's `rho'` the fit it returned zeroes that sum. Checked on a
-    linear model (order 1), whose Jacobian columns are `[1, x]`, with a positive
-    intercept so `static_fit`'s lower bound on the first term stays inactive.
-    """
-    freq_arr_hz, ref_freq_hz, _, _, stokes_i_error_arr = _clean_spectrum()
-    x_arr = freq_arr_hz / ref_freq_hz
-    rng = np.random.default_rng(11)
-    stokes_i_arr = polynomial(1)(x_arr, 2.0, -0.5) + rng.normal(0, NOISE, N_CHAN)
-    stokes_i_arr[BAD_CHAN] += 30 * NOISE
-
-    fit = fit_stokes_i_model(
-        freq_arr_hz=freq_arr_hz,
-        ref_freq_hz=ref_freq_hz,
-        stokes_i_arr=stokes_i_arr,
-        stokes_i_error_arr=stokes_i_error_arr,
-        options=StokesIFitOptions(
-            fit_order=1,
-            fit_function="linear",
-            snr_cut=None,
-            robust_loss=robust_loss,
-            f_scale=3.0,
-        ),
-    )
-    assert fit is not None
-    resid = stokes_i_arr - fit.stokes_i_model_func(x_arr, *np.asarray(fit.popt))
-    scaled = resid / stokes_i_error_arr
-    weights = robust_weights(scaled, robust_loss, f_scale=3.0)
-    jacobian = np.stack([np.ones_like(x_arr), x_arr])
-    gradient = jacobian @ (weights * resid / stokes_i_error_arr**2)
-    # Scale by the same sum with unit weights, so this is a relative statement.
-    normalisation = np.abs(jacobian @ (np.abs(resid) / stokes_i_error_arr**2)).max()
-    np.testing.assert_allclose(gradient / normalisation, 0.0, atol=2e-3)
-
-
 # ------------------------------------------------------------------ robust AIC
 
 
 def test_aic_still_picks_a_sloped_model_through_an_outlier() -> None:
-    """An outlier used to collapse `fit_order < 0` onto a flat model.
-
-    The AIC was a plain sum of squares, which the bad channel dominated equally
-    at every order; the differences vanished and Occam's razor took the fewest
-    parameters. Scoring the fit the way it was weighted keeps the slope.
-    """
+    """An outlier used to collapse `fit_order < 0` onto a flat model, because the
+    unweighted AIC scored every order alike and the fewest params won."""
     freq_arr_hz, ref_freq_hz, _, stokes_i_arr, stokes_i_error_arr = _clean_spectrum()
     contaminated = stokes_i_arr.copy()
     contaminated[48] *= 20.0
@@ -365,11 +274,7 @@ def test_aic_without_an_error_is_the_plain_least_squares_one() -> None:
     assert fit is not None
     model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt))
     ssr = float(np.sum((stokes_i_arr - model) ** 2))
-    from astropy.stats import akaike_info_criterion_lsq
-
-    expected = float(
-        akaike_info_criterion_lsq(ssr=ssr, n_params=3, n_samples=N_CHAN)
-    )
+    expected = float(akaike_info_criterion_lsq(ssr=ssr, n_params=3, n_samples=N_CHAN))
     assert fit.aic == pytest.approx(expected)
 
 
@@ -377,8 +282,8 @@ def test_aic_without_an_error_is_the_plain_least_squares_one() -> None:
 
 
 def test_snr_ignores_a_single_over_estimated_error_channel() -> None:
-    """One inflated error channel used to take the SNR from 1200 to 1.4, which
-    silently skipped the pixel and flattened its model."""
+    """One inflated error channel used to take the SNR from 1200 to 1.4, quietly
+    skipping the pixel."""
     _, _, _, stokes_i_arr, stokes_i_error_arr = _clean_spectrum()
     inflated = stokes_i_error_arr.copy()
     inflated[5] = NOISE * 1e4
@@ -435,7 +340,7 @@ def test_options_reject_nonsense(kwargs: dict[str, object], match: str) -> None:
 
 
 def test_option_defaults_are_robust() -> None:
-    """The defaults are the point: a cube gets robustness without asking."""
+    """A cube gets robustness without asking, which is the point."""
     options = StokesIFitOptions()
     assert options.robust_loss == "cauchy"
     assert options.f_scale == 3.0
@@ -445,108 +350,46 @@ def test_option_defaults_are_robust() -> None:
 # ------------------------------------------------- the unweighted (no error) path
 
 
-@pytest.mark.parametrize("flux_scale", [1.0, 1e2, 1e4, 1e6])
-def test_robust_fit_without_an_error_is_scale_free(flux_scale: float) -> None:
-    """`f_scale` is a residual in sigma, so with no error it needs a stand-in.
+def test_no_error_falls_back_to_plain_least_squares() -> None:
+    """`f_scale` counts sigma, so with no error there is nothing to count.
 
-    Left alone it would become an absolute flux cut: the same spectrum in mJy
-    and in Jy would be fitted differently, and at large flux scales every
-    channel would be discounted at once. `_self_scaled_sigma` takes the spread
-    from the data, so the answer must not depend on the units.
+    Left as a robust fit it would be an absolute flux cut instead, and the same
+    spectrum in mJy and Jy would fit differently. Robustness needs an error.
     """
     freq_arr_hz, ref_freq_hz = _band()
     x_arr = freq_arr_hz / ref_freq_hz
-    truth = flux_scale * power_law(1)(x_arr, 1.0, ALPHA)
+    truth = power_law(1)(x_arr, 1.0, ALPHA)
     rng = np.random.default_rng(7)
-    stokes_i_arr = truth + rng.normal(0, 0.01 * flux_scale, N_CHAN)
-    stokes_i_arr[BAD_CHAN] *= 20.0
-    no_error = np.zeros(N_CHAN)
+    stokes_i_arr = truth + rng.normal(0, NOISE, N_CHAN)
 
-    def error_of(robust_loss: RobustLoss) -> float:
-        fit = fit_stokes_i_model(
-            freq_arr_hz=freq_arr_hz,
-            ref_freq_hz=ref_freq_hz,
-            stokes_i_arr=stokes_i_arr,
-            stokes_i_error_arr=no_error,
-            options=StokesIFitOptions(snr_cut=None, robust_loss=robust_loss),
-        )
-        assert fit is not None
-        model = fit.stokes_i_model_func(x_arr, *np.asarray(fit.popt))
-        return float(np.abs(model - truth).max() / truth.max())
-
-    assert error_of("cauchy") < 0.01
-    assert error_of("linear") > 0.1
-
-
-def test_unweighted_fit_covariance_tracks_the_flux_scale() -> None:
-    """With a stand-in sigma, `curve_fit` rescales pcov by the fit's residuals.
-
-    The old path passed `sigma=None` with `absolute_sigma=True`, which reports
-    the covariance of a unit-residual fit: the same parameter errors whatever
-    the flux scale, and useless to `compute_model_error`.
-    """
-    freq_arr_hz, ref_freq_hz = _band()
-    x_arr = freq_arr_hz / ref_freq_hz
-    errors = []
-    for flux_scale in (1.0, 1e3):
-        rng = np.random.default_rng(7)
-        truth = flux_scale * power_law(1)(x_arr, 1.0, ALPHA)
-        stokes_i_arr = truth + rng.normal(0, 0.01 * flux_scale, N_CHAN)
-        fit = fit_stokes_i_model(
+    losses: tuple[RobustLoss, RobustLoss] = ("cauchy", "linear")
+    fits = [
+        fit_stokes_i_model(
             freq_arr_hz=freq_arr_hz,
             ref_freq_hz=ref_freq_hz,
             stokes_i_arr=stokes_i_arr,
             stokes_i_error_arr=np.zeros(N_CHAN),
-            options=StokesIFitOptions(fit_order=1, snr_cut=None),
+            options=StokesIFitOptions(snr_cut=None, robust_loss=loss),
         )
-        assert fit is not None
-        errors.append(float(np.sqrt(np.diag(np.asarray(fit.pcov)))[0]))
-    # The flux term's error scales with the flux, as an error should.
-    assert errors[1] / errors[0] == pytest.approx(1e3, rel=0.2)
-
-
-def test_a_noiseless_spectrum_is_not_scaled_by_its_own_round_off() -> None:
-    """With no error and no noise there is no spread for `f_scale` to use.
-
-    The residual MAD of a spectrum the model fits exactly is ~1e-16, and scaling
-    by that would have the loss discount channels over floating-point noise. The
-    fit must fall back to plain least squares and stay exact.
-    """
-    freq_arr_hz, ref_freq_hz = _band()
-    x_arr = freq_arr_hz / ref_freq_hz
-    truth = 2.0 * power_law(1)(x_arr, 1.0, -1.4)  # exactly representable, no noise
-
-    fit = fit_stokes_i_model(
-        freq_arr_hz=freq_arr_hz,
-        ref_freq_hz=ref_freq_hz,
-        stokes_i_arr=truth,
-        stokes_i_error_arr=np.zeros(N_CHAN),
-        options=StokesIFitOptions(fit_order=1, snr_cut=None),
-    )
-    assert fit is not None
-    popt = np.asarray(fit.popt)
-    assert popt[0] == pytest.approx(2.0, rel=1e-6)
-    assert popt[1] == pytest.approx(-1.4, rel=1e-6)
+        for loss in losses
+    ]
+    assert fits[0] is not None
+    assert fits[1] is not None
+    np.testing.assert_allclose(np.asarray(fits[0].popt), np.asarray(fits[1].popt))
 
 
 def test_a_failed_fit_is_unscoreable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The flat model a total failure falls back to must not win on AIC.
-
-    `dynamic_fit` compares orders by AIC, and a flat model's residuals are all
-    large, so the robust weighting shrinks its SSR. It still scores far worse
-    than a real fit, but it is not a candidate at all, so it goes in as inf the
-    way `flat_fit_result` does.
-    """
-    from rm_lite.utils import fitting
+    """A flat model nothing converged to is not a candidate, so it scores inf
+    rather than competing on AIC once the weighting has shrunk its residuals."""
 
     def _always_fails(*_args: object, **_kwargs: object) -> None:
         msg = "curve_fit forced to fail"
         raise RuntimeError(msg)
 
-    monkeypatch.setattr(fitting.optimize, "curve_fit", _always_fails)
+    monkeypatch.setattr(optimize, "curve_fit", _always_fails)
     _, _, _, stokes_i_arr, stokes_i_error_arr = _clean_spectrum()
     freq_arr_hz, ref_freq_hz = _band()
-    fit = fitting.static_fit(
+    fit = static_fit(
         freq_arr_hz, ref_freq_hz, stokes_i_arr, stokes_i_error_arr, 2, "log"
     )
     assert fit.aic == np.inf
