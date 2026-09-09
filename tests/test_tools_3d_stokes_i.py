@@ -22,6 +22,7 @@ from rm_lite.utils.fitting import (
     coefficient_errors,
     coefficient_names,
     fit_stokes_i_model,
+    flat_model_value,
     model_is_usable,
     pad_coefficients,
     polynomial,
@@ -638,6 +639,7 @@ def test_model_is_usable_accepts_real_spectra(
         ("non-finite", np.array([1.0, np.nan, 1.0])),
         ("negative", np.array([1.0, -1.0, 1.0])),
         ("zero", np.array([1.0, 0.0, 1.0])),
+        ("too small to divide by", np.array([1.0, 5e-324, 1.0])),
     ],
 )
 def test_model_is_usable_rejects_models_that_cannot_divide(
@@ -1127,3 +1129,81 @@ def test_stokes_i_robust_options_reach_the_fit() -> None:
     plain_alpha = np.asarray(_require(plain.stokes_i_alpha_map).compute())
     np.testing.assert_allclose(robust_alpha, -0.8, atol=0.05)
     assert np.abs(plain_alpha - (-0.8)).max() > np.abs(robust_alpha - (-0.8)).max()
+
+
+@pytest.mark.parametrize(
+    ("label", "mean_flux", "expected"),
+    [
+        ("usable mean", 0.4, 0.4),
+        ("tiny but usable", 1e-6, 1e-6),
+        ("zero", 0.0, 1.0),
+        ("negative", -0.2, 1.0),
+        ("too small", 5e-324, 1.0),
+        ("nan", np.nan, 1.0),
+    ],
+)
+def test_flat_model_value(label: str, mean_flux: float, expected: float) -> None:
+    assert flat_model_value(mean_flux) == expected, label
+
+
+def test_unfitted_pixels_report_no_reference_flux() -> None:
+    """A pixel below the SNR cut gets no flux, so fractional polarisation cannot
+    be computed against a mean of noise. Its FDF is still the uncorrected one."""
+    faint = [(0, 0), (2, 3)]
+    q, u, i_obs, err, freq = _cube_with_faint_pixels(faint)
+    common: dict[str, Any] = {
+        "d_phi_radm2": D_PHI_RADM2,
+        "weight_type": "uniform",
+        "phi_max_radm2": 200.0,
+    }
+    result = rmsynth_3d(
+        _chunked(q),
+        _chunked(u),
+        freq,
+        stokes_i=_chunked(i_obs),
+        stokes_i_error=_chunked(err),
+        stokes_i_snr_cut=5.0,
+        **common,
+    )
+    raw = rmsynth_3d(_chunked(q), _chunked(u), freq, **common)
+
+    ref_flux = np.asarray(_require(result.stokes_i_ref_flux_map).compute())
+    fdf = result.fdf_dirty_cube.compute()
+    fdf_raw = raw.fdf_dirty_cube.compute()
+
+    faint_mask = np.zeros(ref_flux.shape, dtype=bool)
+    for j, i in faint:
+        faint_mask[j, i] = True
+    assert np.isnan(ref_flux[faint_mask]).all()
+    assert np.isfinite(ref_flux[~faint_mask]).all()
+    assert (ref_flux[~faint_mask] > 0).all()
+    # The rescale still used the flat value, so the FDF is uncorrected, not NaN.
+    for j, i in faint:
+        np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
+
+
+def test_negative_stokes_i_reports_no_flux_and_a_finite_fdf() -> None:
+    """A negative pixel (a CLEAN sidelobe, say) used to export its negative mean
+    as a flux, flipping the sign of any fractional polarisation."""
+    cube = _make_cube(ny=2, nx=2, alpha=-0.8, noise=0.01)
+    stokes_i = cube.stokes_i.copy()
+    stokes_i[:, 0, 0] = -stokes_i[:, 0, 0]  # a strong, negative pixel
+    result = rmsynth_3d(
+        _chunked(cube.stokes_q),
+        _chunked(cube.stokes_u),
+        cube.freq_arr_hz,
+        stokes_i=_chunked(stokes_i),
+        stokes_i_error=np.full(cube.freq_arr_hz.size, 0.01),
+        stokes_i_snr_cut=None,
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+    )
+    ref_flux = np.asarray(_require(result.stokes_i_ref_flux_map).compute())
+    model = np.asarray(_require(result.stokes_i_model_cube).compute())
+    fdf = result.fdf_dirty_cube.compute()
+
+    assert np.isnan(ref_flux[0, 0])
+    assert np.isfinite(ref_flux[1:]).all()
+    # Nothing divides by zero or a negative, so the FDF stays finite everywhere.
+    assert (model > 0).all()
+    assert np.isfinite(fdf).all()

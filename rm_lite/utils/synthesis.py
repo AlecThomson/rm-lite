@@ -34,6 +34,7 @@ from rm_lite.utils.fitting import (
     fit_sampled_peak,
     fit_stokes_i_model,
     flat_fit_result,
+    flat_model_value,
     gaussian_integrand,
     model_is_usable,
     sample_model_error,
@@ -1121,7 +1122,7 @@ def create_fractional_spectra(
             "model at the mean Stokes I, so Q/U get no spectral correction."
         )
         fit_result = flat_fit_result(
-            float(np.mean(i_good)),
+            flat_model_value(float(np.mean(i_good))),
             len(np.asarray(fit_result.popt)) - 1,
             fit_options.fit_function,
         )
