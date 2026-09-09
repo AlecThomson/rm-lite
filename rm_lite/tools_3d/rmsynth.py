@@ -98,8 +98,9 @@ class RMSynth3DResults(NamedTuple):
     stokes_i_ref_flux_map: da.Array | None = None
     """Stokes I model at the reference frequency (`lambda2_to_freq(lam_sq_0_m2)`),
     shape (ny, nx). This is the factor the fractional FDF was multiplied by to
-    reach flux units. A 2D map, like the moment maps. None unless a Stokes I cube
-    or model was supplied."""
+    reach flux units. A 2D map, like the moment maps. NaN where a pixel was not
+    fitted, so nothing divides by a mean of noise. None unless a Stokes I cube or
+    model was supplied."""
     stokes_i_alpha_map: da.Array | None = None
     """Stokes I spectral index (d ln I / d ln nu) at the reference frequency,
     shape (ny, nx). A 2D map, like the moment maps. NaN where a pixel was not
@@ -718,6 +719,11 @@ def rmsynth_3d(
     if ref_flux_map is not None:
         # Rescale fractional FDF to absolute polarised flux per pixel.
         fdf_dirty_cube = fdf_dirty_cube * ref_flux_map[np.newaxis, :, :]
+
+    if ref_flux_map is not None and order_map is not None:
+        # The rescale needs the flat fallback value, but on unfitted pixels
+        # it is a mean of noise, so don't report it as a flux.
+        ref_flux_map = da.where(da.isfinite(order_map), ref_flux_map, np.nan)
 
     if per_pixel_ref:
         # Synthesised at the cube's reference, then moved to each pixel's own.

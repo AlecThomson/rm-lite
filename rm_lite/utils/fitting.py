@@ -561,13 +561,17 @@ def check_snr_cut_has_error(
 
 
 def model_is_usable(model: NDArray[np.float64]) -> bool:
-    """Whether a fitted Stokes I model can safely divide Q/U.
+    """Whether a Stokes I model can safely divide Q/U: finite, and not zero,
+    negative, or too small to divide by."""
+    return bool(
+        np.all(np.isfinite(model)) and np.min(model) > np.finfo(np.float64).tiny
+    )
 
-    Q/U are divided by the model, so one that reaches zero or goes negative
-    anywhere in the band flips or blows up the fractional polarisation instead
-    of correcting it.
-    """
-    return bool(np.all(np.isfinite(model)) and np.min(model) > 0.0)
+
+def flat_model_value(mean_flux: float) -> float:
+    """Divisor to use where no usable model was fitted. The mean cancels out of
+    the FDF, leaving Q/U uncorrected; 1.0 where the mean cannot divide."""
+    return mean_flux if model_is_usable(np.array([mean_flux])) else 1.0
 
 
 def coefficient_names(
@@ -974,9 +978,8 @@ def _write_flat_model(
     planes: BlockPlanes,
     mean_flux: float,
 ) -> None:
-    """Flat model at the pixel's mean Stokes I: no correction, everything the fit
-    would have said (alpha, order, terms, errors) stays NaN."""
-    out[planes.model, y, x] = mean_flux
+    """Flat model, so Q/U get no correction; alpha, order and terms stay NaN."""
+    out[planes.model, y, x] = flat_model_value(mean_flux)
 
 
 RefFreqHz: TypeAlias = float | NDArray[np.float64]
