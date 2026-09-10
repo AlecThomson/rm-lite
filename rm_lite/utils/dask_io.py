@@ -306,46 +306,6 @@ def read_fits_cube_dask(
     return cube, header
 
 
-def _zarr_sink(
-    fits_file: str | Path,
-    store: str | Path,
-    spatial_chunk: tuple[int, int],
-    shard_rows: int | None,
-    overwrite: bool,
-    compressors: Sequence[Any],
-) -> tuple[da.Array, zarr.Array, str]:
-    """The lazy cube, the store to pour it into, and a line describing the layout."""
-    (n_freq, ny, nx), dtype, header = _cube_meta(fits_file)
-    cy, cx = spatial_chunk
-
-    shards = None
-    write_rows = cy
-    if shard_rows is not None:
-        # A shard holds a whole number of chunks on every axis, and one write
-        # task has to own a whole shard: a shard is one file, so two tasks
-        # writing different chunks of it race and the loser's chunks are lost.
-        # Full width, so a write task is one contiguous band of the FITS cube.
-        rows = min(ny, max(cy, shard_rows - shard_rows % cy))
-        shards = (n_freq, rows, math.ceil(nx / cx) * cx)
-        write_rows = rows
-
-    cube, _ = read_fits_cube_dask(fits_file, spatial_chunk=(write_rows, nx))
-    sink = zarr.create_array(
-        store=str(store),
-        shape=(n_freq, ny, nx),
-        chunks=(n_freq, cy, cx),
-        shards=shards,
-        dtype=dtype,
-        overwrite=overwrite,
-        compressors=tuple(compressors),
-    )
-    sink.attrs["fits_header"] = header.tostring()
-    layout = f"chunked {(n_freq, cy, cx)}" + (
-        f" in shards of {shards}." if shards else "."
-    )
-    return cube, sink, layout
-
-
 def fits_cube_to_zarr(
     fits_file: str | Path,
     store: str | Path,
@@ -389,68 +349,40 @@ def fits_cube_to_zarr(
     Returns:
         Path: The store that was written.
     """
-    cube, sink, layout = _zarr_sink(
-        fits_file, store, spatial_chunk, shard_rows, overwrite, compressors
+    (n_freq, ny, nx), dtype, header = _cube_meta(fits_file)
+    cy, cx = spatial_chunk
+
+    shards = None
+    write_rows = cy
+    if shard_rows is not None:
+        # A shard holds a whole number of chunks on every axis, and one write
+        # task has to own a whole shard: a shard is one file, so two tasks
+        # writing different chunks of it race and the loser's chunks are lost.
+        # Full width, so a write task is one contiguous band of the FITS cube.
+        rows = min(ny, max(cy, shard_rows - shard_rows % cy))
+        shards = (n_freq, rows, math.ceil(nx / cx) * cx)
+        write_rows = rows
+
+    cube, _ = read_fits_cube_dask(fits_file, spatial_chunk=(write_rows, nx))
+    sink = zarr.create_array(
+        store=str(store),
+        shape=(n_freq, ny, nx),
+        chunks=(n_freq, cy, cx),
+        shards=shards,
+        dtype=dtype,
+        overwrite=overwrite,
+        compressors=tuple(compressors),
     )
+    sink.attrs["fits_header"] = header.tostring()
+
     tick = time.time()
     with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
         compute(da.store(cube, sink, lock=False, compute=False))
     logger.info(
-        f"Wrote {fits_file} to {store} in {time.time() - tick:.3g} seconds, {layout}"
+        f"Wrote {fits_file} to {store} in {time.time() - tick:.3g} seconds, "
+        f"chunked {(n_freq, cy, cx)}" + (f" in shards of {shards}." if shards else ".")
     )
     return Path(store)
-
-
-def fits_cubes_to_zarr(
-    jobs: Mapping[str, tuple[str | Path, str | Path]],
-    spatial_chunk: tuple[int, int],
-    shard_rows: int | None = None,
-    overwrite: bool = True,
-    compressors: Sequence[Any] = DEFAULT_ZARR_COMPRESSORS,
-) -> dict[str, Path]:
-    """`fits_cube_to_zarr` for several cubes, in one dask graph.
-
-    A cube converted on its own is a blocking compute, so a second cube cannot
-    start until the first has finished: the reads and the compression of
-    different cubes never overlap, and the ragged end of each cube leaves
-    workers idle. One graph over every cube lets the scheduler fill those gaps.
-
-    Args:
-        jobs (Mapping[str, tuple[str | Path, str | Path]]): `(fits_file, store)`
-            per cube, keyed by whatever the caller wants back.
-        spatial_chunk (tuple[int, int]): `(cy, cx)` chunk shape, as
-            `fits_cube_to_zarr`.
-        shard_rows (int | None, optional): Rows of chunks per shard. Defaults to
-            None, one file per chunk.
-        overwrite (bool, optional): Overwrite existing stores. Defaults to True.
-        compressors (Sequence[Any], optional): Zarr codecs. Defaults to
-            `DEFAULT_ZARR_COMPRESSORS`.
-
-    Returns:
-        dict[str, Path]: The store written for each key in `jobs`.
-    """
-    pairs = []
-    stores: dict[str, Path] = {}
-    for key, (fits_file, store) in jobs.items():
-        cube, sink, layout = _zarr_sink(
-            fits_file, store, spatial_chunk, shard_rows, overwrite, compressors
-        )
-        pairs.append((cube, sink))
-        stores[key] = Path(store)
-        logger.info(f"Writing {fits_file} to {store}, {layout}")
-
-    if not pairs:
-        return stores
-
-    tick = time.time()
-    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
-        compute(
-            [da.store(cube, sink, lock=False, compute=False) for cube, sink in pairs]
-        )
-    logger.info(
-        f"Wrote {len(pairs)} cubes to zarr in {time.time() - tick:.3g} seconds."
-    )
-    return stores
 
 
 def read_zarr_cube_dask(store: str | Path) -> tuple[da.Array, Header]:

@@ -24,7 +24,7 @@ from rm_lite.utils.dask_io import (
     complex_pol_dask,
     estimate_channel_noise_mad,
     estimate_single_stokes_channel_noise,
-    fits_cubes_to_zarr,
+    fits_cube_to_zarr,
     freq_arr_hz_from_header,
     read_cube_channel_chunks,
     read_cube_dask,
@@ -987,31 +987,33 @@ def _convert_cubes_to_zarr(
     spatial_chunk: tuple[int, int],
     shard_rows: int,
 ) -> dict[str, Path | None]:
-    """Copy every cube to a zarr store beside it, chunked for the FDF, in one pass.
+    """Copy each cube to a zarr store beside it, chunked for the FDF.
 
     `cube.fits` gives `cube.zarr`, so a store is always named after the cube it
     came from and two cubes can never land on the same one.
 
-    All the cubes go in one dask graph rather than a blocking convert each, so
-    one cube's read overlaps another's compression instead of waiting for it.
+    One blocking convert per cube, so each logs its own time. Putting them all
+    in one dask graph would let one cube's read overlap another's compression,
+    but a cube has far more bands than there are workers, so there is nothing
+    left over for a second cube to fill.
 
     Rewritten every run rather than reused: a store that no longer matches its
     cube would be used without anyone noticing. Convert once with
-    `rm_lite.utils.dask_io.fits_cubes_to_zarr` and pass the stores in directly to
+    `rm_lite.utils.dask_io.fits_cube_to_zarr` and pass the stores in directly to
     keep them between runs.
     """
     converted: dict[str, Path | None] = {}
-    jobs: dict[str, tuple[str | Path, Path]] = {}
     for name, path in cube_files.items():
         if path is None or Path(path).suffix == ".zarr":
             converted[name] = None if path is None else Path(path)
             continue
-        jobs[name] = (path, Path(path).with_suffix(".zarr"))
-
-    written = fits_cubes_to_zarr(
-        jobs, spatial_chunk=spatial_chunk, shard_rows=shard_rows
-    )
-    return {**converted, **written}
+        converted[name] = fits_cube_to_zarr(
+            path,
+            Path(path).with_suffix(".zarr"),
+            spatial_chunk=spatial_chunk,
+            shard_rows=shard_rows,
+        )
+    return converted
 
 
 def rmsynth_3d_from_fits(
