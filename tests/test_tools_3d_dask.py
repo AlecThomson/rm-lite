@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 import warnings
 from pathlib import Path
@@ -26,6 +27,7 @@ from rm_lite.tools_3d.rmclean import (
 )
 from rm_lite.tools_3d.rmsynth import (
     _match_chunks_to_fdf,
+    fdf_spatial_chunk,
     rmsynth_3d,
     rmsynth_3d_from_fits,
 )
@@ -493,11 +495,11 @@ def test_spatial_chunk_size_gives_full_width_bands_within_target():
 def test_tile_spatial_chunk_squares_up_within_the_read_band():
     # Wide cube: rows are capped by the band, so the tile is as wide as the
     # leftover area allows rather than square.
-    assert tile_spatial_chunk((1, 19533), 27, 19533) == (27, 723)
+    assert tile_spatial_chunk((1, 20000), 26, 20000) == (26, 741)
     # Narrow cube: the band is deeper than the area needs, so the tile squares up.
-    assert tile_spatial_chunk((6, 2000), 268, 2000) == (109, 110)
+    assert tile_spatial_chunk((6, 2000), 268, 2000) == (113, 106)
     # Never wider than the image, and never smaller than a single pixel.
-    assert tile_spatial_chunk((4, 4), 100, 3) == (4, 3)
+    assert tile_spatial_chunk((4, 4), 4, 3) == (4, 3)
     assert tile_spatial_chunk((1, 1), 100, 100) == (1, 1)
 
 
@@ -509,6 +511,50 @@ def test_tile_spatial_chunk_keeps_the_area_it_was_given(spatial_chunk, band_rows
     """The chunk was sized for a memory budget, so tiling must not grow it."""
     cy, cx = tile_spatial_chunk(spatial_chunk, band_rows, nx)
     assert cy * cx <= spatial_chunk[0] * spatial_chunk[1]
+
+
+def test_tile_spatial_chunk_spreads_the_width_evenly():
+    """A sliver of a last tile is stored at full width, so it is waste."""
+    # 200 in 139-wide tiles would store 278 columns to hold 200.
+    cy, cx = tile_spatial_chunk((97, 200), 2684, 200)
+    assert (cx, math.ceil(200 / cx) * cx) == (100, 200)
+    # The area the evening-up frees goes back into rows, not out the window.
+    assert cy * cx == 19400
+
+
+@pytest.mark.parametrize("n_freq", [36, 125, 288])
+@pytest.mark.parametrize("n_phi_double", [200, 1720, 6000])
+@pytest.mark.parametrize("ny", [64, 512, 2048, 20000])
+@pytest.mark.parametrize("nx", [64, 200, 1000, 20000, 40000])
+def test_zarr_layout_holds_at_every_cube_size(n_freq, n_phi_double, ny, nx):
+    """The layout has to stay legal and frugal across the whole size range.
+
+    A shard is one file that one write task owns, so it must hold a whole
+    number of chunks on every axis; zarr is the arbiter of that. The chunk must
+    also stay inside the memory budget it was sized for, and must not pad the
+    image edge with columns that are written but never read.
+    """
+    band_rows, _ = spatial_chunk_size(
+        n_freq=n_freq, ny=ny, nx=nx, itemsize=4, target_chunk_mb=256
+    )
+    budget = fdf_spatial_chunk(n_phi_double, np.dtype("complex64"), 256, ny, nx)
+    cy, cx = tile_spatial_chunk(budget, band_rows, nx)
+    shard_rows = min(ny, max(cy, band_rows - band_rows % cy))
+    shards = (n_freq, shard_rows, math.ceil(nx / cx) * cx)
+
+    assert cy * cx <= budget[0] * budget[1], "chunk outgrew its memory budget"
+    assert cy <= band_rows, "chunk spans more rows than one read band"
+    assert shard_rows % cy == 0, "shard holds a partial chunk"
+    assert shards[2] % cx == 0, "shard holds a partial chunk"
+    assert shards[2] - nx < cx, "shard pads the width by a whole tile"
+    # zarr rejects a shard that is not a whole multiple of its chunk.
+    zarr.create_array(
+        store={},
+        shape=(n_freq, ny, nx),
+        chunks=(n_freq, cy, cx),
+        shards=shards,
+        dtype="float32",
+    )
 
 
 def test_channel_chunk_size_respects_target_and_bounds():

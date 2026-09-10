@@ -95,12 +95,20 @@ def tile_spatial_chunk(
         nx (int): Full image width in pixels.
 
     Returns:
-        tuple[int, int]: Tiled `(cy, cx)`, of the same area as the input.
+        tuple[int, int]: Tiled `(cy, cx)`, of no greater area than the input.
     """
     cy, cx = spatial_chunk
     area = cy * cx
     rows = max(1, min(band_rows, math.isqrt(area)))
-    return rows, min(nx, max(1, area // rows))
+    cols = min(nx, max(1, area // rows))
+    # Spread the width evenly over the tiles it takes rather than leaving a
+    # sliver at the end: zarr stores a partial edge chunk at its full width, so
+    # a 200-wide cube in 139-wide tiles writes 278 columns to hold 200.
+    cols = math.ceil(nx / math.ceil(nx / cols))
+    # Evening up the width frees area, and a cube narrower than one tile never
+    # spent it in the first place. Rows take it back: fewer chunks, same memory.
+    rows = max(1, min(band_rows, area // cols))
+    return rows, cols
 
 
 def channel_chunk_size(
