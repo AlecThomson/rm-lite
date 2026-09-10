@@ -4,8 +4,17 @@ from __future__ import annotations
 
 import time
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, NamedTuple, TypeAlias, TypeVar, cast, get_args
+from typing import (
+    Any,
+    Literal,
+    NamedTuple,
+    TypeAlias,
+    TypeVar,
+    cast,
+    get_args,
+)
 
 import dask.array as da
 import finufft
@@ -20,8 +29,10 @@ from tqdm.auto import trange
 from rm_lite.utils.arrays import (
     arange,
     broadcast_over_channels,
+    complex_dtype,
     float_if_scalar,
     nd_to_two_d,
+    real_dtype,
     two_d_to_nd,
     zero_nonfinite,
 )
@@ -81,9 +92,9 @@ class RMSFResults(NamedTuple):
 class StokesData(NamedTuple):
     """Stokes parameters and errors"""
 
-    complex_pol_arr: NDArray[np.complex128]
+    complex_pol_arr: NDArray[np.complexfloating]
     """ Stokes Q and U array """
-    complex_pol_error: NDArray[np.complex128]
+    complex_pol_error: NDArray[np.complexfloating]
     """ Stokes Q and U error array """
     freq_arr_hz: NDArray[np.float64]
     """ Frequency array in Hz """
@@ -192,7 +203,7 @@ class FDFOptions:
 
 
 def calc_mom2_fdf(
-    complex_fdf_arr: NDArray[np.complex128], phi_arr_radm2: NDArray[np.float64]
+    complex_fdf_arr: NDArray[np.complexfloating], phi_arr_radm2: NDArray[np.float64]
 ) -> float:
     """
     Calculate the 2nd moment of the polarised intensity FDF. Can be applied to
@@ -210,7 +221,7 @@ def calc_mom2_fdf(
 
 
 def validate_phi_arr(
-    complex_fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    complex_fdf_arr: NDArray[np.complexfloating] | NDArray[np.floating],
     phi_arr_radm2: NDArray[np.float64],
     axis: int,
 ) -> NDArray[np.float64]:
@@ -277,7 +288,7 @@ def _require_single_chunk_on_axis(arr: Any, axis: int, reason: str) -> None:
 
 
 def coherent_polarisation(
-    complex_fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    complex_fdf_arr: NDArray[np.complexfloating] | NDArray[np.floating],
     valid: NDArray[np.bool_],
     axis: int,
     scale: float | NDArray[np.float64],
@@ -316,7 +327,7 @@ def weighted_moment_error(
 
 
 def calc_faraday_moments(
-    complex_fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    complex_fdf_arr: NDArray[np.complexfloating] | NDArray[np.floating],
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float | NDArray[np.float64],
     axis: int = 0,
@@ -345,7 +356,7 @@ def calc_faraday_moments(
     reduce over the Faraday depth axis, so for dask that axis must be one chunk.
 
     Args:
-        complex_fdf_arr (NDArray[np.complex128]): Complex (or real) FDF.
+        complex_fdf_arr (NDArray[np.complexfloating]): Complex (or real) FDF.
         phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth array in rad/m^2.
         fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
             An array must broadcast against the FDF shape with the Faraday depth axis removed.
@@ -407,7 +418,7 @@ def calc_faraday_moments(
             msg = "`lam_sq_0_m2` is required when `debias=True`."
             raise ValueError(msg)
         abs_fdf_arr = debias_fdf(
-            cast("NDArray[np.complex128]", complex_fdf_arr),
+            cast("NDArray[np.complexfloating]", complex_fdf_arr),
             phi_arr_radm2=phi_arr_radm2,
             lam_sq_0_m2=lam_sq_0_m2,
             axis=axis,
@@ -560,7 +571,7 @@ def debias_polarised_intensity(
 
 
 def polarisation_angle_deg(
-    complex_pol: complex | NDArray[np.complex128],
+    complex_pol: complex | NDArray[np.complexfloating],
 ) -> NDArray[np.float64]:
     """Polarisation angle of Q + iU in degrees, wrapped into [0, 180)."""
     return 0.5 * np.degrees(np.arctan2(complex_pol.imag, complex_pol.real)) % 180.0
@@ -656,7 +667,7 @@ class FaradayPeaks(NamedTuple):
 def calc_peak_stats(
     peak_pi: float | NDArray[np.float64],
     peak_rm_radm2: float | NDArray[np.float64],
-    peak_fdf: complex | NDArray[np.complex128],
+    peak_fdf: complex | NDArray[np.complexfloating],
     fwhm_rmsf_radm2: float | NDArray[np.float64],
     fdf_error: float | NDArray[np.float64] | None = None,
     lam_sq_0_m2: float | NDArray[np.float64] | None = None,
@@ -673,7 +684,7 @@ def calc_peak_stats(
     Args:
         peak_pi (float | NDArray[np.float64]): Peak polarised intensity, in FDF amplitude units.
         peak_rm_radm2 (float | NDArray[np.float64]): Faraday depth of the peak in rad/m^2.
-        peak_fdf (complex | NDArray[np.complex128]): Complex FDF at the peak, for the angle.
+        peak_fdf (complex | NDArray[np.complexfloating]): Complex FDF at the peak, for the angle.
         fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
         fdf_error (float | NDArray[np.float64] | None, optional): Theoretical FDF noise, scalar
             or a per-pixel map (`TheoreticalNoise.fdf_error_noise`). Enables the
@@ -737,7 +748,7 @@ def calc_peak_stats(
 
 
 def calc_faraday_peaks(
-    complex_fdf_arr: NDArray[np.complex128],
+    complex_fdf_arr: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float | NDArray[np.float64],
     axis: int = 0,
@@ -762,7 +773,7 @@ def calc_faraday_peaks(
     to select on.
 
     Args:
-        complex_fdf_arr (NDArray[np.complex128]): Complex FDF. Real input has no
+        complex_fdf_arr (NDArray[np.complexfloating]): Complex FDF. Real input has no
             polarisation angle, so it is rejected.
         phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth array in rad/m^2.
         fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
@@ -795,7 +806,7 @@ def calc_faraday_peaks(
     )
     peak_index_nd = np.expand_dims(peak_index, axis)
 
-    def sample_offset_from_peak(offset: int) -> NDArray[np.complex128]:
+    def sample_offset_from_peak(offset: int) -> NDArray[np.complexfloating]:
         """The FDF sample `offset` samples along from each spectrum's peak.
 
         A masked sum rather than a fancy-index gather: it dispatches to dask
@@ -803,7 +814,7 @@ def calc_faraday_peaks(
         """
         picked = np.where(sample_index == peak_index_nd + offset, complex_fdf_arr, 0)
         return cast(
-            "NDArray[np.complex128]",
+            "NDArray[np.complexfloating]",
             np.squeeze(np.sum(picked, axis=axis, keepdims=True), axis=axis),
         )
 
@@ -832,7 +843,7 @@ def calc_faraday_peaks(
 
 
 def _debias_fdf_block(
-    complex_fdf_arr: NDArray[np.complex128],
+    complex_fdf_arr: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     lam_sq_0_m2: float,
     axis: int,
@@ -899,7 +910,7 @@ def _debias_fdf_block(
 
 
 def debias_fdf(
-    complex_fdf_arr: NDArray[np.complex128],
+    complex_fdf_arr: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     lam_sq_0_m2: float,
     axis: int = 0,
@@ -934,7 +945,7 @@ def debias_fdf(
     chunk, as produced by `rm_lite.tools_3d`).
 
     Args:
-        complex_fdf_arr (NDArray[np.complex128]): Complex FDF with at least
+        complex_fdf_arr (NDArray[np.complexfloating]): Complex FDF with at least
             one spatial axis (2D or 3D).
         phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth
             array in rad/m^2.
@@ -1006,19 +1017,20 @@ def debias_fdf(
 def get_mask_index(
     stokes_data: StokesData,
 ) -> NDArray[np.bool_]:
-    return (
+    return cast(
+        "NDArray[np.bool_]",
         np.isfinite(stokes_data.complex_pol_arr)
         & np.isfinite(stokes_data.complex_pol_error)
-        & np.isfinite(stokes_data.freq_arr_hz)
+        & np.isfinite(stokes_data.freq_arr_hz),
     )
 
 
 def _fractional_with_error(
-    num: NDArray[np.float64],
-    num_err: NDArray[np.float64],
-    den: NDArray[np.float64],
-    den_err: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    num: NDArray[np.floating],
+    num_err: NDArray[np.floating],
+    den: NDArray[np.floating],
+    den_err: NDArray[np.floating],
+) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
     """Elementwise num/den with independent-error propagation.
 
     Same closed form `uncertainties` uses, but in numpy so a degenerate model
@@ -1068,9 +1080,10 @@ def create_fractional_spectra(
             stokes_q_frac_error_arr + 1j * stokes_u_frac_error_arr
         )
 
+        pol_dtype = stokes_data.complex_pol_arr.dtype
         fractional_stokes_data = stokes_data._replace(
-            complex_pol_arr=stokes_qu_frac_arr.astype(np.complex128),
-            complex_pol_error=stokes_qu_frac_error_arr.astype(np.complex128),
+            complex_pol_arr=stokes_qu_frac_arr.astype(pol_dtype),
+            complex_pol_error=stokes_qu_frac_error_arr.astype(pol_dtype),
         )
         return FractionalSpectra(
             stokes_data=fractional_stokes_data,
@@ -1130,6 +1143,11 @@ def create_fractional_spectra(
     stokes_i_model_arr, stokes_i_model_error = sample_model_error(
         fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples
     )
+    # The fit runs in double precision; taking the model back down to the data's
+    # keeps dividing by it from promoting the fractional spectra.
+    model_dtype = real_dtype(stokes_data.complex_pol_arr.dtype)
+    stokes_i_model_arr = stokes_i_model_arr.astype(model_dtype)
+    stokes_i_model_error = stokes_i_model_error.astype(model_dtype)
     stokes_q_frac_arr, stokes_q_frac_error_arr = _fractional_with_error(
         stokes_data.complex_pol_arr.real,
         stokes_data.complex_pol_error.real,
@@ -1197,7 +1215,7 @@ def lambda2_to_freq(lambda_sq_m2: T) -> T:
 
 
 def compute_theoretical_noise(
-    complex_pol_error: NDArray[np.complex128] | da.Array,
+    complex_pol_error: NDArray[np.complexfloating] | da.Array,
     weight_arr: NDArray[np.float64] | da.Array,
 ) -> TheoreticalNoise:
     """Theoretical FDF noise, reduced over channels only.
@@ -1363,7 +1381,7 @@ def _lambda_sq_density(
 
 def error_from_weight(
     weight_arr: NDArray[np.float64] | da.Array,
-) -> NDArray[np.complex128] | da.Array:
+) -> NDArray[np.complexfloating] | da.Array:
     """The complex Q/U error a weight implies, `1/sqrt(weight)`.
 
     Zero or blank weight means no information, so infinite error.
@@ -1378,8 +1396,8 @@ def error_from_weight(
     # multiplies inf by a zero real part and turns a blanked channel's error
     # into NaN.
     return cast(
-        "NDArray[np.complex128] | da.Array",
-        real_error.astype(np.complex128) * (1.0 + 1.0j),
+        "NDArray[np.complexfloating] | da.Array",
+        real_error.astype(complex_dtype(real_error.dtype)) * (1.0 + 1.0j),
     )
 
 
@@ -1564,11 +1582,11 @@ def lam_sq_0_per_pixel(
 
 
 def derotate_to(
-    fdf: NDArray[np.complex128],
+    fdf: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     from_lam_sq_0_m2: float | NDArray[np.float64],
     to_lam_sq_0_m2: float | NDArray[np.float64],
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Move an FDF or RMSF between reference lambda^2 values.
 
     B&dB eq. 25 is a shift theorem, so this is an exact phase ramp: amplitudes
@@ -1578,20 +1596,76 @@ def derotate_to(
     """
     shift = np.asarray(to_lam_sq_0_m2) - np.asarray(from_lam_sq_0_m2)
     phi_b = broadcast_over_channels(phi_arr_radm2, fdf)
-    return cast("NDArray[np.complex128]", fdf * np.exp(2j * phi_b * shift))
+    # The ramp is built in double precision, then taken down to the FDF's own so
+    # that derotating cannot promote it.
+    ramp = np.exp(2j * phi_b * shift).astype(fdf.dtype)
+    return cast("NDArray[np.complexfloating]", fdf * ramp)
+
+
+class PhiGrid(NamedTuple):
+    """The Faraday depth grid a set of frequencies and options imply."""
+
+    lambda_sq_arr_m2: NDArray[np.float64]
+    """Channel wavelength^2 in m^2."""
+    phi_arr_radm2: NDArray[np.float64]
+    """Faraday depths in rad/m^2."""
+    cell_m2: float
+    """lambda^2 gridding cell, capping the per-channel spacing for the
+    lambda^2-based weights so large gaps do not hand runaway weight to
+    gap-edge channels."""
+
+
+def compute_phi_grid(
+    freq_arr_hz: NDArray[np.float64], fdf_options: FDFOptions
+) -> PhiGrid:
+    """The Faraday depth grid, from the frequencies and options alone.
+
+    Takes no data, so a caller can work out how big an FDF chunk will be before
+    reading any cubes.
+
+    Raises:
+        ValueError: If neither d_phi_radm2 nor n_samples is given.
+    """
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
+    fwhm_rmsf_radm2, d_lambda_sq_max_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
+
+    if fdf_options.d_phi_radm2 is not None:
+        d_phi_radm2 = fdf_options.d_phi_radm2
+    elif fdf_options.n_samples is not None:
+        d_phi_radm2 = fwhm_rmsf_radm2 / fdf_options.n_samples
+    else:
+        msg = "Either d_phi_radm2 or n_samples must be provided."
+        raise ValueError(msg)
+
+    if fdf_options.phi_max_radm2 is None:
+        # Force the minimum phiMax to 10 FWHM
+        phi_max_radm2 = max(np.sqrt(3.0) / d_lambda_sq_max_m2, fwhm_rmsf_radm2 * 10.0)
+    else:
+        phi_max_radm2 = fdf_options.phi_max_radm2
+
+    phi_arr_radm2 = make_phi_arr(phi_max_radm2, d_phi_radm2)
+    logger.debug(
+        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by "
+        f"{d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
+    )
+    return PhiGrid(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        phi_arr_radm2=phi_arr_radm2,
+        cell_m2=float(np.sqrt(3.0) / phi_max_radm2),
+    )
 
 
 def compute_rmsynth_params(
     freq_arr_hz: NDArray[np.float64],
-    complex_pol_arr: NDArray[np.complex128],
-    complex_pol_error: NDArray[np.complex128],
+    complex_pol_arr: NDArray[np.complexfloating],
+    complex_pol_error: NDArray[np.complexfloating],
     fdf_options: FDFOptions,
 ) -> RMSynthParams:
     """Calculate the parameters for RM-synthesis.
 
     Args:
         freq_arr_hz (NDArray[np.float64]): Frequency array in Hz
-        pol_arr (NDArray[np.complex128]): Complex polarisation array
+        pol_arr (NDArray[np.complexfloating]): Complex polarisation array
         real_qu_error (NDArray[np.float64  |  np.float32]): Error in Stokes Q and U (real)
         fdf_options (FDFOptions): Options for RM-synthesis
 
@@ -1604,35 +1678,10 @@ def compute_rmsynth_params(
 
     real_qu_error = np.abs(complex_pol_error.real + complex_pol_error.imag) / 2.0
 
-    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
-
-    fwhm_rmsf_radm2, d_lambda_sq_max_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
-
-    if fdf_options.d_phi_radm2 is None and fdf_options.n_samples is not None:
-        d_phi_radm2 = fwhm_rmsf_radm2 / fdf_options.n_samples
-    elif fdf_options.d_phi_radm2 is not None:
-        d_phi_radm2 = fdf_options.d_phi_radm2
-    else:
-        msg = "Either d_phi_radm2 or n_samples must be provided."
-        raise ValueError(msg)
-
-    if fdf_options.phi_max_radm2 is None:
-        phi_max_radm2 = np.sqrt(3.0) / d_lambda_sq_max_m2
-        phi_max_radm2 = max(
-            phi_max_radm2, fwhm_rmsf_radm2 * 10.0
-        )  # Force the minimum phiMax to 10 FWHM
-    else:
-        phi_max_radm2 = fdf_options.phi_max_radm2
-
-    phi_arr_radm2 = make_phi_arr(phi_max_radm2, d_phi_radm2)
-
-    logger.debug(
-        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
-    )
-
-    # lambda^2 gridding cell: caps the per-channel spacing for the lambda^2-based
-    # weights so large gaps do not hand runaway weight to gap-edge channels.
-    cell_m2 = float(np.sqrt(3.0) / phi_max_radm2)
+    grid = compute_phi_grid(freq_arr_hz, fdf_options)
+    lambda_sq_arr_m2 = grid.lambda_sq_arr_m2
+    phi_arr_radm2 = grid.phi_arr_radm2
+    cell_m2 = grid.cell_m2
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
     mask = ~np.isfinite(complex_pol_arr)
@@ -1728,18 +1777,18 @@ def get_fwhm_rmsf(
 
 
 def rmsynth_nufft(
-    complex_pol_arr: NDArray[np.complex128],
+    complex_pol_arr: NDArray[np.complexfloating],
     lambda_sq_arr_m2: NDArray[np.float64],
     phi_arr_radm2: NDArray[np.float64],
     weight_arr: NDArray[np.float64],
     lam_sq_0_m2: float,
     eps: float = 1e-6,
     nthreads: int = 0,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Run RM-synthesis on a cube of Stokes Q and U data using the NUFFT method.
 
     Args:
-        complex_pol_arr (NDArray[np.complex128]): Complex polarisation values (Q + iU)
+        complex_pol_arr (NDArray[np.complexfloating]): Complex polarisation values (Q + iU)
         lambda_sq_arr_m2 (NDArray[np.float64]): Wavelength^2 values in m^2
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
         weight_arr (NDArray[np.float64]): Weight array. 1D (per-channel) if
@@ -1787,14 +1836,17 @@ def rmsynth_nufft(
         msg = f"Weight array must be 1D (per-channel) or match the data's {n_dims}D shape. Got {weight_arr.ndim}D."
         raise ValueError(msg)
 
-    flagged_weight_arr = zero_nonfinite(weight_arr)
+    # Matching the data's precision keeps the FDF at the precision it was given;
+    # a float64 weight against float32 data would silently double it.
+    flagged_weight_arr = zero_nonfinite(weight_arr).astype(
+        real_dtype(complex_pol_arr.dtype), copy=False
+    )
 
     if complex_pol_arr.size == 0:
         msg = "No unflagged data remains. Not doing rm-synthesis"
         logger.critical(msg)
-        return (
-            np.ones_like(phi_arr_radm2) * np.nan
-            + 1j * np.ones_like(phi_arr_radm2) * np.nan
+        return np.full(
+            phi_arr_radm2.shape, np.nan + 1j * np.nan, dtype=complex_pol_arr.dtype
         )
 
     # Reshape the data array (and, if 3D, the weight array identically) to 2
@@ -1833,10 +1885,10 @@ def rmsynth_nufft(
     mask_cube = ~np.isfinite(pol_cube)
     pol_cube = zero_nonfinite(pol_cube)
 
-    # If full planes are flagged then set corresponding weights to zero
-    mask_planes = np.sum(~mask_cube, axis=1, keepdims=True)
-    mask_planes = np.where(mask_planes == 0, 0, 1)
-    flagged_weight_arr = flagged_weight_arr * mask_planes
+    # If full planes are flagged then set corresponding weights to zero.
+    # Boolean, so multiplying by it leaves the weight's precision alone.
+    plane_has_data = np.any(~mask_cube, axis=1, keepdims=True)
+    flagged_weight_arr = flagged_weight_arr * plane_has_data
 
     # The K value used to scale each FDF spectrum must take into account
     # flagged voxels data in the datacube and can be position dependent
@@ -1885,17 +1937,17 @@ def rmsynth_nufft(
 
 
 def inverse_rmsynth_nufft(
-    complex_fdf_arr: NDArray[np.complex128],
+    complex_fdf_arr: NDArray[np.complexfloating],
     lambda_sq_arr_m2: NDArray[np.float64],
     phi_arr_radm2: NDArray[np.float64],
     lam_sq_0_m2: float,
     eps: float = 1e-6,
     nthreads: int = 0,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Inverse RM-synthesis - FDF to Stokes Q and U in wavelength^2 space.
 
     Args:
-        complex_fdf_arr (NDArray[np.complex128]): Complex polarisation array in Faraday depth space
+        complex_fdf_arr (NDArray[np.complexfloating]): Complex polarisation array in Faraday depth space
         lambda_sq_arr_m2 (NDArray[np.float64]): Wavelength^2 values in m^2
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth values in rad/m^2
         lam_sq_0_m2 (float): Reference wavelength^2 value
@@ -1999,8 +2051,11 @@ def get_rmsf_nufft(
         RMSFResults: rmsf_cube, phi_double_arr_radm2, fwhm_rmsf_arr, fit_status_arr
     """
     phi_double_arr_radm2 = make_double_phi_arr(phi_arr_radm2)
-    weight_arr = np.asarray(weight_arr, dtype=float).copy()
-    weight_arr = zero_nonfinite(weight_arr)
+    # The weight is the only numeric input, so it sets the RMSF's precision.
+    weight_arr = np.asarray(weight_arr)
+    weight_arr = zero_nonfinite(
+        weight_arr.astype(np.promote_types(weight_arr.dtype, np.float32))
+    )
 
     if weight_arr.ndim not in (1, 3):
         msg = "weight array must be 1D (per-channel) or 3D (per-channel, per-pixel)."
@@ -2071,9 +2126,8 @@ def get_rmsf_nufft(
     # check is relative to the mask's own pixel count (1 if spatially
     # uniform), not the true `num_pixels` -- a uniform mask flagging a
     # channel means it's flagged for every real pixel, by definition.
-    flag_xy_sum = np.sum(mask_arr, axis=1)
-    mskPlanes = np.where(flag_xy_sum == mask_arr.shape[-1], 0, 1)
-    weight_arr = weight_arr * mskPlanes[:, np.newaxis]
+    plane_has_data = np.sum(mask_arr, axis=1) != mask_arr.shape[-1]
+    weight_arr = weight_arr * plane_has_data[:, np.newaxis]
 
     # A pixel's RMSF depends on which channels it has flagged AND how it
     # weights the channels it keeps, so pixels can only share one RMSF if
@@ -2111,11 +2165,14 @@ def get_rmsf_nufft(
         scale_factor_arr = zero_nonfinite(scale_factor_arr)
 
     # Calculate the RMSF for each plane
-    exponent = lambda_sq_arr_m2 - lam_sq_0_m2
+    # finufft must have matching dtypes, so complex64 matches float32
+    exponent = (lambda_sq_arr_m2 - lam_sq_0_m2).astype(weight_cube.dtype)
     rmsf_cube = (
         finufft.nufft1d3(
             x=exponent,
-            c=np.ascontiguousarray(weight_cube.T).astype(complex),
+            c=np.ascontiguousarray(weight_cube.T).astype(
+                complex_dtype(weight_cube.dtype)
+            ),
             s=(phi_double_arr_radm2[::-1] * 2).astype(exponent.dtype),
             eps=eps,
             nthreads=nthreads,
@@ -2192,6 +2249,32 @@ def get_rmsf_nufft(
     )
 
 
+def frame_with_schema(
+    schema: pl.Schema, dtype: np.typing.DTypeLike, data: Mapping[str, Any]
+) -> pl.DataFrame:
+    """A result table matching `schema`, its float columns at the input's precision.
+
+    Values reaching a table come from a mix of sources, some of which stay in
+    double precision whatever the input was, so they are cast to the column type
+    rather than being trusted to arrive with it.
+    """
+    float_type = pl.Float32 if real_dtype(dtype) == np.float32 else pl.Float64
+    empty = pl.Schema(
+        {
+            name: float_type if field == pl.Float64 else field
+            for name, field in schema.items()
+        }
+    ).to_frame(eager=True)
+    if not data:
+        return empty
+    floats = {
+        name: field
+        for name, field in empty.schema.items()
+        if field in (pl.Float32, pl.Float64)
+    }
+    return empty.vstack(pl.DataFrame(data).cast(floats))
+
+
 fdf_params_schema = pl.Schema(
     {
         "fdf_error_mad": pl.Float64,
@@ -2244,12 +2327,12 @@ fdf_params_schema_df = fdf_params_schema.to_frame(eager=True)
 
 
 def get_fdf_parameters(
-    fdf_arr: NDArray[np.complex128],
+    fdf_arr: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
     freq_arr_hz: NDArray[np.float64],
-    complex_pol_arr: NDArray[np.complex128],
-    complex_pol_error: NDArray[np.complex128],
+    complex_pol_arr: NDArray[np.complexfloating],
+    complex_pol_error: NDArray[np.complexfloating],
     lambda_sq_arr_m2: NDArray[np.float64],
     lam_sq_0_m2: float,
     stokes_i_reference_flux: float,
@@ -2364,58 +2447,58 @@ def get_fdf_parameters(
         rm_radm2=peak_rm_fit,
     )
 
-    return fdf_params_schema_df.vstack(
-        pl.DataFrame(
-            {
-                "fdf_error_mad": fdf_error_mad,
-                "peak_pi_fit": peak_pi_fit,
-                "peak_pi_error": float(peak_stats.peak_pi_error),
-                "peak_pi_fit_debias": peak_pi_fit_debias,
-                "peak_pi_fit_snr": peak_pi_fit_snr,
-                "peak_pi_fit_index": int(peak_pi_fit_index)
-                if np.isfinite(peak_pi_fit_index)
-                else -1,
-                "peak_rm_fit": peak_rm_fit,
-                "peak_rm_fit_error": float(peak_stats.peak_rm_error_radm2),
-                "peak_q_fit": peak_q_fit,
-                "peak_u_fit": peak_u_fit,
-                "peak_pa_fit_deg": float(peak_stats.peak_pa_deg),
-                "peak_pa_fit_deg_error": float(peak_stats.peak_pa_error_deg),
-                "peak_pa0_fit_deg": float(peak_stats.peak_pa0_deg),
-                "peak_pa0_fit_deg_error": float(peak_stats.peak_pa0_error_deg),
-                "fit_function": fit_function,
-                "lam_sq_0_m2": lam_sq_0_m2,
-                "ref_freq_hz": lambda2_to_freq(lam_sq_0_m2),
-                "fwhm_rmsf_radm2": fwhm_rmsf_radm2,
-                "phi_max_scale_radm2": float(np.pi / np.nanmin(lambda_sq_arr_m2)),
-                "fdf_error_noise": theoretical_noise.fdf_error_noise,
-                "fdf_q_noise": theoretical_noise.fdf_q_noise,
-                "fdf_u_noise": theoretical_noise.fdf_u_noise,
-                "min_freq_hz": freq_arr_hz[good_chan_idx].min(),
-                "max_freq_hz": freq_arr_hz[good_chan_idx].max(),
-                "n_channels": int(n_good_chan),
-                "median_d_freq_hz": np.nanmedian(np.diff(freq_arr_hz[good_chan_idx])),
-                "frac_pol": peak_pi_fit_debias / stokes_i_reference_flux,
-                "frac_pol_error": theoretical_noise.fdf_error_noise
-                / stokes_i_reference_flux,
-                "sigma_add": stokes_sigma_add.sigma_add_p.sigma_add,
-                "sigma_add_minus": stokes_sigma_add.sigma_add_p.sigma_add_minus,
-                "sigma_add_plus": stokes_sigma_add.sigma_add_p.sigma_add_plus,
-                "mom0": float(moments.mom0),
-                "mom0_debias": float(moments.mom0_debias),
-                "mom0_error": float(moments.mom0_error),
-                "mom1_radm2": float(moments.mom1),
-                "mom1_error_radm2": float(moments.mom1_error),
-                "mom2_radm2": float(moments.mom2),
-                "mom2_error_radm2": float(moments.mom2_error),
-                "pi_lam_sq_0": float(moments.pi_lam_sq_0),
-                "pi_lam_sq_0_debias": float(moments.pi_lam_sq_0_debias),
-                "pi_lam_sq_0_error": float(moments.pi_lam_sq_0_error),
-                "pa_lam_sq_0_deg": float(moments.pa_lam_sq_0),
-                "pa_lam_sq_0_error_deg": float(moments.pa_lam_sq_0_error),
-                "moment_threshold_snr": moment_threshold_snr,
-            }
-        )
+    return frame_with_schema(
+        fdf_params_schema,
+        complex_pol_arr.dtype,
+        {
+            "fdf_error_mad": fdf_error_mad,
+            "peak_pi_fit": peak_pi_fit,
+            "peak_pi_error": float(peak_stats.peak_pi_error),
+            "peak_pi_fit_debias": peak_pi_fit_debias,
+            "peak_pi_fit_snr": peak_pi_fit_snr,
+            "peak_pi_fit_index": int(peak_pi_fit_index)
+            if np.isfinite(peak_pi_fit_index)
+            else -1,
+            "peak_rm_fit": peak_rm_fit,
+            "peak_rm_fit_error": float(peak_stats.peak_rm_error_radm2),
+            "peak_q_fit": peak_q_fit,
+            "peak_u_fit": peak_u_fit,
+            "peak_pa_fit_deg": float(peak_stats.peak_pa_deg),
+            "peak_pa_fit_deg_error": float(peak_stats.peak_pa_error_deg),
+            "peak_pa0_fit_deg": float(peak_stats.peak_pa0_deg),
+            "peak_pa0_fit_deg_error": float(peak_stats.peak_pa0_error_deg),
+            "fit_function": fit_function,
+            "lam_sq_0_m2": lam_sq_0_m2,
+            "ref_freq_hz": lambda2_to_freq(lam_sq_0_m2),
+            "fwhm_rmsf_radm2": fwhm_rmsf_radm2,
+            "phi_max_scale_radm2": float(np.pi / np.nanmin(lambda_sq_arr_m2)),
+            "fdf_error_noise": theoretical_noise.fdf_error_noise,
+            "fdf_q_noise": theoretical_noise.fdf_q_noise,
+            "fdf_u_noise": theoretical_noise.fdf_u_noise,
+            "min_freq_hz": freq_arr_hz[good_chan_idx].min(),
+            "max_freq_hz": freq_arr_hz[good_chan_idx].max(),
+            "n_channels": int(n_good_chan),
+            "median_d_freq_hz": np.nanmedian(np.diff(freq_arr_hz[good_chan_idx])),
+            "frac_pol": peak_pi_fit_debias / stokes_i_reference_flux,
+            "frac_pol_error": theoretical_noise.fdf_error_noise
+            / stokes_i_reference_flux,
+            "sigma_add": stokes_sigma_add.sigma_add_p.sigma_add,
+            "sigma_add_minus": stokes_sigma_add.sigma_add_p.sigma_add_minus,
+            "sigma_add_plus": stokes_sigma_add.sigma_add_p.sigma_add_plus,
+            "mom0": float(moments.mom0),
+            "mom0_debias": float(moments.mom0_debias),
+            "mom0_error": float(moments.mom0_error),
+            "mom1_radm2": float(moments.mom1),
+            "mom1_error_radm2": float(moments.mom1_error),
+            "mom2_radm2": float(moments.mom2),
+            "mom2_error_radm2": float(moments.mom2_error),
+            "pi_lam_sq_0": float(moments.pi_lam_sq_0),
+            "pi_lam_sq_0_debias": float(moments.pi_lam_sq_0_debias),
+            "pi_lam_sq_0_error": float(moments.pi_lam_sq_0_error),
+            "pa_lam_sq_0_deg": float(moments.pa_lam_sq_0),
+            "pa_lam_sq_0_error_deg": float(moments.pa_lam_sq_0_error),
+            "moment_threshold_snr": moment_threshold_snr,
+        },
     )
 
 
@@ -2536,8 +2619,8 @@ def calculate_sigma_add(
 
 def measure_qu_complexity(
     freq_arr_hz: NDArray[np.float64],
-    complex_pol_arr: NDArray[np.complex128],
-    complex_pol_error: NDArray[np.complex128],
+    complex_pol_arr: NDArray[np.complexfloating],
+    complex_pol_error: NDArray[np.complexfloating],
     frac_pol: float,
     psi0_deg: float,
     rm_radm2: float,
@@ -2606,7 +2689,7 @@ def measure_qu_complexity(
 
 
 def measure_fdf_complexity(
-    phi_arr_radm2: NDArray[np.float64], complex_fdf_arr: NDArray[np.complex128]
+    phi_arr_radm2: NDArray[np.float64], complex_fdf_arr: NDArray[np.complexfloating]
 ) -> float:
     # Second moment of clean component spectrum
     return calc_mom2_fdf(complex_fdf_arr=complex_fdf_arr, phi_arr_radm2=phi_arr_radm2)

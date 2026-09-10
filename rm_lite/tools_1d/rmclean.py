@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from scipy import interpolate
 
 from rm_lite.tools_1d.rmsynth import RMSynth1DResults
+from rm_lite.utils.arrays import column_array
 from rm_lite.utils.clean import (
     MultiscaleOptions,
     RMCleanOptions,
@@ -19,6 +20,7 @@ from rm_lite.utils.clean import (
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     TheoreticalNoise,
+    frame_with_schema,
     get_fdf_parameters,
     lambda2_to_freq,
 )
@@ -32,7 +34,6 @@ rmclean_arrs_schema = pl.Schema(
         "fdf_residual_complex_arr": pl.Object,
     }
 )
-rmclean_arrs_schema_df = rmclean_arrs_schema.to_frame(eager=True)
 
 rmclean_scalar_schema = pl.Schema(
     {
@@ -42,7 +43,6 @@ rmclean_scalar_schema = pl.Schema(
         "n_sub_minor_iter": pl.Int64,
     }
 )
-rmclean_scalar_schema_df = rmclean_scalar_schema.to_frame(eager=True)
 
 
 class RMClean1DResults(NamedTuple):
@@ -124,7 +124,7 @@ def run_rmclean_from_synth(
         )
     )
 
-    fdf_dirty_arr = rmsyth_arrs_df["fdf_dirty_complex_arr"].to_numpy().astype(complex)
+    fdf_dirty_arr = column_array(rmsyth_arrs_df["fdf_dirty_complex_arr"])
 
     multiscale_options = (
         MultiscaleOptions(
@@ -142,12 +142,10 @@ def run_rmclean_from_synth(
     rm_clean_results = rmclean(
         RMSynthArrays(
             dirty_fdf_arr=fdf_dirty_arr,
-            phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
-            rmsf_arr=rmsf_arrs_df["rmsf_complex_arr"].to_numpy().astype(complex),
-            phi_double_arr_radm2=rmsf_arrs_df["phi2_arr_radm2"]
-            .to_numpy()
-            .astype(float),
-            fwhm_rmsf_arr=fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float),
+            phi_arr_radm2=column_array(rmsyth_arrs_df["phi_arr_radm2"]),
+            rmsf_arr=column_array(rmsf_arrs_df["rmsf_complex_arr"]),
+            phi_double_arr_radm2=column_array(rmsf_arrs_df["phi2_arr_radm2"]),
+            fwhm_rmsf_arr=column_array(fdf_parameters["fwhm_rmsf_radm2"]),
             fdf_mask_arr=mask_arr,
         ),
         RMCleanOptions(
@@ -170,16 +168,14 @@ def run_rmclean_from_synth(
 
     fdf_parameters = get_fdf_parameters(
         fdf_arr=rm_clean_results.clean_fdf_arr,
-        phi_arr_radm2=rmsyth_arrs_df["phi_arr_radm2"].to_numpy().astype(float),
+        phi_arr_radm2=column_array(rmsyth_arrs_df["phi_arr_radm2"]),
         fwhm_rmsf_radm2=float(
-            fdf_parameters["fwhm_rmsf_radm2"].to_numpy().astype(float).squeeze()
+            column_array(fdf_parameters["fwhm_rmsf_radm2"]).squeeze()
         ),
-        freq_arr_hz=stokes_i_arrs_df["freq_arr_hz"].to_numpy().astype(float),
-        complex_pol_arr=stokes_i_arrs_df["complex_pol_arr"].to_numpy().astype(complex),
-        complex_pol_error=stokes_i_arrs_df["complex_pol_error"]
-        .to_numpy()
-        .astype(complex),
-        lambda_sq_arr_m2=stokes_i_arrs_df["lambda_sq_arr_m2"].to_numpy().astype(float),
+        freq_arr_hz=column_array(stokes_i_arrs_df["freq_arr_hz"]),
+        complex_pol_arr=column_array(stokes_i_arrs_df["complex_pol_arr"]),
+        complex_pol_error=column_array(stokes_i_arrs_df["complex_pol_error"]),
+        lambda_sq_arr_m2=column_array(stokes_i_arrs_df["lambda_sq_arr_m2"]),
         lam_sq_0_m2=float(fdf_parameters["lam_sq_0_m2"].to_numpy().squeeze()),
         stokes_i_reference_flux=stokes_i_reference_flux,
         theoretical_noise=theoretical_noise,
@@ -190,31 +186,29 @@ def run_rmclean_from_synth(
         moment_threshold_snr=moment_threshold_snr,
     )
 
-    rmclean_arrs = rmclean_arrs_schema_df.vstack(
-        pl.DataFrame(
-            {
-                "phi_arr_radm2": rmsyth_arrs_df["phi_arr_radm2"]
-                .to_numpy()
-                .astype(float),
-                "fdf_dirty_complex_arr": rmsyth_arrs_df["fdf_dirty_complex_arr"]
-                .to_numpy()
-                .astype(complex),
-                "fdf_clean_complex_arr": clean_fdf_arr,
-                "fdf_model_complex_arr": model_fdf_arr,
-                "fdf_residual_complex_arr": resid_fdf_arr,
-            }
-        )
+    rmclean_arrs = frame_with_schema(
+        rmclean_arrs_schema,
+        clean_fdf_arr.dtype,
+        {
+            "phi_arr_radm2": column_array(rmsyth_arrs_df["phi_arr_radm2"]),
+            "fdf_dirty_complex_arr": column_array(
+                rmsyth_arrs_df["fdf_dirty_complex_arr"]
+            ),
+            "fdf_clean_complex_arr": clean_fdf_arr,
+            "fdf_model_complex_arr": model_fdf_arr,
+            "fdf_residual_complex_arr": resid_fdf_arr,
+        },
     )
 
-    clean_parameters = rmclean_scalar_schema_df.vstack(
-        pl.DataFrame(
-            {
-                "mask": mask,
-                "threshold": threshold,
-                "n_iter": clean_iter_arr,
-                "n_sub_minor_iter": sub_minor_iter_arr,
-            }
-        )
+    clean_parameters = frame_with_schema(
+        rmclean_scalar_schema,
+        clean_fdf_arr.dtype,
+        {
+            "mask": mask,
+            "threshold": threshold,
+            "n_iter": clean_iter_arr,
+            "n_sub_minor_iter": sub_minor_iter_arr,
+        },
     )
 
     return RMClean1DResults(

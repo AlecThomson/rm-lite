@@ -1281,6 +1281,48 @@ def test_readers_agree_byte_for_byte_across_dtypes(tmp_path, dtype: str):
     np.testing.assert_array_equal(channels.compute(), spatial.compute())
 
 
+def test_rmsynth_3d_from_fits_reads_at_the_final_chunking(
+    tmp_path, synthetic_cube: SyntheticCube
+):
+    """Reading straight into the FDF's chunking leaves nothing to rechunk.
+
+    The Faraday depth grid follows from the frequencies alone, so how big an FDF
+    chunk will be is known before any cube is read.
+    """
+    freq_arr_hz = synthetic_cube.freq_arr_hz
+    header = Header()
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = freq_arr_hz[0]
+    header["CDELT3"] = freq_arr_hz[1] - freq_arr_hz[0]
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+    for name, data in (
+        ("q", synthetic_cube.stokes_q),
+        ("u", synthetic_cube.stokes_u),
+        ("i", np.ones_like(synthetic_cube.stokes_q)),
+    ):
+        fits.PrimaryHDU(data.astype(">f4"), header=header).writeto(
+            tmp_path / f"{name}.fits"
+        )
+
+    synth = rmsynth_3d_from_fits(
+        tmp_path / "q.fits",
+        tmp_path / "u.fits",
+        stokes_i_file=tmp_path / "i.fits",
+        stokes_i_snr_cut=None,
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=250.0,
+        per_pixel_rmsf=True,
+    )
+    clean = run_rmclean_from_synth(synth)
+
+    # Full image width, so only rows were chosen and the read delivers them.
+    assert synth.fdf_dirty_cube.chunksize[2] == synthetic_cube.stokes_q.shape[2]
+    assert not any(
+        "rechunk" in str(key) for key in clean.clean_fdf_cube.__dask_graph__()
+    )
+
+
 def test_rmsynth_3d_from_fits_on_a_dummy_stokes_axis(
     tmp_path, synthetic_cube: SyntheticCube
 ):
@@ -1432,35 +1474,34 @@ def test_channel_noise_warns_on_spatially_chunked_input(caplog):
     assert "read_fits_cube_channel_chunks" in caplog.text
 
 
-def test_rmsynth_3d_output_chunks_stay_within_the_input_chunk_budget():
-    """Spatial chunks shrink so an FDF chunk costs what the input chunk costs.
+def test_rmsynth_3d_output_chunks_meet_the_target_chunk_size():
+    """Spatial chunks shrink until an FDF chunk fits `target_chunk_mb`.
 
-    The Faraday-depth axis is longer than the frequency axis and complex128
-    rather than float32, so keeping the caller's spatial chunking would make
-    every output chunk a large multiple of the input chunk they sized.
+    The Faraday-depth axis is longer than the frequency axis and complex rather
+    than real, so keeping the caller's spatial chunking would make every output
+    chunk a large multiple of the target they asked for.
     """
     n_freq, ny, nx = 128, 64, 32
     freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
     stokes_q = RNG.normal(0, 1, (n_freq, ny, nx))
     stokes_u = RNG.normal(0, 1, (n_freq, ny, nx))
-
-    q_dask = _chunked(stokes_q, 32, nx)
-    u_dask = _chunked(stokes_u, 32, nx)
-    input_chunk_bytes = np.prod(q_dask.chunksize) * q_dask.dtype.itemsize
+    target_chunk_mb = 0.25
 
     synth = rmsynth_3d(
-        q_dask,
-        u_dask,
+        _chunked(stokes_q, 32, nx),
+        _chunked(stokes_u, 32, nx),
         freq_arr_hz,
         phi_max_radm2=100.0,
         d_phi_radm2=2.0,
         per_pixel_rmsf=True,
+        target_chunk_mb=target_chunk_mb,
     )
 
     assert synth.rmsf_cube is not None
     for cube in (synth.fdf_dirty_cube, synth.rmsf_cube):
-        assert np.prod(cube.chunksize) * cube.dtype.itemsize <= input_chunk_bytes
-    # Shrunk along y only, so each block is still one contiguous read.
+        chunk_bytes = np.prod(cube.chunksize) * cube.dtype.itemsize
+        assert chunk_bytes <= target_chunk_mb * 1024**2
+    # Rows are given up first, so a chunk is still one contiguous read.
     assert synth.fdf_dirty_cube.chunksize[2] == nx
     # And the result is unchanged by the rechunking.
     np.testing.assert_allclose(
@@ -1475,18 +1516,99 @@ def test_rmsynth_3d_output_chunks_stay_within_the_input_chunk_budget():
     )
 
 
-def test_rmsynth_3d_says_so_when_one_row_overshoots_the_budget(caplog):
-    """One FDF row is the chunking floor, so an overshoot is logged, not silent."""
+@pytest.mark.parametrize(
+    ("in_dtype", "out_dtype"),
+    [(np.float32, np.complex64), (np.float64, np.complex128)],
+)
+def test_rmsynth_3d_follows_the_input_precision(in_dtype, out_dtype):
+    """Single-precision cubes give a single-precision FDF, RMSF and CLEAN."""
+    n_freq, ny, nx = 64, 8, 8
+    freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
+    stokes_q = RNG.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
+    stokes_u = RNG.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
+
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 4, nx),
+        _chunked(stokes_u, 4, nx),
+        freq_arr_hz,
+        phi_max_radm2=100.0,
+        d_phi_radm2=2.0,
+        per_pixel_rmsf=True,
+    )
+    clean = run_rmclean_from_synth(synth)
+
+    assert synth.rmsf_cube is not None
+    # Both what dask is told and what the blocks actually produce.
+    for cube in (synth.fdf_dirty_cube, synth.rmsf_cube, clean.clean_fdf_cube):
+        assert cube.dtype == out_dtype
+        assert cube.compute().dtype == out_dtype
+    assert synth.rmsf_arr.dtype == out_dtype
+
+
+def test_rmclean_3d_builds_the_rmsf_in_its_own_task(synthetic_cube: SyntheticCube):
+    """Building the RMSF inside CLEAN must match reading it from a cube.
+
+    The per-pixel RMSF is the biggest array here and CLEAN is its only reader,
+    so it is built in the CLEAN task; the cube is still offered for anyone who
+    wants it. Both must clean to the same answer.
+    """
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    noise = np.linspace(1e-3, 3e-3, synthetic_cube.freq_arr_hz.size)
+    weight = np.broadcast_to(noise[:, None, None], synthetic_cube.stokes_q.shape).copy()
+
+    synth = rmsynth_3d(
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        weight_arr=da.from_array(weight, chunks=(-1, 3, 4)),
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
+    )
+    assert synth.per_pixel_rmsf is not None
+    assert synth.rmsf_cube is not None
+
+    fused = run_rmclean(
+        synth.fdf_dirty_cube,
+        synth.rmsf_arr,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+        per_pixel_rmsf=synth.per_pixel_rmsf,
+    )
+    # The RMSF is built inside the CLEAN task, so it is not a graph layer.
+    assert not any(
+        "_rmsf_on_block" in str(key) for key in fused.clean_fdf_cube.__dask_graph__()
+    )
+
+    from_cube = run_rmclean(
+        synth.fdf_dirty_cube,
+        synth.rmsf_cube,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+    )
+    np.testing.assert_allclose(
+        fused.clean_fdf_cube.compute(), from_cube.clean_fdf_cube.compute()
+    )
+
+
+def test_rmsynth_3d_narrows_a_cube_too_wide_for_one_row():
+    """A cube whose row alone busts the target is split across its width too."""
+    dtype = np.dtype(np.complex64)
     wide = da.zeros((100, 8, 4000), chunks=(-1, 8, 4000), dtype=np.float32)
     narrow = da.zeros((100, 64, 32), chunks=(-1, 64, 32), dtype=np.float32)
 
-    with caplog.at_level("WARNING"):
-        _match_chunks_to_fdf(narrow, narrow, n_phi_double=1000)
-    assert "One row of FDF output" not in caplog.text
+    kept, _ = _match_chunks_to_fdf(narrow, narrow, 1000, dtype, target_chunk_mb=1.0)
+    assert kept.chunksize[2] == 32
 
-    with caplog.at_level("WARNING"):
-        _match_chunks_to_fdf(wide, wide, n_phi_double=1000)
-    assert "One row of FDF output" in caplog.text
+    split, _ = _match_chunks_to_fdf(wide, wide, 1000, dtype, target_chunk_mb=1.0)
+    assert split.chunksize[2] < 4000
+    assert 1000 * np.prod(split.chunksize[1:]) * dtype.itemsize <= 1024**2
 
 
 def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger():

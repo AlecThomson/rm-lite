@@ -89,7 +89,7 @@ def turbulent(
 
 def build_channel_spectrum(
     spec: FDFSpec, lambda_sq_arr_m2: NDArray[np.float64], fwhm: float
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Channel Q + iU from the physical Burn law, with |P(lambda^2=0)| = amp.
 
     Each component depolarises with lambda^2 about lambda^2 = 0: a Faraday-thin
@@ -103,7 +103,7 @@ def build_channel_spectrum(
         fwhm (float): RMSF FWHM in rad/m^2 (sets the FWHM-unit scale).
 
     Returns:
-        NDArray[np.complex128]: Channel polarisation Q + iU.
+        NDArray[np.complexfloating]: Channel polarisation Q + iU.
     """
     pol = np.zeros_like(lambda_sq_arr_m2, dtype=np.complex128)
     for comp in spec.components:
@@ -120,7 +120,7 @@ def build_channel_spectrum(
 
 def build_model_fdf(
     spec: FDFSpec, phi_arr_radm2: NDArray[np.float64], fwhm: float
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Reference true-FDF shape on phi_arr (peak-normalised to amp), for plots only.
 
     Channel data comes from `build_channel_spectrum`, not from inverting this.
@@ -131,7 +131,7 @@ def build_model_fdf(
         fwhm (float): RMSF FWHM in rad/m^2.
 
     Returns:
-        NDArray[np.complex128]: Model FDF on `phi_arr_radm2`.
+        NDArray[np.complexfloating]: Model FDF on `phi_arr_radm2`.
     """
     fdf = np.zeros_like(phi_arr_radm2, dtype=np.complex128)
     for comp in spec.components:
@@ -165,21 +165,21 @@ def build_model_fdf(
 
 
 def model_to_channel(
-    model_fdf: NDArray[np.complex128],
+    model_fdf: NDArray[np.complexfloating],
     lambda_sq_arr_m2: NDArray[np.float64],
     phi_arr_radm2: NDArray[np.float64],
     lam_sq_0_m2: float,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Transform a model FDF (phi domain) to noise-free channel Q + iU.
 
     Args:
-        model_fdf (NDArray[np.complex128]): Model FDF on the phi axis.
+        model_fdf (NDArray[np.complexfloating]): Model FDF on the phi axis.
         lambda_sq_arr_m2 (NDArray[np.float64]): Channel lambda^2 in m^2.
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth axis in rad/m^2.
         lam_sq_0_m2 (float): Reference lambda^2 in m^2.
 
     Returns:
-        NDArray[np.complex128]: Noise-free channel Q + iU.
+        NDArray[np.complexfloating]: Noise-free channel Q + iU.
     """
     return inverse_rmsynth_nufft(
         complex_fdf_arr=model_fdf,
@@ -192,19 +192,19 @@ def model_to_channel(
 class NoisyChannels(NamedTuple):
     """Channel Q + iU with per-channel complex noise added, and the error array."""
 
-    complex_pol_arr: NDArray[np.complex128]
-    complex_pol_error: NDArray[np.complex128]  # sigma in real and imag per channel
+    complex_pol_arr: NDArray[np.complexfloating]
+    complex_pol_error: NDArray[np.complexfloating]  # sigma in real and imag per channel
 
 
 def add_channel_noise(
-    complex_pol_arr: NDArray[np.complex128],
+    complex_pol_arr: NDArray[np.complexfloating],
     sigma: float,
     rng: np.random.Generator,
 ) -> NoisyChannels:
     """Add iid complex Gaussian noise (std sigma in Q and in U) per channel.
 
     Args:
-        complex_pol_arr (NDArray[np.complex128]): Noise-free channel Q + iU.
+        complex_pol_arr (NDArray[np.complexfloating]): Noise-free channel Q + iU.
         sigma (float): Noise std per channel, applied to Q and U.
         rng (np.random.Generator): Random generator.
 
@@ -226,7 +226,7 @@ class Geometry(NamedTuple):
     fwhm: float
     phi_arr_radm2: NDArray[np.float64]
     phi_double_arr_radm2: NDArray[np.float64]
-    rmsf_arr: NDArray[np.complex128]
+    rmsf_arr: NDArray[np.complexfloating]
 
 
 def build_geometry(
@@ -269,14 +269,14 @@ def build_geometry(
 class SimResult(NamedTuple):
     """A simulated dirty FDF plus the channel data and geometry behind it."""
 
-    dirty_fdf: NDArray[np.complex128]
-    rmsf_arr: NDArray[np.complex128]
+    dirty_fdf: NDArray[np.complexfloating]
+    rmsf_arr: NDArray[np.complexfloating]
     phi_arr_radm2: NDArray[np.float64]
     phi_double_arr_radm2: NDArray[np.float64]
     fwhm: float
     lam_sq_0_m2: float
     fdf_noise: float  # theoretical FDF noise (0 if noise-free)
-    complex_pol_arr: NDArray[np.complex128]  # channel Q + iU (with any noise)
+    complex_pol_arr: NDArray[np.complexfloating]  # channel Q + iU (with any noise)
     lambda_sq_arr_m2: NDArray[np.float64]  # channel lambda^2
 
 
@@ -314,7 +314,7 @@ def simulate_fdf(
     )
     pol = build_channel_spectrum(spec, geom.lambda_sq_arr_m2, geom.fwhm)
 
-    error = np.zeros(pol.shape[0], dtype=np.complex128)
+    error = np.zeros(pol.shape[0], dtype=pol.dtype)
     if sigma is not None or signal_to_noise is not None:
         if rng is None:
             msg = "rng is required when injecting noise."

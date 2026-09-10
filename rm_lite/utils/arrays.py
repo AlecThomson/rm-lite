@@ -7,6 +7,7 @@ from typing import Any, TypeVar, cast
 
 import dask.array as da
 import numpy as np
+import polars as pl
 from numpy.typing import NDArray
 
 from rm_lite.utils.logging import TqdmToLogger, logger
@@ -25,6 +26,28 @@ def zero_nonfinite(arr: ArrayT) -> ArrayT:
     dispatch identically for numpy and dask inputs.
     """
     return cast(ArrayT, np.where(np.isfinite(arr), arr, 0.0))
+
+
+def complex_dtype(dtype: np.typing.DTypeLike) -> np.dtype[np.complexfloating]:
+    """The complex dtype matching a real one: float32 gives complex64."""
+    return cast("np.dtype[np.complexfloating]", np.promote_types(dtype, np.complex64))
+
+
+def real_dtype(dtype: np.typing.DTypeLike) -> np.dtype[np.floating]:
+    """The real dtype matching a complex one: complex64 gives float32."""
+    return cast("np.dtype[np.floating]", np.empty(0, dtype=dtype).real.dtype)
+
+
+def column_array(series: pl.Series) -> NDArray[Any]:
+    """A table column as a numpy array, keeping the precision it was stored at.
+
+    Complex columns are held as objects, one value per row, so their element
+    type is the one that matters; `to_numpy` on its own gives back objects.
+    """
+    values = series.to_numpy()
+    if values.dtype != object or values.size == 0:
+        return cast("NDArray[Any]", values)
+    return cast("NDArray[Any]", values.astype(np.asarray(values[0]).dtype))
 
 
 def broadcast_over_channels(

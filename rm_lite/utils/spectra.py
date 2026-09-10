@@ -15,7 +15,7 @@ def _burn_envelope(
     lambda_sq_arr_m2: NDArray[np.float64],
     width_radm2: float,
     sigma_rm_radm2: float = 0.0,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Burn depolarisation factor in physical rad/m^2 units (no rotation, no amp).
 
     `width_radm2` is the Gaussian sigma (gauss), the full Faraday depth (slab and
@@ -23,7 +23,7 @@ def _burn_envelope(
     A Faraday-thin point returns unity.
     """
     if kind == "gauss":
-        env: NDArray[np.float64] | NDArray[np.complex128] = np.exp(
+        env: NDArray[np.float64] | NDArray[np.complexfloating] = np.exp(
             -2.0 * width_radm2**2 * lambda_sq_arr_m2**2
         )
     elif kind == "slab":
@@ -47,10 +47,10 @@ def _burn_envelope(
 
 def _rotation(
     lambda_sq_arr_m2: NDArray[np.float64], psi0_deg: float, rm_radm2: float
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Faraday rotation phase e^{2i(psi0 + RM lambda^2)}."""
     return cast(
-        NDArray[np.complex128],
+        NDArray[np.complexfloating],
         np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lambda_sq_arr_m2)).astype(
             np.complex128
         ),
@@ -62,7 +62,7 @@ def faraday_simple_spectrum(
     frac_pol: float,
     psi0_deg: float,
     rm_radm2: float,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Faraday-thin channel Q + iU: a single RM, flat polarised fraction.
 
     Args:
@@ -72,7 +72,7 @@ def faraday_simple_spectrum(
         rm_radm2 (float): RM in rad/m^2.
 
     Returns:
-        NDArray[np.complex128]: Channel Q + iU.
+        NDArray[np.complexfloating]: Channel Q + iU.
     """
     return (frac_pol * _rotation(lambda_sq_arr_m2, psi0_deg, rm_radm2)).astype(
         np.complex128
@@ -85,7 +85,7 @@ def faraday_slab_spectrum(
     psi0_deg: float,
     rm_radm2: float,
     delta_rm_radm2: float,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Burn slab channel Q + iU: Faraday-thick, full thickness delta_rm_radm2.
 
     Args:
@@ -96,7 +96,7 @@ def faraday_slab_spectrum(
         delta_rm_radm2 (float): Full Faraday thickness in rad/m^2.
 
     Returns:
-        NDArray[np.complex128]: Channel Q + iU.
+        NDArray[np.complexfloating]: Channel Q + iU.
     """
     rotation = _rotation(lambda_sq_arr_m2, psi0_deg, rm_radm2)
     envelope = _burn_envelope("slab", lambda_sq_arr_m2, delta_rm_radm2)
@@ -109,7 +109,7 @@ def faraday_gaussian_spectrum(
     psi0_deg: float,
     rm_radm2: float,
     sigma_rm_radm2: float,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """External-dispersion channel Q + iU: Gaussian RM scatter sigma_rm_radm2.
 
     Args:
@@ -120,7 +120,7 @@ def faraday_gaussian_spectrum(
         sigma_rm_radm2 (float): Faraday dispersion sigma in rad/m^2.
 
     Returns:
-        NDArray[np.complex128]: Channel Q + iU.
+        NDArray[np.complexfloating]: Channel Q + iU.
     """
     rotation = _rotation(lambda_sq_arr_m2, psi0_deg, rm_radm2)
     envelope = _burn_envelope("gauss", lambda_sq_arr_m2, sigma_rm_radm2)

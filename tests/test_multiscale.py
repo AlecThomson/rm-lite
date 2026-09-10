@@ -76,10 +76,10 @@ def burn_slab(
     psi0_deg: float,
     rm_radm2: float,
     delta_rm_radm2: float,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Burn slab P(lambda^2): a Faraday-thick component (top-hat in phi)."""
     return cast(
-        "NDArray[np.complex128]",
+        "NDArray[np.complexfloating]",
         (
             frac_pol
             * np.exp(2j * (np.deg2rad(psi0_deg) + rm_radm2 * lsq))
@@ -88,7 +88,7 @@ def burn_slab(
     )
 
 
-def _run_synth(complex_pol: NDArray[np.complex128], freq_hz: NDArray[np.float64]):
+def _run_synth(complex_pol: NDArray[np.complexfloating], freq_hz: NDArray[np.float64]):
     rms = 0.02
     err = np.ones_like(complex_pol) * (rms + 1j * rms)
     with quiet_logs(logging.ERROR):
@@ -501,8 +501,8 @@ def test_multiscale_wideband_does_not_diverge() -> None:
 
 
 def _clean_single_and_hybrid(
-    sim_dirty: NDArray[np.complex128],
-    rmsf: NDArray[np.complex128],
+    sim_dirty: NDArray[np.complexfloating],
+    rmsf: NDArray[np.complexfloating],
     phi: NDArray[np.float64],
     phi_double: NDArray[np.float64],
     fwhm: float,
@@ -532,7 +532,7 @@ def _clean_single_and_hybrid(
 
 
 def _model_shape_err(
-    model: NDArray[np.complex128], truth: NDArray[np.complex128]
+    model: NDArray[np.complexfloating], truth: NDArray[np.complexfloating]
 ) -> float:
     """Scale-free rms of |model| against best-fit-amplitude |truth|."""
     a = np.abs(model)
