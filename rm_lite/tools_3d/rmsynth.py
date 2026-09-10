@@ -24,11 +24,12 @@ from rm_lite.utils.dask_io import (
     complex_pol_dask,
     estimate_channel_noise_mad,
     estimate_single_stokes_channel_noise,
-    fits_cube_to_zarr,
+    fits_cubes_to_zarr,
     freq_arr_hz_from_header,
     read_cube_channel_chunks,
     read_cube_dask,
     spatial_chunk_size,
+    tile_spatial_chunk,
 )
 from rm_lite.utils.fitting import (
     RobustLoss,
@@ -986,28 +987,31 @@ def _convert_cubes_to_zarr(
     spatial_chunk: tuple[int, int],
     shard_rows: int,
 ) -> dict[str, Path | None]:
-    """Copy each cube to a zarr store beside it, chunked for the FDF.
+    """Copy every cube to a zarr store beside it, chunked for the FDF, in one pass.
 
     `cube.fits` gives `cube.zarr`, so a store is always named after the cube it
     came from and two cubes can never land on the same one.
 
+    All the cubes go in one dask graph rather than a blocking convert each, so
+    one cube's read overlaps another's compression instead of waiting for it.
+
     Rewritten every run rather than reused: a store that no longer matches its
     cube would be used without anyone noticing. Convert once with
-    `rm_lite.utils.dask_io.fits_cube_to_zarr` and pass the stores in directly to
+    `rm_lite.utils.dask_io.fits_cubes_to_zarr` and pass the stores in directly to
     keep them between runs.
     """
     converted: dict[str, Path | None] = {}
+    jobs: dict[str, tuple[str | Path, Path]] = {}
     for name, path in cube_files.items():
         if path is None or Path(path).suffix == ".zarr":
             converted[name] = None if path is None else Path(path)
             continue
-        converted[name] = fits_cube_to_zarr(
-            path,
-            Path(path).with_suffix(".zarr"),
-            spatial_chunk=spatial_chunk,
-            shard_rows=shard_rows,
-        )
-    return converted
+        jobs[name] = (path, Path(path).with_suffix(".zarr"))
+
+    written = fits_cubes_to_zarr(
+        jobs, spatial_chunk=spatial_chunk, shard_rows=shard_rows
+    )
+    return {**converted, **written}
 
 
 def rmsynth_3d_from_fits(
@@ -1120,6 +1124,7 @@ def rmsynth_3d_from_fits(
         int(stokes_q.shape[1]),
         int(stokes_q.shape[2]),
     )
+    store_chunk = spatial_chunk
     spatial_q_file: str | Path = stokes_q_file
     spatial_u_file: str | Path = stokes_u_file
     spatial_i_file: str | Path | None = stokes_i_file
@@ -1134,6 +1139,13 @@ def rmsynth_3d_from_fits(
             itemsize=stokes_q.dtype.itemsize,
             target_chunk_mb=target_chunk_mb,
         )
+        # A zarr chunk is its own object, so the full-width rule `spatial_chunk`
+        # was sized under does not apply to the store. Same area, so the FDF
+        # chunk costs what it did, but a region read costs a tile not a stripe.
+        store_chunk = tile_spatial_chunk(
+            spatial_chunk, shard_rows, int(stokes_q.shape[2])
+        )
+
         converted = _convert_cubes_to_zarr(
             {
                 "q": stokes_q_file,
@@ -1144,7 +1156,7 @@ def rmsynth_3d_from_fits(
                 "i_error": stokes_i_error_file,
                 "i_model": stokes_i_model_file,
             },
-            spatial_chunk,
+            store_chunk,
             shard_rows,
         )
         # Only the spatial reads move to the stores. The per-channel noise
@@ -1161,7 +1173,7 @@ def rmsynth_3d_from_fits(
     read_cube = partial(
         read_cube_dask,
         target_chunk_mb=target_chunk_mb,
-        spatial_chunk=spatial_chunk,
+        spatial_chunk=store_chunk,
     )
 
     stokes_q, _header_q = read_cube(spatial_q_file)
@@ -1182,7 +1194,7 @@ def rmsynth_3d_from_fits(
             stokes_u_error_file,
             target_chunk_mb=target_chunk_mb,
             noise_files_are_weight=noise_files_are_weight,
-            spatial_chunk=spatial_chunk,
+            spatial_chunk=store_chunk,
         )
 
     stokes_i = None

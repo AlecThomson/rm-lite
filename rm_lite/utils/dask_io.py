@@ -20,10 +20,18 @@ from astropy.wcs import WCS
 from dask.base import compute, tokenize
 from dask.diagnostics import ProgressBar
 from numpy.typing import NDArray
+from zarr.codecs import BloscCodec, BloscShuffle
 
 from rm_lite.utils.logging import logger
 
 DEFAULT_TARGET_CHUNK_MB = 256
+
+# Zarr's own default (zstd level 0, no shuffle) reads back at about a quarter of
+# this codec's speed for the same size on noise-dominated cubes, and a store is
+# written once and read by every pass over it.
+DEFAULT_ZARR_COMPRESSORS = (
+    BloscCodec(cname="lz4", clevel=5, shuffle=BloscShuffle.shuffle),
+)
 
 
 def spatial_chunk_size(
@@ -62,6 +70,37 @@ def spatial_chunk_size(
     rows_per_chunk = target_chunk_bytes / (n_freq * nx * itemsize)
     cy = max(1, int(np.floor(rows_per_chunk)))
     return min(cy, ny), nx
+
+
+def tile_spatial_chunk(
+    spatial_chunk: tuple[int, int], band_rows: int, nx: int
+) -> tuple[int, int]:
+    """Reshape a full-width chunk into the squarest tile of the same area.
+
+    `spatial_chunk_size` never splits the image width because a FITS block
+    narrower than the image costs a full-width read anyway. A zarr chunk is its
+    own object, so the width is free to split, and a tile costs far less than a
+    stripe for anything that reads a region rather than the whole cube: a
+    128-pixel cutout of a 19533-wide cube touches 128 full-width stripes
+    against a couple of tiles.
+
+    The area is held fixed, so the chunk keeps whatever memory footprint it was
+    sized for. Rows are capped at `band_rows` so a shard spanning one read band
+    still holds a whole number of chunks, which is what keeps a write task
+    owning a whole shard.
+
+    Args:
+        spatial_chunk (tuple[int, int]): Full-width `(cy, cx)` to reshape.
+        band_rows (int): Rows in one read band, the most a chunk may span.
+        nx (int): Full image width in pixels.
+
+    Returns:
+        tuple[int, int]: Tiled `(cy, cx)`, of the same area as the input.
+    """
+    cy, cx = spatial_chunk
+    area = cy * cx
+    rows = max(1, min(band_rows, math.isqrt(area)))
+    return rows, min(nx, max(1, area // rows))
 
 
 def channel_chunk_size(
@@ -267,44 +306,15 @@ def read_fits_cube_dask(
     return cube, header
 
 
-def fits_cube_to_zarr(
+def _zarr_sink(
     fits_file: str | Path,
     store: str | Path,
     spatial_chunk: tuple[int, int],
-    shard_rows: int | None = None,
-    overwrite: bool = True,
-) -> Path:
-    """Copy a FITS cube into a zarr store, chunked the way it will be read.
-
-    A FITS cube is one contiguous array, so a block narrower than the image can
-    only be had by reading the full width and slicing it: the read costs the
-    whole band whatever the block is. A zarr store holds each chunk separately,
-    so a read costs the chunk and nothing more.
-
-    Size `spatial_chunk` against the work that will consume it, not against the
-    cube: `rm_lite.tools_3d.rmsynth.fdf_spatial_chunk` gives the shape
-    RM-synthesis wants. The frequency axis is never chunked, as everything
-    downstream needs a pixel's whole spectrum in one block.
-
-    `shard_rows` groups chunks into shards of that many image rows, so fine
-    chunks do not mean one file each. Chunking a wide cube by single rows is
-    tens of thousands of files otherwise, which is unkind to a shared
-    filesystem.
-
-    The FITS header rides along in the store's attributes, so the WCS and the
-    frequency axis survive the trip.
-
-    Args:
-        fits_file (str | Path): Path to the FITS cube.
-        store (str | Path): Path to the zarr store to write.
-        spatial_chunk (tuple[int, int]): `(cy, cx)` chunk shape.
-        shard_rows (int | None, optional): Rows of chunks per shard. Defaults to
-            None, one file per chunk.
-        overwrite (bool, optional): Overwrite an existing store. Defaults to True.
-
-    Returns:
-        Path: The store that was written.
-    """
+    shard_rows: int | None,
+    overwrite: bool,
+    compressors: Sequence[Any],
+) -> tuple[da.Array, zarr.Array, str]:
+    """The lazy cube, the store to pour it into, and a line describing the layout."""
     (n_freq, ny, nx), dtype, header = _cube_meta(fits_file)
     cy, cx = spatial_chunk
 
@@ -327,17 +337,120 @@ def fits_cube_to_zarr(
         shards=shards,
         dtype=dtype,
         overwrite=overwrite,
+        compressors=tuple(compressors),
     )
     sink.attrs["fits_header"] = header.tostring()
+    layout = f"chunked {(n_freq, cy, cx)}" + (
+        f" in shards of {shards}." if shards else "."
+    )
+    return cube, sink, layout
 
+
+def fits_cube_to_zarr(
+    fits_file: str | Path,
+    store: str | Path,
+    spatial_chunk: tuple[int, int],
+    shard_rows: int | None = None,
+    overwrite: bool = True,
+    compressors: Sequence[Any] = DEFAULT_ZARR_COMPRESSORS,
+) -> Path:
+    """Copy a FITS cube into a zarr store, chunked the way it will be read.
+
+    A FITS cube is one contiguous array, so a block narrower than the image can
+    only be had by reading the full width and slicing it: the read costs the
+    whole band whatever the block is. A zarr store holds each chunk separately,
+    so a read costs the chunk and nothing more.
+
+    Size `spatial_chunk` against the work that will consume it, not against the
+    cube: `rm_lite.tools_3d.rmsynth.fdf_spatial_chunk` gives the area
+    RM-synthesis wants, and `tile_spatial_chunk` reshapes that area into a tile,
+    which is what a store wants: the full-width rule the area was sized under is
+    a FITS constraint, not a zarr one. The frequency axis is never chunked, as
+    everything downstream needs a pixel's whole spectrum in one block.
+
+    `shard_rows` groups chunks into shards of that many image rows, so fine
+    chunks do not mean one file each. Chunking a wide cube by single rows is
+    tens of thousands of files otherwise, which is unkind to a shared
+    filesystem.
+
+    The FITS header rides along in the store's attributes, so the WCS and the
+    frequency axis survive the trip.
+
+    Args:
+        fits_file (str | Path): Path to the FITS cube.
+        store (str | Path): Path to the zarr store to write.
+        spatial_chunk (tuple[int, int]): `(cy, cx)` chunk shape.
+        shard_rows (int | None, optional): Rows of chunks per shard. Defaults to
+            None, one file per chunk.
+        overwrite (bool, optional): Overwrite an existing store. Defaults to True.
+        compressors (Sequence[Any], optional): Zarr codecs for the store.
+            Defaults to `DEFAULT_ZARR_COMPRESSORS`.
+
+    Returns:
+        Path: The store that was written.
+    """
+    cube, sink, layout = _zarr_sink(
+        fits_file, store, spatial_chunk, shard_rows, overwrite, compressors
+    )
     tick = time.time()
     with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
         compute(da.store(cube, sink, lock=False, compute=False))
     logger.info(
-        f"Wrote {fits_file} to {store} in {time.time() - tick:.3g} seconds, "
-        f"chunked {(n_freq, cy, cx)}" + (f" in shards of {shards}." if shards else ".")
+        f"Wrote {fits_file} to {store} in {time.time() - tick:.3g} seconds, {layout}"
     )
     return Path(store)
+
+
+def fits_cubes_to_zarr(
+    jobs: Mapping[str, tuple[str | Path, str | Path]],
+    spatial_chunk: tuple[int, int],
+    shard_rows: int | None = None,
+    overwrite: bool = True,
+    compressors: Sequence[Any] = DEFAULT_ZARR_COMPRESSORS,
+) -> dict[str, Path]:
+    """`fits_cube_to_zarr` for several cubes, in one dask graph.
+
+    A cube converted on its own is a blocking compute, so a second cube cannot
+    start until the first has finished: the reads and the compression of
+    different cubes never overlap, and the ragged end of each cube leaves
+    workers idle. One graph over every cube lets the scheduler fill those gaps.
+
+    Args:
+        jobs (Mapping[str, tuple[str | Path, str | Path]]): `(fits_file, store)`
+            per cube, keyed by whatever the caller wants back.
+        spatial_chunk (tuple[int, int]): `(cy, cx)` chunk shape, as
+            `fits_cube_to_zarr`.
+        shard_rows (int | None, optional): Rows of chunks per shard. Defaults to
+            None, one file per chunk.
+        overwrite (bool, optional): Overwrite existing stores. Defaults to True.
+        compressors (Sequence[Any], optional): Zarr codecs. Defaults to
+            `DEFAULT_ZARR_COMPRESSORS`.
+
+    Returns:
+        dict[str, Path]: The store written for each key in `jobs`.
+    """
+    pairs = []
+    stores: dict[str, Path] = {}
+    for key, (fits_file, store) in jobs.items():
+        cube, sink, layout = _zarr_sink(
+            fits_file, store, spatial_chunk, shard_rows, overwrite, compressors
+        )
+        pairs.append((cube, sink))
+        stores[key] = Path(store)
+        logger.info(f"Writing {fits_file} to {store}, {layout}")
+
+    if not pairs:
+        return stores
+
+    tick = time.time()
+    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
+        compute(
+            [da.store(cube, sink, lock=False, compute=False) for cube, sink in pairs]
+        )
+    logger.info(
+        f"Wrote {len(pairs)} cubes to zarr in {time.time() - tick:.3g} seconds."
+    )
+    return stores
 
 
 def read_zarr_cube_dask(store: str | Path) -> tuple[da.Array, Header]:

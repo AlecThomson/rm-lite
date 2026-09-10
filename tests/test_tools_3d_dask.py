@@ -35,6 +35,7 @@ from rm_lite.utils.dask_io import (
     channel_chunk_size,
     estimate_channel_noise_mad,
     fits_cube_to_zarr,
+    fits_cubes_to_zarr,
     freq_arr_hz_from_header,
     read_cube_channel_chunks,
     read_cube_dask,
@@ -42,6 +43,7 @@ from rm_lite.utils.dask_io import (
     read_fits_cube_dask,
     read_zarr_cube_dask,
     spatial_chunk_size,
+    tile_spatial_chunk,
     write_zarr_group,
 )
 from rm_lite.utils.synthesis import (
@@ -487,6 +489,27 @@ def test_spatial_chunk_size_gives_full_width_bands_within_target():
     assert spatial_chunk_size(
         n_freq=100, ny=50, nx=1000, itemsize=16, target_chunk_mb=1e-6
     ) == (1, 1000)
+
+
+def test_tile_spatial_chunk_squares_up_within_the_read_band():
+    # Wide cube: rows are capped by the band, so the tile is as wide as the
+    # leftover area allows rather than square.
+    assert tile_spatial_chunk((1, 19533), 27, 19533) == (27, 723)
+    # Narrow cube: the band is deeper than the area needs, so the tile squares up.
+    assert tile_spatial_chunk((6, 2000), 268, 2000) == (109, 110)
+    # Never wider than the image, and never smaller than a single pixel.
+    assert tile_spatial_chunk((4, 4), 100, 3) == (4, 3)
+    assert tile_spatial_chunk((1, 1), 100, 100) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("spatial_chunk", "band_rows", "nx"),
+    [((1, 19533), 27, 19533), ((6, 2000), 268, 2000), ((3, 97), 11, 97)],
+)
+def test_tile_spatial_chunk_keeps_the_area_it_was_given(spatial_chunk, band_rows, nx):
+    """The chunk was sized for a memory budget, so tiling must not grow it."""
+    cy, cx = tile_spatial_chunk(spatial_chunk, band_rows, nx)
+    assert cy * cx <= spatial_chunk[0] * spatial_chunk[1]
 
 
 def test_channel_chunk_size_respects_target_and_bounds():
@@ -1323,6 +1346,43 @@ def test_fits_cube_to_zarr_round_trips(tmp_path, synthetic_cube, shard_rows):
     np.testing.assert_array_equal(from_zarr.compute(), from_fits.compute())
     assert from_zarr.chunksize == from_fits.chunksize
     assert zarr_header["CTYPE3"] == header["CTYPE3"]
+
+
+def test_fits_cubes_to_zarr_writes_every_cube_in_one_pass(tmp_path, synthetic_cube):
+    """One graph over several cubes must still give each its own correct store."""
+    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
+    stores = fits_cubes_to_zarr(
+        {name: (path, tmp_path / f"{name}.zarr") for name, path in paths.items()},
+        spatial_chunk=(2, 2),
+        shard_rows=4,
+    )
+
+    assert set(stores) == set(paths)
+    for name, store in stores.items():
+        from_fits, _ = read_fits_cube_dask(paths[name], spatial_chunk=(2, 2))
+        from_zarr, _ = read_cube_dask(store)
+        np.testing.assert_array_equal(from_zarr.compute(), from_fits.compute())
+
+
+def test_fits_cubes_to_zarr_handles_no_work():
+    assert fits_cubes_to_zarr({}, spatial_chunk=(1, 1)) == {}
+
+
+def test_fits_cube_to_zarr_tiles_are_readable_a_region_at_a_time(
+    tmp_path, synthetic_cube
+):
+    """A tiled store must read a sub-region without gathering whole rows."""
+    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
+    store = fits_cube_to_zarr(
+        paths["q"], tmp_path / "q.zarr", spatial_chunk=(2, 2), shard_rows=4
+    )
+    cube, _ = read_cube_dask(store)
+    reference, _ = read_fits_cube_dask(paths["q"])
+
+    assert cube.chunksize[1:] == (2, 2)
+    np.testing.assert_array_equal(
+        cube[:, 1:3, 1:3].compute(), reference[:, 1:3, 1:3].compute()
+    )
 
 
 def test_rmsynth_3d_from_fits_converts_to_zarr_on_request(tmp_path, synthetic_cube):
