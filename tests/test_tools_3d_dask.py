@@ -36,9 +36,11 @@ from rm_lite.utils.dask_io import (
     estimate_channel_noise_mad,
     fits_cube_to_zarr,
     freq_arr_hz_from_header,
+    read_cube_channel_chunks,
     read_cube_dask,
     read_fits_cube_channel_chunks,
     read_fits_cube_dask,
+    read_zarr_cube_dask,
     spatial_chunk_size,
     write_zarr_group,
 )
@@ -1824,3 +1826,78 @@ def test_rmclean_rejects_an_rmsf_it_cannot_use(synthetic_cube: SyntheticCube):
     # of the RMSF rather than the whole spectrum.
     with pytest.raises(ValueError, match="per-pixel rmsf must be chunked spatially"):
         clean_with(rmsf_cube.rechunk({0: 1}))
+
+
+def test_read_zarr_cube_dask_rejects_a_store_without_a_header(tmp_path):
+    """A store written by anything else has no WCS, so it cannot be read as a cube."""
+    store = tmp_path / "headerless.zarr"
+    zarr.create_array(store=str(store), shape=(2, 2, 2), chunks=(2, 2, 2), dtype="f4")
+
+    with pytest.raises(ValueError, match="carries no FITS header"):
+        read_zarr_cube_dask(store)
+
+
+def test_read_cube_dask_says_when_a_store_ignores_the_chunking_asked_for(
+    tmp_path, synthetic_cube, caplog
+):
+    """A store's chunking is fixed at write time, so a mismatch is worth saying."""
+    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
+    store = fits_cube_to_zarr(paths["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4))
+
+    with caplog.at_level(logging.INFO, logger="rm_lite"):
+        cube, _ = read_cube_dask(store, spatial_chunk=(2, 4))
+
+    assert cube.chunksize[1:] == (1, 4)
+    assert "not the (2, 4) asked for" in caplog.text
+
+
+def test_read_cube_channel_chunks_reads_a_store_as_written(tmp_path, synthetic_cube):
+    """A store has one chunking, so a channel-chunked read gets what is there."""
+    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
+    store = fits_cube_to_zarr(paths["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4))
+
+    from_store, header = read_cube_channel_chunks(store)
+    from_fits, _ = read_fits_cube_dask(paths["q"])
+
+    np.testing.assert_array_equal(from_store.compute(), from_fits.compute())
+    assert header["CTYPE3"] == "FREQ"
+
+
+def test_rmsynth_3d_from_fits_takes_the_noise_from_error_cubes(
+    tmp_path, synthetic_cube
+):
+    """Q/U error cubes give the per-pixel noise, instead of estimating it."""
+    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
+    header = fits.getheader(paths["q"])
+    for name in ("q_error", "u_error"):
+        fits.PrimaryHDU(
+            np.full_like(synthetic_cube.stokes_q, 0.5).astype(">f4"), header=header
+        ).writeto(tmp_path / f"{name}.fits")
+
+    results = rmsynth_3d_from_fits(
+        paths["q"],
+        paths["u"],
+        stokes_q_error_file=tmp_path / "q_error.fits",
+        stokes_u_error_file=tmp_path / "u_error.fits",
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=150.0,
+    )
+
+    assert np.isfinite(results.fdf_dirty_cube.compute()).any()
+
+
+def test_rmsynth_3d_from_fits_estimates_the_stokes_i_noise(tmp_path, synthetic_cube):
+    """With no Stokes I error cube, the noise comes from the cube itself."""
+    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
+
+    results = rmsynth_3d_from_fits(
+        paths["q"],
+        paths["u"],
+        stokes_i_file=paths["i"],
+        estimate_stokes_i_noise=True,
+        stokes_i_snr_cut=None,
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=150.0,
+    )
+
+    assert np.isfinite(results.fdf_dirty_cube.compute()).any()
