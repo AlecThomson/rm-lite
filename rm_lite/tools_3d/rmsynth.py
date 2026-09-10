@@ -24,9 +24,11 @@ from rm_lite.utils.dask_io import (
     complex_pol_dask,
     estimate_channel_noise_mad,
     estimate_single_stokes_channel_noise,
+    fits_cube_to_zarr,
     freq_arr_hz_from_header,
-    read_fits_cube_channel_chunks,
-    read_fits_cube_dask,
+    read_cube_channel_chunks,
+    read_cube_dask,
+    spatial_chunk_size,
 )
 from rm_lite.utils.fitting import (
     RobustLoss,
@@ -896,12 +898,12 @@ def get_noise_from_error_fits(
     spatial_chunk: tuple[int, int] | None = None,
 ) -> da.Array:
     """Lazy per-pixel noise cube, the mean of the Q and U error cubes."""
-    stokes_q_error, _ = read_fits_cube_dask(
+    stokes_q_error, _ = read_cube_dask(
         stokes_q_error_file,
         target_chunk_mb=target_chunk_mb,
         spatial_chunk=spatial_chunk,
     )
-    stokes_u_error, _ = read_fits_cube_dask(
+    stokes_u_error, _ = read_cube_dask(
         stokes_u_error_file,
         target_chunk_mb=target_chunk_mb,
         spatial_chunk=spatial_chunk,
@@ -921,10 +923,10 @@ def get_noise_from_fits(
     """
     # Per-channel noise needs whole image planes, so it gets its own
     # frequency-chunked read
-    q_planes, _ = read_fits_cube_channel_chunks(
+    q_planes, _ = read_cube_channel_chunks(
         stokes_q_file, target_chunk_mb=target_chunk_mb
     )
-    u_planes, _ = read_fits_cube_channel_chunks(
+    u_planes, _ = read_cube_channel_chunks(
         stokes_u_file, target_chunk_mb=target_chunk_mb
     )
     return estimate_channel_noise_mad(q_planes, u_planes)
@@ -979,6 +981,35 @@ def get_weight_arr_from_fits(
     return 1.0 / noise_arr**2
 
 
+def _convert_cubes_to_zarr(
+    cube_files: dict[str, str | Path | None],
+    directory: str | Path,
+    spatial_chunk: tuple[int, int],
+    shard_rows: int,
+) -> dict[str, Path | None]:
+    """Copy each cube into `directory` as a zarr store, chunked for the FDF.
+
+    Rewritten every run rather than reused: a store that no longer matches its
+    cube would be used without anyone noticing. Convert once with
+    `rm_lite.utils.dask_io.fits_cube_to_zarr` and pass the stores in directly to
+    keep them between runs.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    converted: dict[str, Path | None] = {}
+    for name, path in cube_files.items():
+        if path is None or Path(path).suffix == ".zarr":
+            converted[name] = None if path is None else Path(path)
+            continue
+        converted[name] = fits_cube_to_zarr(
+            path,
+            directory / f"{name}.zarr",
+            spatial_chunk=spatial_chunk,
+            shard_rows=shard_rows,
+        )
+    return converted
+
+
 def rmsynth_3d_from_fits(
     stokes_q_file: str | Path,
     stokes_u_file: str | Path,
@@ -1006,11 +1037,17 @@ def rmsynth_3d_from_fits(
     per_pixel_rmsf: bool = False,
     nufft_nthreads: int = 1,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+    convert_to_zarr: str | Path | None = None,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
-    """Run RM-synthesis directly on Stokes Q/U FITS cubes on disk.
+    """Run RM-synthesis directly on Stokes Q/U cubes on disk.
 
-    Convenience wrapper around `rm_lite.utils.dask_io.read_fits_cube_dask` +
+    Takes FITS cubes, or zarr stores written by
+    `rm_lite.utils.dask_io.fits_cube_to_zarr`. A zarr store is read at the
+    chunking it was written with, which is the point of writing one: a FITS
+    block narrower than the image still costs a full-width read.
+
+    Convenience wrapper around `rm_lite.utils.dask_io.read_cube_dask` +
     `rmsynth_3d`, for the common case where Q/U are FITS files rather than
     already-loaded dask arrays. The frequency array is derived from the
     Stokes Q header's spectral WCS, and, if `weight_arr` is not given, so is
@@ -1049,16 +1086,20 @@ def rmsynth_3d_from_fits(
         per_pixel_rmsf (bool, optional): See `rmsynth_3d`. Defaults to False.
         nufft_nthreads (int, optional): See `rmsynth_3d`. Defaults to 1.
         target_chunk_mb (float, optional): Target per-chunk memory footprint
-            in MB, see `read_fits_cube_dask`. Defaults to 256.
+            in MB, see `read_cube_dask`. Defaults to 256.
+        convert_to_zarr (str | Path | None, optional): Directory to copy the
+            cubes into as zarr stores before reading them, chunked as the FDF
+            needs. Worth it for a cube wide enough that the chunking has to
+            split the image width: a FITS block narrower than the image still
+            costs a full-width read, where a zarr chunk costs itself. None reads
+            the cubes where they are. Defaults to None.
         log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
 
     Returns:
         RMSynth3DResults: Lazy dirty FDF cube, the shared RMSF, and associated
             parameters.
     """
-    stokes_q, header_q = read_fits_cube_dask(
-        stokes_q_file, target_chunk_mb=target_chunk_mb
-    )
+    stokes_q, header_q = read_cube_dask(stokes_q_file, target_chunk_mb=target_chunk_mb)
     freq_arr_hz = freq_arr_hz_from_header(header_q, n_freq=int(stokes_q.shape[0]))
 
     # The Faraday depth grid follows from the frequencies and options alone, so
@@ -1079,14 +1120,53 @@ def rmsynth_3d_from_fits(
         int(stokes_q.shape[1]),
         int(stokes_q.shape[2]),
     )
+    spatial_q_file: str | Path = stokes_q_file
+    spatial_u_file: str | Path = stokes_u_file
+    spatial_i_file: str | Path | None = stokes_i_file
+    if convert_to_zarr is not None:
+        # One shard per band the FITS reader would have read anyway, so a cube
+        # chunked more finely than that is still a handful of files rather than one
+        # per chunk.
+        shard_rows, _ = spatial_chunk_size(
+            n_freq=int(stokes_q.shape[0]),
+            ny=int(stokes_q.shape[1]),
+            nx=int(stokes_q.shape[2]),
+            itemsize=stokes_q.dtype.itemsize,
+            target_chunk_mb=target_chunk_mb,
+        )
+        converted = _convert_cubes_to_zarr(
+            {
+                "q": stokes_q_file,
+                "u": stokes_u_file,
+                "q_error": stokes_q_error_file,
+                "u_error": stokes_u_error_file,
+                "i": stokes_i_file,
+                "i_error": stokes_i_error_file,
+                "i_model": stokes_i_model_file,
+            },
+            convert_to_zarr,
+            spatial_chunk,
+            shard_rows,
+        )
+        # Only the spatial reads move to the stores. The per-channel noise
+        # estimates want whole planes, which a spatially chunked store can only
+        # give by gathering the cube, so those keep reading the FITS.
+        spatial_q_file = converted["q"] or stokes_q_file
+        spatial_u_file = converted["u"] or stokes_u_file
+        stokes_q_error_file = converted["q_error"]
+        stokes_u_error_file = converted["u_error"]
+        spatial_i_file = converted["i"]
+        stokes_i_error_file = converted["i_error"]
+        stokes_i_model_file = converted["i_model"]
+
     read_cube = partial(
-        read_fits_cube_dask,
+        read_cube_dask,
         target_chunk_mb=target_chunk_mb,
         spatial_chunk=spatial_chunk,
     )
 
-    stokes_q, _header_q = read_cube(stokes_q_file)
-    stokes_u, _header_u = read_cube(stokes_u_file)
+    stokes_q, _header_q = read_cube(spatial_q_file)
+    stokes_u, _header_u = read_cube(spatial_u_file)
 
     # Noise-based types use 1/sigma^2 as their base (uniform_lsq/briggs then apply
     # the geometric lambda^2 factor); per-channel `uniform` deliberately ignores noise.
@@ -1112,7 +1192,7 @@ def rmsynth_3d_from_fits(
     if stokes_i_model_file is not None:
         stokes_i_model, _ = read_cube(stokes_i_model_file)
     elif stokes_i_file is not None:
-        stokes_i, _ = read_cube(stokes_i_file)
+        stokes_i, _ = read_cube(spatial_i_file or stokes_i_file)
         if stokes_i_error_file is not None:
             stokes_i_error, _ = read_cube(stokes_i_error_file)
             if noise_files_are_weight:
@@ -1122,7 +1202,7 @@ def rmsynth_3d_from_fits(
                 stokes_i_error = error_from_weight_cube(stokes_i_error)
         elif estimate_stokes_i_noise:
             # Same reason as the Q/U noise above: a frequency-chunked read.
-            i_planes, _ = read_fits_cube_channel_chunks(
+            i_planes, _ = read_cube_channel_chunks(
                 stokes_i_file, target_chunk_mb=target_chunk_mb
             )
             stokes_i_error = estimate_single_stokes_channel_noise(i_planes)

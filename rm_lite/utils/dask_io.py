@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -266,6 +267,128 @@ def read_fits_cube_dask(
     return cube, header
 
 
+def fits_cube_to_zarr(
+    fits_file: str | Path,
+    store: str | Path,
+    spatial_chunk: tuple[int, int],
+    shard_rows: int | None = None,
+    overwrite: bool = True,
+) -> Path:
+    """Copy a FITS cube into a zarr store, chunked the way it will be read.
+
+    A FITS cube is one contiguous array, so a block narrower than the image can
+    only be had by reading the full width and slicing it: the read costs the
+    whole band whatever the block is. A zarr store holds each chunk separately,
+    so a read costs the chunk and nothing more.
+
+    Size `spatial_chunk` against the work that will consume it, not against the
+    cube: `rm_lite.tools_3d.rmsynth.fdf_spatial_chunk` gives the shape
+    RM-synthesis wants. The frequency axis is never chunked, as everything
+    downstream needs a pixel's whole spectrum in one block.
+
+    `shard_rows` groups chunks into shards of that many image rows, so fine
+    chunks do not mean one file each. Chunking a wide cube by single rows is
+    tens of thousands of files otherwise, which is unkind to a shared
+    filesystem.
+
+    The FITS header rides along in the store's attributes, so the WCS and the
+    frequency axis survive the trip.
+
+    Args:
+        fits_file (str | Path): Path to the FITS cube.
+        store (str | Path): Path to the zarr store to write.
+        spatial_chunk (tuple[int, int]): `(cy, cx)` chunk shape.
+        shard_rows (int | None, optional): Rows of chunks per shard. Defaults to
+            None, one file per chunk.
+        overwrite (bool, optional): Overwrite an existing store. Defaults to True.
+
+    Returns:
+        Path: The store that was written.
+    """
+    (n_freq, ny, nx), dtype, header = _cube_meta(fits_file)
+    cy, cx = spatial_chunk
+
+    shards = None
+    write_rows = cy
+    if shard_rows is not None:
+        # A shard holds a whole number of chunks on every axis, and one write
+        # task has to own a whole shard: a shard is one file, so two tasks
+        # writing different chunks of it race and the loser's chunks are lost.
+        # Full width, so a write task is one contiguous band of the FITS cube.
+        rows = min(ny, max(cy, shard_rows - shard_rows % cy))
+        shards = (n_freq, rows, math.ceil(nx / cx) * cx)
+        write_rows = rows
+
+    cube, _ = read_fits_cube_dask(fits_file, spatial_chunk=(write_rows, nx))
+    sink = zarr.create_array(
+        store=str(store),
+        shape=(n_freq, ny, nx),
+        chunks=(n_freq, cy, cx),
+        shards=shards,
+        dtype=dtype,
+        overwrite=overwrite,
+    )
+    sink.attrs["fits_header"] = header.tostring()
+
+    tick = time.time()
+    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
+        compute(da.store(cube, sink, lock=False, compute=False))
+    logger.info(
+        f"Wrote {fits_file} to {store} in {time.time() - tick:.3g} seconds, "
+        f"chunked {(n_freq, cy, cx)}" + (f" in shards of {shards}." if shards else ".")
+    )
+    return Path(store)
+
+
+def read_zarr_cube_dask(store: str | Path) -> tuple[da.Array, Header]:
+    """Lazily read a cube written by `fits_cube_to_zarr`, at its stored chunking.
+
+    The chunking was fixed when the store was written, so there is nothing to
+    choose here and nothing to rechunk afterwards.
+
+    Args:
+        store (str | Path): Path to the zarr store.
+
+    Returns:
+        tuple[da.Array, Header]: Lazy dask array and the FITS header it carries.
+    """
+    array = zarr.open_array(str(store), mode="r")
+    stored_header = array.attrs.get("fits_header")
+    if stored_header is None:
+        msg = (
+            f"{store} carries no FITS header, so its frequency axis and WCS are "
+            "unknown. Write it with `fits_cube_to_zarr`."
+        )
+        raise ValueError(msg)
+    return da.from_zarr(array), Header.fromstring(str(stored_header))
+
+
+def read_cube_dask(
+    path: str | Path,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+    spatial_chunk: tuple[int, int] | None = None,
+) -> tuple[da.Array, Header]:
+    """Read a cube from wherever it lives, FITS or zarr.
+
+    A zarr store comes back at the chunking it was written with, so
+    `target_chunk_mb` and `spatial_chunk` say what was wanted rather than what
+    is delivered; a mismatch is logged.
+    """
+    if Path(path).suffix != ".zarr":
+        return read_fits_cube_dask(
+            path, target_chunk_mb=target_chunk_mb, spatial_chunk=spatial_chunk
+        )
+
+    cube, header = read_zarr_cube_dask(path)
+    if spatial_chunk is not None and cube.chunksize[1:] != spatial_chunk:
+        logger.info(
+            f"{path} is chunked {cube.chunksize[1:]}, not the {spatial_chunk} "
+            "asked for. Rewrite the store with `fits_cube_to_zarr` to change it; "
+            "rechunking on read would give back the memory it saves."
+        )
+    return cube, header
+
+
 def read_fits_cube_channel_chunks(
     path: str | Path,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
@@ -305,6 +428,23 @@ def read_fits_cube_channel_chunks(
     )
 
     return cube, header
+
+
+def read_cube_channel_chunks(
+    path: str | Path,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+) -> tuple[da.Array, Header]:
+    """Channel-chunked read where the format allows one.
+
+    A zarr store has a single chunking, fixed when it was written, and for
+    RM-synthesis that is spatial. Per-channel reductions then have to gather
+    across the spatial chunks, which `da_channel_mad` says so about. Store the
+    noise cubes channel-chunked if that matters: they are only ever read that
+    way.
+    """
+    if Path(path).suffix != ".zarr":
+        return read_fits_cube_channel_chunks(path, target_chunk_mb=target_chunk_mb)
+    return read_zarr_cube_dask(path)
 
 
 def freq_arr_hz_from_header(header: Header, n_freq: int) -> NDArray[np.float64]:
