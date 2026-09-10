@@ -983,19 +983,19 @@ def get_weight_arr_from_fits(
 
 def _convert_cubes_to_zarr(
     cube_files: dict[str, str | Path | None],
-    directory: str | Path,
     spatial_chunk: tuple[int, int],
     shard_rows: int,
 ) -> dict[str, Path | None]:
-    """Copy each cube into `directory` as a zarr store, chunked for the FDF.
+    """Copy each cube to a zarr store beside it, chunked for the FDF.
+
+    `cube.fits` gives `cube.zarr`, so a store is always named after the cube it
+    came from and two cubes can never land on the same one.
 
     Rewritten every run rather than reused: a store that no longer matches its
     cube would be used without anyone noticing. Convert once with
     `rm_lite.utils.dask_io.fits_cube_to_zarr` and pass the stores in directly to
     keep them between runs.
     """
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
     converted: dict[str, Path | None] = {}
     for name, path in cube_files.items():
         if path is None or Path(path).suffix == ".zarr":
@@ -1003,7 +1003,7 @@ def _convert_cubes_to_zarr(
             continue
         converted[name] = fits_cube_to_zarr(
             path,
-            directory / f"{name}.zarr",
+            Path(path).with_suffix(".zarr"),
             spatial_chunk=spatial_chunk,
             shard_rows=shard_rows,
         )
@@ -1037,7 +1037,7 @@ def rmsynth_3d_from_fits(
     per_pixel_rmsf: bool = False,
     nufft_nthreads: int = 1,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
-    convert_to_zarr: str | Path | None = None,
+    convert_to_zarr: bool = False,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis directly on Stokes Q/U cubes on disk.
@@ -1087,12 +1087,12 @@ def rmsynth_3d_from_fits(
         nufft_nthreads (int, optional): See `rmsynth_3d`. Defaults to 1.
         target_chunk_mb (float, optional): Target per-chunk memory footprint
             in MB, see `read_cube_dask`. Defaults to 256.
-        convert_to_zarr (str | Path | None, optional): Directory to copy the
-            cubes into as zarr stores before reading them, chunked as the FDF
-            needs. Worth it for a cube wide enough that the chunking has to
-            split the image width: a FITS block narrower than the image still
-            costs a full-width read, where a zarr chunk costs itself. None reads
-            the cubes where they are. Defaults to None.
+        convert_to_zarr (bool, optional): Copy each cube to a zarr store
+            beside it before reading, chunked as the FDF needs: `cube.fits`
+            gives `cube.zarr`. Worth it for a cube wide enough that the
+            chunking has to split the image width, since a FITS block narrower
+            than the image still costs a full-width read where a zarr chunk
+            costs itself. Defaults to False, reading the cubes where they are.
         log_level (int, optional): See `rmsynth_3d`. Defaults to `logging.WARNING`.
 
     Returns:
@@ -1123,7 +1123,7 @@ def rmsynth_3d_from_fits(
     spatial_q_file: str | Path = stokes_q_file
     spatial_u_file: str | Path = stokes_u_file
     spatial_i_file: str | Path | None = stokes_i_file
-    if convert_to_zarr is not None:
+    if convert_to_zarr:
         # One shard per band the FITS reader would have read anyway, so a cube
         # chunked more finely than that is still a handful of files rather than one
         # per chunk.
@@ -1144,7 +1144,6 @@ def rmsynth_3d_from_fits(
                 "i_error": stokes_i_error_file,
                 "i_model": stokes_i_model_file,
             },
-            convert_to_zarr,
             spatial_chunk,
             shard_rows,
         )
