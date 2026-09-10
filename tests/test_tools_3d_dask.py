@@ -1343,10 +1343,12 @@ def test_rmsynth_3d_from_fits_converts_to_zarr_on_request(tmp_path, synthetic_cu
         stokes_i_snr_cut=None,
         d_phi_radm2=D_PHI_RADM2,
         phi_max_radm2=150.0,
-        convert_to_zarr=tmp_path / "stores",
+        convert_to_zarr=True,
     )
 
-    assert (tmp_path / "stores" / "q.zarr").is_dir()
+    # Named after the cube it came from, so two cubes cannot collide.
+    assert paths["q"].with_suffix(".zarr").is_dir()
+    assert paths["u"].with_suffix(".zarr").is_dir()
     assert converted.fdf_dirty_cube.chunksize == plain.fdf_dirty_cube.chunksize
     np.testing.assert_array_equal(
         converted.fdf_dirty_cube.compute(), plain.fdf_dirty_cube.compute()
