@@ -64,15 +64,15 @@ STALL_PATIENCE = 5
 class RMCleanResults(NamedTuple):
     """Results of the RM-CLEAN calculation"""
 
-    clean_fdf_arr: NDArray[np.complex128]
+    clean_fdf_arr: NDArray[np.complexfloating]
     """The cleaned Faraday dispersion function cube"""
-    model_fdf_arr: NDArray[np.complex128]
+    model_fdf_arr: NDArray[np.complexfloating]
     """The clean components cube"""
     clean_iter_arr: NDArray[np.int64]
     """CLEAN iterations per pixel. Single-scale: minor iterations (one component
     each). Multiscale: minor cycles (scale re-selections); see
     `sub_minor_iter_arr` for the comparable component count."""
-    resid_fdf_arr: NDArray[np.complex128]
+    resid_fdf_arr: NDArray[np.complexfloating]
     """The residual Faraday dispersion function cube"""
     sub_minor_iter_arr: NDArray[np.int64]
     """Total component-placement steps per pixel: single-scale equals
@@ -83,11 +83,11 @@ class RMCleanResults(NamedTuple):
 class CleanLoopResults(NamedTuple):
     """Results of the RM-CLEAN loop"""
 
-    clean_fdf_spectrum: NDArray[np.complex128]
+    clean_fdf_spectrum: NDArray[np.complexfloating]
     """The cleaned Faraday dispersion function cube"""
-    resid_fdf_spectrum: NDArray[np.complex128]
+    resid_fdf_spectrum: NDArray[np.complexfloating]
     """The residual Faraday dispersion function cube"""
-    model_fdf_spectrum: NDArray[np.complex128]
+    model_fdf_spectrum: NDArray[np.complexfloating]
     """The clean components cube"""
     iter_count: int
     """The number of iterations"""
@@ -96,11 +96,11 @@ class CleanLoopResults(NamedTuple):
 class MinorLoopResults(NamedTuple):
     """Results of the RM-CLEAN minor loop"""
 
-    resid_fdf_spectrum: NDArray[np.complex128]
+    resid_fdf_spectrum: NDArray[np.complexfloating]
     """The residual Faraday dispersion function cube"""
     resid_fdf_spectrum_mask: np.ma.MaskedArray
     """The masked residual Faraday dispersion function cube"""
-    model_fdf_spectrum: NDArray[np.complex128]
+    model_fdf_spectrum: NDArray[np.complexfloating]
     """The clean components cube"""
     iter_count: int
     """The number of iterations"""
@@ -146,7 +146,7 @@ class MinorLoopArrays(NamedTuple):
     """Faraday depth array in rad/m^2"""
     phi_double_arr_radm2: NDArray[np.float64]
     """Double-length Faraday depth array in rad/m^2"""
-    rmsf_spectrum: NDArray[np.complex128]
+    rmsf_spectrum: NDArray[np.complexfloating]
     """RMSF spectrum"""
     rmsf_fwhm: float
     """FWHM of the RMSF"""
@@ -174,7 +174,7 @@ class MinorLoopOptions:
 
 
 def _offsource_rms(
-    resid_fdf_spectrum: NDArray[np.complex128],
+    resid_fdf_spectrum: NDArray[np.complexfloating],
     mask_arr: NDArray[np.bool_],
 ) -> float:
     """Robust (MAD) RMS of the residual outside the current mask region.
@@ -193,7 +193,7 @@ def _offsource_rms(
 
 
 def _seed_mask(
-    resid_fdf_spectrum: NDArray[np.complex128],
+    resid_fdf_spectrum: NDArray[np.complexfloating],
     cap_arr: NDArray[np.bool_],
     floor: float,
 ) -> NDArray[np.bool_]:
@@ -209,11 +209,11 @@ def _seed_mask(
 
 
 def shift_rmsf(
-    rmsf_spectrum: NDArray[np.complex128],
+    rmsf_spectrum: NDArray[np.complexfloating],
     fdf_index: int,
     n_phi_pad: int,
     max_rmsf_index: int,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Roll the double-length RMSF so its peak sits at FDF channel `fdf_index`,
     then clip to FDF length.
 
@@ -221,13 +221,13 @@ def shift_rmsf(
     shifts and a symmetric RMSF.
 
     Args:
-        rmsf_spectrum (NDArray[np.complex128]): Double-length RMSF.
+        rmsf_spectrum (NDArray[np.complexfloating]): Double-length RMSF.
         fdf_index (int): Target FDF channel for the RMSF peak.
         n_phi_pad (int): Half the length difference between the double and FDF axes.
         max_rmsf_index (int): Index of the RMSF peak.
 
     Returns:
-        NDArray[np.complex128]: RMSF shifted to `fdf_index`, clipped to FDF length.
+        NDArray[np.complexfloating]: RMSF shifted to `fdf_index`, clipped to FDF length.
     """
     # Gather only the clipped FDF window instead of np.roll copying the whole
     # double-length array each call (np.roll was the single hottest op in the
@@ -378,10 +378,10 @@ def minor_loop(
 
 
 def restore_model(
-    model_fdf_spectrum: NDArray[np.complex128],
+    model_fdf_spectrum: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     rmsf_fwhm: float,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Restore a delta model with a unit-peak clean beam (one pass).
 
     Sum of per-component Gaussians == the delta model convolved with the clean
@@ -399,20 +399,20 @@ def restore_model(
     )
     return np.asarray(
         (model_fdf_spectrum[nonzero][:, None] * beams).sum(axis=0),
-        dtype=np.complex128,
+        dtype=model_fdf_spectrum.dtype,
     )
 
 
 class RMSynthArrays(NamedTuple):
     """Arrays for RM-synthesis"""
 
-    dirty_fdf_arr: NDArray[np.complex128]
+    dirty_fdf_arr: NDArray[np.complexfloating]
     """Dirty Faraday dispersion function array"""
     phi_arr_radm2: NDArray[np.float64]
     """Faraday depth array in rad/m^2"""
     phi_double_arr_radm2: NDArray[np.float64]
     """Double-length Faraday depth array in rad/m^2"""
-    rmsf_arr: NDArray[np.complex128]
+    rmsf_arr: NDArray[np.complexfloating]
     """RMSF array"""
     fwhm_rmsf_arr: NDArray[np.float64]
     """FWHM of the RMSF array"""
@@ -421,7 +421,7 @@ class RMSynthArrays(NamedTuple):
 
 
 def _fdf_peak_abs(
-    dirty_fdf_arr_2d: NDArray[np.complex128],
+    dirty_fdf_arr_2d: NDArray[np.complexfloating],
 ) -> NDArray[np.float64]:
     """Per-pixel max |dirty FDF|; NaN for a fully blanked (all-NaN) pixel."""
     n_phi, n_pix = dirty_fdf_arr_2d.shape
@@ -440,7 +440,7 @@ def _fdf_peak_abs(
 
 
 def _null_clean_pixels(
-    dirty_fdf_arr_2d: NDArray[np.complex128],
+    dirty_fdf_arr_2d: NDArray[np.complexfloating],
     mask: float | NDArray[np.float64],
 ) -> NDArray[np.bool_]:
     """Pixels whose dirty FDF peak cannot clear `mask`, so CLEAN is a no-op.
@@ -465,7 +465,7 @@ def _null_clean_pixels(
 
 
 def _blank_pixels(
-    dirty_fdf_arr_2d: NDArray[np.complex128],
+    dirty_fdf_arr_2d: NDArray[np.complexfloating],
 ) -> NDArray[np.bool_]:
     """Fully blanked (all-NaN) pixels, which no CLEAN mode can say anything about.
 
@@ -602,7 +602,9 @@ def rmclean(
     # Residual is initially copies of dirty FDF, so that pixels that are not
     #  processed get correct values (but will be overridden when processed)
     clean_fdf_spectrum_2d = np.zeros_like(dirty_fdf_arr_2d)
-    model_fdf_spectrum_2d = np.zeros(dirty_fdf_arr_2d.shape, dtype=complex)
+    model_fdf_spectrum_2d = np.zeros(
+        dirty_fdf_arr_2d.shape, dtype=dirty_fdf_arr_2d.dtype
+    )
     resid_fdf_arr_2d = dirty_fdf_arr_2d.copy()
 
     if multiscale:
@@ -992,11 +994,11 @@ KERNEL_SUPPORT_FACTOR: dict[str, float] = {
 def convolve_fdf_scale(
     scale: float,
     fwhm: float,
-    fdf_arr: NDArray[np.complex128] | NDArray[np.float64],
+    fdf_arr: NDArray[np.complexfloating] | NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     kernel: KernelType = "gaussian",
     sum_normalised: bool = True,
-) -> NDArray[np.complex128] | NDArray[np.float64]:
+) -> NDArray[np.complexfloating] | NDArray[np.float64]:
     """Convolve an FDF (complex or real) with a real scale kernel.
 
     The real and imaginary parts are convolved separately, since
@@ -1043,10 +1045,10 @@ def convolve_fdf_scale(
 
 
 def _restore_multiscale(
-    model_fdf_spectrum: NDArray[np.complex128],
+    model_fdf_spectrum: NDArray[np.complexfloating],
     phi_double_arr_radm2: NDArray[np.float64],
     rmsf_fwhm: float,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Convolve the model with a unit-peak clean beam.
 
     Matches single-scale `minor_loop`, so `calc_faraday_moments` mom0
@@ -1061,11 +1063,11 @@ def _restore_multiscale(
 
 
 def _reconvolve_model(
-    model_fdf_spectrum: NDArray[np.complex128],
-    rmsf_spectrum: NDArray[np.complex128],
+    model_fdf_spectrum: NDArray[np.complexfloating],
+    rmsf_spectrum: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     """Footprint of a sparse delta model in the dirty FDF: sum_i m_i * RMSF@i.
 
     Same shift-and-add primitive as `minor_loop`, so the multiscale residual
@@ -1092,10 +1094,10 @@ class ScaleKernels(NamedTuple):
 
     scales: NDArray[np.float64]
     """Scales (RMSF FWHM units)"""
-    rmsf_conv_scale: list[NDArray[np.complex128]]
+    rmsf_conv_scale: list[NDArray[np.complexfloating]]
     """`RMSF conv K_s` per scale: the scale-s response in the full-res residual,
     used for the residual subtraction. On the double phi axis."""
-    rmsf_conv_scale_twice: list[NDArray[np.complex128]]
+    rmsf_conv_scale_twice: list[NDArray[np.complexfloating]]
     """`RMSF conv K_s conv K_s` per scale: the scale-s response in the
     scale-convolved residual, i.e. the effective RMSF the sub-minor loop cleans
     against (Section 2.2)."""
@@ -1119,7 +1121,7 @@ class ScaleKernels(NamedTuple):
 
 def compute_scale_kernels(
     scales: NDArray[np.float64],
-    rmsf_spectrum: NDArray[np.complex128],
+    rmsf_spectrum: NDArray[np.complexfloating],
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
     kernel: KernelType,
@@ -1130,7 +1132,7 @@ def compute_scale_kernels(
 
     Args:
         scales (NDArray[np.float64]): Scales in RMSF FWHM units.
-        rmsf_spectrum (NDArray[np.complex128]): RMSF on the double-phi axis.
+        rmsf_spectrum (NDArray[np.complexfloating]): RMSF on the double-phi axis.
         rmsf_fwhm (float): RMSF FWHM in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-phi axis.
         kernel (KernelType): Scale-kernel shape.
@@ -1138,8 +1140,8 @@ def compute_scale_kernels(
     Returns:
         ScaleKernels: Per-scale responses (see that type).
     """
-    rmsf_conv_scale: list[NDArray[np.complex128]] = []
-    rmsf_conv_scale_twice: list[NDArray[np.complex128]] = []
+    rmsf_conv_scale: list[NDArray[np.complexfloating]] = []
+    rmsf_conv_scale_twice: list[NDArray[np.complexfloating]] = []
     peak_response = np.ones_like(scales)
     fwhm_conv_scale_twice = np.full_like(scales, rmsf_fwhm)
     # sigma_s = sqrt((K_s conv K_s conv C)(0) / C(0)): the zero-lag value of the
@@ -1194,7 +1196,7 @@ def _halfmax_width_radm2(profile: NDArray[np.float64], d_phi: float) -> float:
 
 
 def find_significant_scale(
-    resid_fdf_spectrum: NDArray[np.complex128],
+    resid_fdf_spectrum: NDArray[np.complexfloating],
     scale_kernels: ScaleKernels,
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
@@ -1213,7 +1215,7 @@ def find_significant_scale(
     scale 0, else fall back to "snr" (see `_hybrid_scale_selection`).
 
     Args:
-        resid_fdf_spectrum (NDArray[np.complex128]): Current residual FDF.
+        resid_fdf_spectrum (NDArray[np.complexfloating]): Current residual FDF.
         scale_kernels (ScaleKernels): Precomputed per-scale responses.
         rmsf_fwhm (float): RMSF FWHM in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-phi axis.
@@ -1259,7 +1261,7 @@ def find_significant_scale(
 
 
 def _hybrid_scale_selection(
-    resid_fdf_spectrum: NDArray[np.complex128],
+    resid_fdf_spectrum: NDArray[np.complexfloating],
     scale_kernels: ScaleKernels,
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
@@ -1344,7 +1346,7 @@ def _hybrid_scale_selection(
 
 
 def adaptive_scale_supports(
-    dirty_fdf_spectrum: NDArray[np.complex128],
+    dirty_fdf_spectrum: NDArray[np.complexfloating],
     source_region: NDArray[np.bool_],
     kernels: ScaleKernels,
     scales: NDArray[np.float64],
@@ -1389,8 +1391,8 @@ def adaptive_scale_supports(
 
 
 def _multiscale_minor_cycles(
-    resid_fdf_spectrum: NDArray[np.complex128],
-    model_fdf_spectrum: NDArray[np.complex128],
+    resid_fdf_spectrum: NDArray[np.complexfloating],
+    model_fdf_spectrum: NDArray[np.complexfloating],
     *,
     kernels: ScaleKernels,
     scales: NDArray[np.float64],
@@ -1402,7 +1404,7 @@ def _multiscale_minor_cycles(
     multiscale_options: MultiscaleOptions,
     stop_threshold: float,
     record: list[list[int]] | None,
-) -> tuple[NDArray[np.complex128], NDArray[np.complex128], int, int]:
+) -> tuple[NDArray[np.complexfloating], NDArray[np.complexfloating], int, int]:
     """One phase of multiscale minor cycles, restricted to `allowed_supports`.
 
     Cleans down to `stop_threshold` with the O&S divergence and stall guards. A
@@ -1602,7 +1604,7 @@ def _build_scale_masks(
 
 
 def _classify_hybrid_source(
-    dirty_fdf_spectrum: NDArray[np.complex128],
+    dirty_fdf_spectrum: NDArray[np.complexfloating],
     phi_double_arr_radm2: NDArray[np.float64],
     kernels: ScaleKernels,
     multiscale_options: MultiscaleOptions,
@@ -1624,16 +1626,20 @@ def _classify_hybrid_source(
 
 
 def multiscale_clean_spectrum(
-    dirty_fdf_spectrum: NDArray[np.complex128],
+    dirty_fdf_spectrum: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
-    rmsf_spectrum: NDArray[np.complex128],
+    rmsf_spectrum: NDArray[np.complexfloating],
     rmsf_fwhm: float,
     scales: NDArray[np.float64],
     clean_options: RMCleanOptions,
     multiscale_options: MultiscaleOptions,
 ) -> tuple[
-    NDArray[np.complex128], NDArray[np.complex128], NDArray[np.complex128], int, int
+    NDArray[np.complexfloating],
+    NDArray[np.complexfloating],
+    NDArray[np.complexfloating],
+    int,
+    int,
 ]:
     """Multiscale CLEAN one FDF spectrum (Offringa & Smirnov 2017).
 
@@ -1644,10 +1650,10 @@ def multiscale_clean_spectrum(
     reflect-mode boundary artefacts.
 
     Args:
-        dirty_fdf_spectrum (NDArray[np.complex128]): Dirty FDF on the phi axis.
+        dirty_fdf_spectrum (NDArray[np.complexfloating]): Dirty FDF on the phi axis.
         phi_arr_radm2 (NDArray[np.float64]): Faraday depth axis in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-phi axis (RMSF length).
-        rmsf_spectrum (NDArray[np.complex128]): RMSF on the double-phi axis.
+        rmsf_spectrum (NDArray[np.complexfloating]): RMSF on the double-phi axis.
         rmsf_fwhm (float): RMSF FWHM in rad/m^2.
         scales (NDArray[np.float64]): Scales in RMSF FWHM units.
         clean_options (RMCleanOptions): Mask, threshold, gain, max_iter.

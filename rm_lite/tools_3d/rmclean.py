@@ -24,7 +24,12 @@ from rm_lite.utils.clean import (
     rmclean,
 )
 from rm_lite.utils.logging import logger, quiet_logs
-from rm_lite.utils.synthesis import calc_faraday_moments, calc_faraday_peaks
+from rm_lite.utils.synthesis import (
+    FaradayMoments,
+    FaradayPeaks,
+    calc_faraday_moments,
+    calc_faraday_peaks,
+)
 
 
 class RMClean3DResults(NamedTuple):
@@ -96,9 +101,9 @@ class RMClean3DResults(NamedTuple):
 
 
 class _RMCleanBlockResult(NamedTuple):
-    clean_fdf: NDArray[np.complex128]
-    model_fdf: NDArray[np.complex128]
-    resid_fdf: NDArray[np.complex128]
+    clean_fdf: NDArray[np.complexfloating]
+    model_fdf: NDArray[np.complexfloating]
+    resid_fdf: NDArray[np.complexfloating]
     iter_count: NDArray[np.int64]
 
 
@@ -121,9 +126,102 @@ def _align_option_map_to_fdf(
     return array.rechunk(fdf_dirty_cube.chunks[1:])
 
 
+def faraday_maps_on_block(
+    clean_block: NDArray[np.complexfloating],
+    *per_pixel_blocks: NDArray[np.float64],
+    per_pixel_fields: tuple[str, ...],
+    phi_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_radm2: float,
+    lambda_sq_arr_m2: NDArray[np.float64] | None,
+    fdf_noise: float | None,
+    moment_threshold: float | None,
+    lam_sq_0_m2: float,
+) -> NDArray[np.float64]:
+    """Every Faraday moment and peak map for one block, stacked on a leading axis.
+
+    Each map is a reduction along the Faraday axis, which is never chunked, so a
+    block holds everything its pixels need. Computing them together keeps the
+    graph to one task a block rather than a chain per map, and lets the block be
+    dropped once they are all done.
+
+    `per_pixel_fields` names which of the trailing block arguments is which, so
+    any of the three can be a map or a single value.
+    """
+    values: dict[str, Any] = {
+        "fdf_noise": fdf_noise,
+        "moment_threshold": moment_threshold,
+        "lam_sq_0_m2": lam_sq_0_m2,
+    }
+    values.update(zip(per_pixel_fields, per_pixel_blocks, strict=False))
+
+    moments = calc_faraday_moments(
+        clean_block,
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_error=values["fdf_noise"],
+        threshold=values["moment_threshold"],
+    )
+    peaks = calc_faraday_peaks(
+        clean_block,
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_error=values["fdf_noise"],
+        lam_sq_0_m2=values["lam_sq_0_m2"],
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+    )
+    spatial_shape = clean_block.shape[1:]
+    return np.stack(
+        [
+            np.broadcast_to(np.asarray(value, dtype=np.float64), spatial_shape)
+            for value in (*moments, *peaks)
+        ]
+    )
+
+
+def _faraday_maps(
+    clean: da.Array,
+    phi_arr_radm2: NDArray[np.float64],
+    fwhm_rmsf_radm2: float,
+    lam_sq_0_m2: float | NDArray[np.float64] | da.Array,
+    lambda_sq_arr_m2: NDArray[np.float64] | None,
+    fdf_noise: float | NDArray[np.float64] | da.Array | None,
+    moment_threshold: float | NDArray[np.float64] | da.Array | None,
+) -> dict[str, da.Array]:
+    """The moment and peak maps, from one `map_blocks` over the clean cube."""
+    names = FaradayMoments._fields + FaradayPeaks._fields
+    scalars = {
+        "fdf_noise": fdf_noise,
+        "moment_threshold": moment_threshold,
+        "lam_sq_0_m2": lam_sq_0_m2,
+    }
+    # Anything given per pixel rides along as a block argument, so a task pulls
+    # its own pixels rather than the whole map.
+    per_pixel = {
+        field: _align_option_map_to_fdf(value, clean, field)
+        for field, value in scalars.items()
+        if value is not None and np.ndim(value) != 0
+    }
+    for field in per_pixel:
+        scalars[field] = None
+
+    stacked = da.map_blocks(
+        faraday_maps_on_block,
+        clean,
+        *per_pixel.values(),
+        chunks=((len(names),), *clean.chunks[1:]),
+        dtype=np.float64,
+        per_pixel_fields=tuple(per_pixel),
+        phi_arr_radm2=phi_arr_radm2,
+        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        **scalars,
+    )
+    return {name: stacked[index] for index, name in enumerate(names)}
+
+
 def _rmclean_on_block(
-    dirty_fdf_block: NDArray[np.complex128],
-    rmsf_block: NDArray[np.complex128],
+    dirty_fdf_block: NDArray[np.complexfloating],
+    rmsf_block: NDArray[np.complexfloating],
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
@@ -171,7 +269,7 @@ def _rmclean_on_block(
 
 def _build_clean_output_arrays(
     fdf_dirty_cube: da.Array,
-    rmsf: NDArray[np.complex128] | da.Array,
+    rmsf: NDArray[np.complexfloating] | da.Array,
     rmsf_cube: da.Array | None,
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
@@ -257,11 +355,11 @@ def _build_clean_output_arrays(
 
     layers: dict[str, Any] = dict(graph.layers)
     layer_deps: dict[str, set[str]] = dict(graph.dependencies)
-    arrays: list[tuple[str, type, tuple[tuple[int, ...], ...]]] = []
+    arrays: list[tuple[str, Any, tuple[tuple[int, ...], ...]]] = []
     for field, dtype, chunks in (
-        ("clean_fdf", np.complex128, fdf_chunks),
-        ("model_fdf", np.complex128, fdf_chunks),
-        ("resid_fdf", np.complex128, fdf_chunks),
+        ("clean_fdf", fdf_dirty_cube.dtype, fdf_chunks),
+        ("model_fdf", fdf_dirty_cube.dtype, fdf_chunks),
+        ("resid_fdf", fdf_dirty_cube.dtype, fdf_chunks),
         ("iter_count", np.int64, spatial_chunks),
     ):
         name = f"rmclean-{field.replace('_', '-')}-{token}"
@@ -291,7 +389,7 @@ def _build_clean_output_arrays(
 
 def run_rmclean(
     fdf_dirty_cube: da.Array,
-    rmsf: NDArray[np.complex128] | da.Array,
+    rmsf: NDArray[np.complexfloating] | da.Array,
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
@@ -318,7 +416,7 @@ def run_rmclean(
     Args:
         fdf_dirty_cube (da.Array): Dirty FDF cube, shape (n_phi, ny, nx),
             chunked spatially only (as produced by `rm_lite.tools_3d.rmsynth.rmsynth_3d`).
-        rmsf (NDArray[np.complex128] | da.Array): Either the RMSF every pixel
+        rmsf (NDArray[np.complexfloating] | da.Array): Either the RMSF every pixel
             shares, shape (n_phi_double,) (`RMSynth3DResults.rmsf_arr`), or a
             per-pixel RMSF cube, shape (n_phi_double, ny, nx) with the same
             spatial chunking as `fdf_dirty_cube` (`rmsf_cube`, only produced with
@@ -434,20 +532,14 @@ def run_rmclean(
         log_level=log_level,
     )
 
-    moments = calc_faraday_moments(
+    maps = _faraday_maps(
         clean,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
-        fdf_error=fdf_noise,
-        threshold=moment_threshold,
-    )
-    peaks = calc_faraday_peaks(
-        clean,
-        phi_arr_radm2=phi_arr_radm2,
-        fwhm_rmsf_radm2=fwhm_rmsf_radm2,
-        fdf_error=fdf_noise,
         lam_sq_0_m2=lam_sq_0_m2,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
+        fdf_noise=fdf_noise,
+        moment_threshold=moment_threshold,
     )
 
     return RMClean3DResults(
@@ -455,27 +547,27 @@ def run_rmclean(
         model_fdf_cube=model,
         resid_fdf_cube=resid,
         iter_count_map=iter_count,
-        mom0_map=moments.mom0,
-        mom0_debias_map=moments.mom0_debias,
-        mom0_error_map=moments.mom0_error,
-        mom1_map=moments.mom1,
-        mom1_error_map=moments.mom1_error,
-        mom2_map=moments.mom2,
-        mom2_error_map=moments.mom2_error,
-        pi_lam_sq_0_map=moments.pi_lam_sq_0,
-        pi_lam_sq_0_debias_map=moments.pi_lam_sq_0_debias,
-        pi_lam_sq_0_error_map=moments.pi_lam_sq_0_error,
-        pa_lam_sq_0_map=moments.pa_lam_sq_0,
-        pa_lam_sq_0_error_map=moments.pa_lam_sq_0_error,
-        peak_pi_map=peaks.peak_pi,
-        peak_pi_debias_map=peaks.peak_pi_debias,
-        peak_pi_error_map=peaks.peak_pi_error,
-        peak_rm_map=peaks.peak_rm_radm2,
-        peak_rm_error_map=peaks.peak_rm_error_radm2,
-        peak_pa_map=peaks.peak_pa_deg,
-        peak_pa_error_map=peaks.peak_pa_error_deg,
-        peak_pa0_map=peaks.peak_pa0_deg,
-        peak_pa0_error_map=peaks.peak_pa0_error_deg,
+        mom0_map=maps["mom0"],
+        mom0_debias_map=maps["mom0_debias"],
+        mom0_error_map=maps["mom0_error"],
+        mom1_map=maps["mom1"],
+        mom1_error_map=maps["mom1_error"],
+        mom2_map=maps["mom2"],
+        mom2_error_map=maps["mom2_error"],
+        pi_lam_sq_0_map=maps["pi_lam_sq_0"],
+        pi_lam_sq_0_debias_map=maps["pi_lam_sq_0_debias"],
+        pi_lam_sq_0_error_map=maps["pi_lam_sq_0_error"],
+        pa_lam_sq_0_map=maps["pa_lam_sq_0"],
+        pa_lam_sq_0_error_map=maps["pa_lam_sq_0_error"],
+        peak_pi_map=maps["peak_pi"],
+        peak_pi_debias_map=maps["peak_pi_debias"],
+        peak_pi_error_map=maps["peak_pi_error"],
+        peak_rm_map=maps["peak_rm_radm2"],
+        peak_rm_error_map=maps["peak_rm_error_radm2"],
+        peak_pa_map=maps["peak_pa_deg"],
+        peak_pa_error_map=maps["peak_pa_error_deg"],
+        peak_pa0_map=maps["peak_pa0_deg"],
+        peak_pa0_error_map=maps["peak_pa0_error_deg"],
     )
 
 

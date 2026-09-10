@@ -235,14 +235,14 @@ class SampledPeakFit(NamedTuple):
     """Interpolated peak amplitude"""
     offset: NDArray[np.float64]
     """Peak position in samples from the middle one, within [-0.5, 0.5]"""
-    value: NDArray[np.complex128]
+    value: NDArray[np.complexfloating]
     """The sampled curve interpolated to `offset`, phase kept"""
 
 
 def fit_sampled_peak(
-    below: NDArray[np.complex128],
-    at: NDArray[np.complex128],
-    above: NDArray[np.complex128],
+    below: NDArray[np.complexfloating],
+    at: NDArray[np.complexfloating],
+    above: NDArray[np.complexfloating],
 ) -> SampledPeakFit:
     """Fit a peak sub-sample from the three samples straddling it.
 

@@ -26,6 +26,7 @@ from rm_lite.utils.synthesis import (
     compute_rmsynth_params,
     compute_theoretical_noise,
     create_fractional_spectra,
+    frame_with_schema,
     get_fdf_parameters,
     get_mask_index,
     get_rmsf_nufft,
@@ -55,14 +56,12 @@ rmsyth_arrs_schema = pl.Schema(
         "fdf_dirty_complex_arr": pl.Object,
     }
 )
-rmsyth_arrs_schema_df = rmsyth_arrs_schema.to_frame(eager=True)
 rmsf_arrs_schema = pl.Schema(
     {
         "phi2_arr_radm2": pl.Float64,
         "rmsf_complex_arr": pl.Object,
     }
 )
-rmsf_arrs_schema_df = rmsf_arrs_schema.to_frame(eager=True)
 stokes_i_arrs_schema = pl.Schema(
     {
         "freq_arr_hz": pl.Float64,
@@ -74,7 +73,6 @@ stokes_i_arrs_schema = pl.Schema(
         "complex_pol_error": pl.Object,
     }
 )
-stokes_i_arrs_schema_df = stokes_i_arrs_schema.to_frame(eager=True)
 stokes_i_terms_schema = pl.Schema(
     {
         "term_name": pl.String,
@@ -84,13 +82,13 @@ stokes_i_terms_schema = pl.Schema(
         "fit_function": pl.String,
     }
 )
-stokes_i_terms_schema_df = stokes_i_terms_schema.to_frame(eager=True)
 
 
 def _stokes_i_terms(
     fit_result: FitResult | None,
     ref_freq_hz: float,
     fit_function: Literal["log", "linear"],
+    dtype: np.typing.DTypeLike,
 ) -> pl.DataFrame:
     """The fitted Stokes I model as one row per term.
 
@@ -101,25 +99,25 @@ def _stokes_i_terms(
     on its own. Empty when nothing was fitted (a supplied model, or no Stokes I).
     """
     if fit_result is None:
-        return stokes_i_terms_schema_df
+        return frame_with_schema(stokes_i_terms_schema, dtype, {})
     popt = np.asarray(fit_result.popt, dtype=np.float64)
-    return stokes_i_terms_schema_df.vstack(
-        pl.DataFrame(
-            {
-                "term_name": list(coefficient_names(popt.size, fit_function)),
-                "term_value": popt,
-                "term_error": coefficient_errors(fit_result.pcov, popt.size),
-                "ref_freq_hz": np.full(popt.size, ref_freq_hz),
-                "fit_function": [fit_function] * popt.size,
-            }
-        )
+    return frame_with_schema(
+        stokes_i_terms_schema,
+        dtype,
+        {
+            "term_name": list(coefficient_names(popt.size, fit_function)),
+            "term_value": popt,
+            "term_error": coefficient_errors(fit_result.pcov, popt.size),
+            "ref_freq_hz": np.full(popt.size, ref_freq_hz),
+            "fit_function": [fit_function] * popt.size,
+        },
     )
 
 
 def run_rmsynth(
     freq_arr_hz: NDArray[np.float64],
-    complex_pol_arr: NDArray[np.complex128],
-    complex_pol_error: NDArray[np.complex128],
+    complex_pol_arr: NDArray[np.complexfloating],
+    complex_pol_error: NDArray[np.complexfloating],
     stokes_i_arr: NDArray[np.float64] | None = None,
     stokes_i_error_arr: NDArray[np.float64] | None = None,
     stokes_i_model_arr: NDArray[np.float64] | None = None,
@@ -143,7 +141,7 @@ def run_rmsynth(
 
     Args:
         freq_arr_hz (NDArray[np.float64]): Frequencies in Hz
-        complex_pol_arr (NDArray[np.complex128]): Complex polarisation values (Q + iU)
+        complex_pol_arr (NDArray[np.complexfloating]): Complex polarisation values (Q + iU)
         complex_pol_error (NDArray[np.float64]): Complex polarisation errors (dQ + idU)
         stokes_i_arr (NDArray[np.float64] | None, optional): Total itensity values. Defaults to None.
         stokes_i_error_arr (NDArray[np.float64] | None, optional): Total intensity errors. Defaults to None.
@@ -361,35 +359,35 @@ def _run_rmsynth(
         fit_function=fit_options.fit_function,
         moment_threshold_snr=moment_threshold_snr,
     )
-    rmsyth_arrs = rmsyth_arrs_schema_df.vstack(
-        pl.DataFrame(
-            {
-                "phi_arr_radm2": rmsynth_params.phi_arr_radm2,
-                "fdf_dirty_complex_arr": fdf_dirty_arr,
-            }
-        )
+    rmsyth_arrs = frame_with_schema(
+        rmsyth_arrs_schema,
+        fdf_dirty_arr.dtype,
+        {
+            "phi_arr_radm2": rmsynth_params.phi_arr_radm2,
+            "fdf_dirty_complex_arr": fdf_dirty_arr,
+        },
     )
 
-    rmsf_arrs = rmsf_arrs_schema_df.vstack(
-        pl.DataFrame(
-            {
-                "phi2_arr_radm2": rmsf_result.phi_double_arr_radm2,
-                "rmsf_complex_arr": rmsf_result.rmsf_cube,
-            }
-        )
+    rmsf_arrs = frame_with_schema(
+        rmsf_arrs_schema,
+        np.asarray(rmsf_result.rmsf_cube).dtype,
+        {
+            "phi2_arr_radm2": rmsf_result.phi_double_arr_radm2,
+            "rmsf_complex_arr": rmsf_result.rmsf_cube,
+        },
     )
-    stokes_i_arrs = stokes_i_arrs_schema_df.vstack(
-        pl.DataFrame(
-            {
-                "freq_arr_hz": stokes_data.freq_arr_hz,
-                "lambda_sq_arr_m2": rmsynth_params.lambda_sq_arr_m2,
-                "stokes_i_model_arr": stokes_data.stokes_i_model_arr,
-                "stokes_i_model_error": stokes_data.stokes_i_model_error,
-                "flag_arr": no_nan_idx,
-                "complex_pol_arr": stokes_data.complex_pol_arr,
-                "complex_pol_error": stokes_data.complex_pol_error,
-            }
-        )
+    stokes_i_arrs = frame_with_schema(
+        stokes_i_arrs_schema,
+        stokes_data.complex_pol_arr.dtype,
+        {
+            "freq_arr_hz": stokes_data.freq_arr_hz,
+            "lambda_sq_arr_m2": rmsynth_params.lambda_sq_arr_m2,
+            "stokes_i_model_arr": stokes_data.stokes_i_model_arr,
+            "stokes_i_model_error": stokes_data.stokes_i_model_error,
+            "flag_arr": no_nan_idx,
+            "complex_pol_arr": stokes_data.complex_pol_arr,
+            "complex_pol_error": stokes_data.complex_pol_error,
+        },
     )
 
     return RMSynth1DResults(
@@ -397,5 +395,7 @@ def _run_rmsynth(
         rmsyth_arrs,
         rmsf_arrs,
         stokes_i_arrs,
-        _stokes_i_terms(fit_result, ref_freq_hz, fit_options.fit_function),
+        _stokes_i_terms(
+            fit_result, ref_freq_hz, fit_options.fit_function, fdf_dirty_arr.dtype
+        ),
     )

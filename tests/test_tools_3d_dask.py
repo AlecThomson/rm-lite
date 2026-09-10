@@ -1432,35 +1432,34 @@ def test_channel_noise_warns_on_spatially_chunked_input(caplog):
     assert "read_fits_cube_channel_chunks" in caplog.text
 
 
-def test_rmsynth_3d_output_chunks_stay_within_the_input_chunk_budget():
-    """Spatial chunks shrink so an FDF chunk costs what the input chunk costs.
+def test_rmsynth_3d_output_chunks_meet_the_target_chunk_size():
+    """Spatial chunks shrink until an FDF chunk fits `target_chunk_mb`.
 
-    The Faraday-depth axis is longer than the frequency axis and complex128
-    rather than float32, so keeping the caller's spatial chunking would make
-    every output chunk a large multiple of the input chunk they sized.
+    The Faraday-depth axis is longer than the frequency axis and complex rather
+    than real, so keeping the caller's spatial chunking would make every output
+    chunk a large multiple of the target they asked for.
     """
     n_freq, ny, nx = 128, 64, 32
     freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
     stokes_q = RNG.normal(0, 1, (n_freq, ny, nx))
     stokes_u = RNG.normal(0, 1, (n_freq, ny, nx))
-
-    q_dask = _chunked(stokes_q, 32, nx)
-    u_dask = _chunked(stokes_u, 32, nx)
-    input_chunk_bytes = np.prod(q_dask.chunksize) * q_dask.dtype.itemsize
+    target_chunk_mb = 0.25
 
     synth = rmsynth_3d(
-        q_dask,
-        u_dask,
+        _chunked(stokes_q, 32, nx),
+        _chunked(stokes_u, 32, nx),
         freq_arr_hz,
         phi_max_radm2=100.0,
         d_phi_radm2=2.0,
         per_pixel_rmsf=True,
+        target_chunk_mb=target_chunk_mb,
     )
 
     assert synth.rmsf_cube is not None
     for cube in (synth.fdf_dirty_cube, synth.rmsf_cube):
-        assert np.prod(cube.chunksize) * cube.dtype.itemsize <= input_chunk_bytes
-    # Shrunk along y only, so each block is still one contiguous read.
+        chunk_bytes = np.prod(cube.chunksize) * cube.dtype.itemsize
+        assert chunk_bytes <= target_chunk_mb * 1024**2
+    # Rows are given up first, so a chunk is still one contiguous read.
     assert synth.fdf_dirty_cube.chunksize[2] == nx
     # And the result is unchanged by the rechunking.
     np.testing.assert_allclose(
@@ -1475,18 +1474,47 @@ def test_rmsynth_3d_output_chunks_stay_within_the_input_chunk_budget():
     )
 
 
-def test_rmsynth_3d_says_so_when_one_row_overshoots_the_budget(caplog):
-    """One FDF row is the chunking floor, so an overshoot is logged, not silent."""
+@pytest.mark.parametrize(
+    ("in_dtype", "out_dtype"),
+    [(np.float32, np.complex64), (np.float64, np.complex128)],
+)
+def test_rmsynth_3d_follows_the_input_precision(in_dtype, out_dtype):
+    """Single-precision cubes give a single-precision FDF, RMSF and CLEAN."""
+    n_freq, ny, nx = 64, 8, 8
+    freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
+    stokes_q = RNG.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
+    stokes_u = RNG.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
+
+    synth = rmsynth_3d(
+        _chunked(stokes_q, 4, nx),
+        _chunked(stokes_u, 4, nx),
+        freq_arr_hz,
+        phi_max_radm2=100.0,
+        d_phi_radm2=2.0,
+        per_pixel_rmsf=True,
+    )
+    clean = run_rmclean_from_synth(synth)
+
+    assert synth.rmsf_cube is not None
+    # Both what dask is told and what the blocks actually produce.
+    for cube in (synth.fdf_dirty_cube, synth.rmsf_cube, clean.clean_fdf_cube):
+        assert cube.dtype == out_dtype
+        assert cube.compute().dtype == out_dtype
+    assert synth.rmsf_arr.dtype == out_dtype
+
+
+def test_rmsynth_3d_narrows_a_cube_too_wide_for_one_row():
+    """A cube whose row alone busts the target is split across its width too."""
+    dtype = np.dtype(np.complex64)
     wide = da.zeros((100, 8, 4000), chunks=(-1, 8, 4000), dtype=np.float32)
     narrow = da.zeros((100, 64, 32), chunks=(-1, 64, 32), dtype=np.float32)
 
-    with caplog.at_level("WARNING"):
-        _match_chunks_to_fdf(narrow, narrow, n_phi_double=1000)
-    assert "One row of FDF output" not in caplog.text
+    kept, _ = _match_chunks_to_fdf(narrow, narrow, 1000, dtype, target_chunk_mb=1.0)
+    assert kept.chunksize[2] == 32
 
-    with caplog.at_level("WARNING"):
-        _match_chunks_to_fdf(wide, wide, n_phi_double=1000)
-    assert "One row of FDF output" in caplog.text
+    split, _ = _match_chunks_to_fdf(wide, wide, 1000, dtype, target_chunk_mb=1.0)
+    assert split.chunksize[2] < 4000
+    assert 1000 * np.prod(split.chunksize[1:]) * dtype.itemsize <= 1024**2
 
 
 def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger():

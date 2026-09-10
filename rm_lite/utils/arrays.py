@@ -27,6 +27,16 @@ def zero_nonfinite(arr: ArrayT) -> ArrayT:
     return cast(ArrayT, np.where(np.isfinite(arr), arr, 0.0))
 
 
+def complex_dtype(dtype: np.typing.DTypeLike) -> np.dtype[np.complexfloating]:
+    """The complex dtype matching a real one: float32 gives complex64."""
+    return cast("np.dtype[np.complexfloating]", np.promote_types(dtype, np.complex64))
+
+
+def real_dtype(dtype: np.typing.DTypeLike) -> np.dtype[np.floating]:
+    """The real dtype matching a complex one: complex64 gives float32."""
+    return cast("np.dtype[np.floating]", np.empty(0, dtype=dtype).real.dtype)
+
+
 def broadcast_over_channels(
     arr_1d: NDArray[DType], target: NDArray[Any]
 ) -> NDArray[DType]:

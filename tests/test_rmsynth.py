@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
+import polars as pl
 import pytest
 from numpy.typing import NDArray
+from rm_lite.tools_1d.rmclean import run_rmclean_from_synth
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.utils.fitting import power_law
 from rm_lite.utils.logging import logger
@@ -113,6 +115,45 @@ def test_rmsynth_nufft(racs_data: MockData, racs_model: MockModel):
 @pytest.mark.filterwarnings(
     "ignore: Covariance of the parameters could not be estimated"
 )
+@pytest.mark.parametrize(
+    ("in_dtype", "pol_dtype", "float_type"),
+    [
+        (np.float32, np.complex64, pl.Float32),
+        (np.float64, np.complex128, pl.Float64),
+    ],
+)
+def test_run_rmsynth_follows_the_input_precision(
+    racs_data: MockData, racs_model: MockModel, in_dtype, pol_dtype, float_type
+):
+    """Single-precision input gives single-precision tables, and the same RM."""
+    complex_data = (racs_data.stokes_q + 1j * racs_data.stokes_u).astype(pol_dtype)
+    complex_error = np.full(racs_data.stokes_q.shape, 1e-3 + 1e-3j, dtype=pol_dtype)
+
+    synth = run_rmsynth(
+        freq_arr_hz=racs_data.freqs.astype(in_dtype),
+        complex_pol_arr=complex_data,
+        complex_pol_error=complex_error,
+        stokes_i_arr=racs_data.stokes_i.astype(in_dtype),
+        stokes_i_error_arr=np.full(racs_data.stokes_i.shape, 1e-3, dtype=in_dtype),
+    )
+    clean = run_rmclean_from_synth(synth)
+
+    frames = (
+        synth.fdf_parameters,
+        synth.fdf_arrs,
+        synth.stokes_i_arrs,
+        synth.stokes_i_terms,
+        clean.fdf_arrs,
+        clean.clean_parameters,
+    )
+    for frame in frames:
+        floats = {dtype for dtype in frame.schema.values() if dtype.is_float()}
+        assert floats <= {float_type}, frame.schema
+
+    assert np.isclose(synth.fdf_parameters["peak_rm_fit"][0], racs_model.rm, atol=1)
+    assert np.isclose(clean.fdf_parameters["peak_rm_fit"][0], racs_model.rm, atol=1)
+
+
 def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
     complex_data = racs_data.stokes_q + 1j * racs_data.stokes_u
     complex_error = np.ones_like(racs_data.stokes_q) + 1j * np.ones_like(

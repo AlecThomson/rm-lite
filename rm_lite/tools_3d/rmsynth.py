@@ -12,8 +12,10 @@ from dask.base import compute
 from numpy.typing import NDArray
 
 from rm_lite.utils.arrays import (
+    complex_dtype,
     divide_quiet,
     error_from_weight_cube,
+    real_dtype,
     zero_nonfinite,
 )
 from rm_lite.utils.dask_io import (
@@ -59,7 +61,7 @@ class RMSynth3DResults(NamedTuple):
 
     fdf_dirty_cube: da.Array
     """Dirty FDF cube, lazy dask array of shape (n_phi, ny, nx)."""
-    rmsf_arr: NDArray[np.complex128]
+    rmsf_arr: NDArray[np.complexfloating]
     """The RMSF every pixel shares, shape (n_phi_double,), built from the
     per-channel weights. A pixel's RMSF depends only on which channels it has
     flagged, and flagging is per-channel rather than per-pixel, so one spectrum
@@ -238,7 +240,8 @@ def _shared_rmsf(
     rmsynth_params: RMSynthParams,
     nthreads: int,
     log_level: int,
-) -> NDArray[np.complex128]:
+    dtype: np.dtype[np.complexfloating],
+) -> NDArray[np.complexfloating]:
     """The single RMSF the whole cube shares, from the per-channel weights.
 
     Every pixel whose flagged channels are the cube's flagged channels has this
@@ -250,66 +253,66 @@ def _shared_rmsf(
         rmsf_result = get_rmsf_nufft(
             lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
             phi_arr_radm2=rmsynth_params.phi_arr_radm2,
-            weight_arr=rmsynth_params.weight_arr,
+            weight_arr=np.asarray(rmsynth_params.weight_arr).astype(
+                real_dtype(dtype), copy=False
+            ),
             lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
             do_fit_rmsf=False,
             nthreads=nthreads,
         )
-    # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is complex128 at
+    # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is complex at
     # runtime (built from a finufft complex output).
-    return np.asarray(rmsf_result.rmsf_cube, dtype=np.complex128)
+    return np.asarray(rmsf_result.rmsf_cube, dtype=dtype)
 
 
 def _match_chunks_to_fdf(
     stokes_q: da.Array,
     stokes_u: da.Array,
     n_phi_double: int,
+    fdf_dtype: np.dtype[np.complexfloating],
+    target_chunk_mb: float,
 ) -> tuple[da.Array, da.Array]:
-    """Shrink spatial chunks so an FDF chunk costs what an input chunk costs.
+    """Resize spatial chunks so an FDF chunk fits `target_chunk_mb`.
 
-    A chunk's output axis is `n_phi_double` long, not `n_freq`, and complex128
-    rather than float32, so a chunk of RMSF is `(n_phi_double / n_freq) * 4` times
-    its input chunk, often a factor of tens. That is the sizing case even without
-    `per_pixel_rmsf`, since RM-CLEAN broadcasts the shared RMSF to the same shape
-    per chunk. Peak memory follows the output, so the caller's input chunking is
-    only a memory budget if the spatial chunk shrinks by that same factor here.
+    A chunk's output axis is `n_phi_double` long, not `n_freq`, and complex
+    rather than real, so an FDF chunk is many times the size of the input chunk
+    it came from. Peak memory follows the output, so the chunks are sized
+    against the output here rather than against the read.
 
-    Only ever shrinks: a caller who chunked coarsely on purpose keeps their
+    Rows go first, since a chunk spanning the full image width is one
+    contiguous read. Where a single row of output is already over budget the
+    image width is split as well; the read stays full-width either way, as this
+    only splits blocks that have already been read.
+
+    Only ever shrinks, so a caller who chunked coarsely on purpose keeps their
     chunks when the FDF is no larger than the input.
-
-    One row is the floor, the same caveat `rm_lite.utils.dask_io.spatial_chunk_size`
-    carries for one band, so a wide cube with a deep Faraday-depth axis can
-    still overshoot the budget. That is logged when it happens.
     """
-    n_freq = stokes_q.shape[0]
-    cy = stokes_q.chunksize[1]
-    cx = stokes_q.chunksize[2]
-    budget_bytes = n_freq * cy * cx * stokes_q.dtype.itemsize
-    out_bytes_per_pixel = n_phi_double * np.dtype(np.complex128).itemsize
-    new_cy = max(1, int(budget_bytes // (out_bytes_per_pixel * cx)))
-    row_bytes = out_bytes_per_pixel * cx
-    if row_bytes > budget_bytes:
-        logger.warning(
-            f"One row of FDF output is {row_bytes / 1024**2:.3g} MiB, "
-            f"{row_bytes / budget_bytes:.3g}x the {budget_bytes / 1024**2:.3g} MiB "
-            "input chunk it was sized from. One row is the floor, so output "
-            "chunks overshoot that budget; narrow the cube in x or coarsen "
-            "d_phi_radm2 to bring it back under."
-        )
-    if new_cy >= cy:
+    bytes_per_pixel = n_phi_double * np.dtype(fdf_dtype).itemsize
+    pixels_per_chunk = max(1, int(target_chunk_mb * 1024**2) // bytes_per_pixel)
+
+    cy, cx = stokes_q.chunksize[1], stokes_q.chunksize[2]
+    new_cy = min(cy, max(1, pixels_per_chunk // cx))
+    new_cx = cx
+    if pixels_per_chunk < cx:
+        new_cx = pixels_per_chunk
+        new_cy = 1
+
+    if (new_cy, new_cx) == (cy, cx):
         return stokes_q, stokes_u
 
+    width = "" if new_cx == cx else f" x {new_cx} pixels wide"
     logger.info(
-        f"Shrinking spatial chunks from {cy} to {new_cy} rows: {n_phi_double} "
-        f"Faraday depths in complex128 against {n_freq} channels in "
-        f"{stokes_q.dtype} would otherwise make each output chunk "
-        f"{cy / new_cy:.3g}x the input chunk it was sized from."
+        f"Chunking the FDF {new_cy} rows{width} at a time, down from {cy} rows "
+        f"x {cx}: {n_phi_double} Faraday depths in {np.dtype(fdf_dtype).name} "
+        f"costs {bytes_per_pixel} bytes a pixel, against a {target_chunk_mb:g} "
+        "MB target."
     )
-    return stokes_q.rechunk({1: new_cy}), stokes_u.rechunk({1: new_cy})
+    chunks = {1: new_cy, 2: new_cx}
+    return stokes_q.rechunk(chunks), stokes_u.rechunk(chunks)
 
 
 def _weight_arr_for_block(
-    block: NDArray[np.complex128],
+    block: NDArray[np.complexfloating],
     weight_block: NDArray[np.float64] | None,
     rmsynth_params: RMSynthParams,
     fdf_options: FDFOptions,
@@ -320,19 +323,23 @@ def _weight_arr_for_block(
     pixel weighted at once, and each pixel's own flagging can shape its weights.
     A per-channel weight array was already weighted globally and is used as-is.
     """
+    # The weights carry the precision into the transforms, so they follow the
+    # block rather than staying double.
+    dtype = real_dtype(block.dtype)
     if weight_block is None:
-        return rmsynth_params.weight_arr
-    return apply_weight_type(
+        return np.asarray(rmsynth_params.weight_arr).astype(dtype, copy=False)
+    weight_arr = apply_weight_type(
         lambda_sq_arr_m2=rmsynth_params.lambda_sq_arr_m2,
         real_qu_error=np.asarray(error_from_weight(weight_block).real),
         channel_mask=~np.isfinite(block),
         fdf_options=fdf_options,
         cell_m2=rmsynth_params.cell_m2,
     )
+    return weight_arr.astype(dtype, copy=False)
 
 
 def _lam_sq_0_on_block(
-    block: NDArray[np.complex128],
+    block: NDArray[np.complexfloating],
     weight_block: NDArray[np.float64] | None = None,
     *,
     rmsynth_params: RMSynthParams,
@@ -390,7 +397,7 @@ def _ref_freq_from_lam_sq_0(
 
 
 def _rmsynth_on_block(
-    block: NDArray[np.complex128],
+    block: NDArray[np.complexfloating],
     weight_block: NDArray[np.float64] | None = None,
     *,
     rmsynth_params: RMSynthParams,
@@ -398,7 +405,7 @@ def _rmsynth_on_block(
     n_phi: int,
     log_level: int,
     nufft_nthreads: int = 1,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     _, cy, cx = block.shape
     weight_arr = _weight_arr_for_block(block, weight_block, rmsynth_params, fdf_options)
     with quiet_logs(log_level):
@@ -415,7 +422,7 @@ def _rmsynth_on_block(
 
 
 def _rmsf_on_block(
-    block: NDArray[np.complex128],
+    block: NDArray[np.complexfloating],
     weight_block: NDArray[np.float64] | None = None,
     *,
     rmsynth_params: RMSynthParams,
@@ -423,7 +430,7 @@ def _rmsf_on_block(
     n_phi_double: int,
     log_level: int,
     nufft_nthreads: int = 1,
-) -> NDArray[np.complex128]:
+) -> NDArray[np.complexfloating]:
     _, cy, cx = block.shape
     weight_arr = _weight_arr_for_block(block, weight_block, rmsynth_params, fdf_options)
     with quiet_logs(log_level):
@@ -489,6 +496,7 @@ def rmsynth_3d(
     n_error_samples: int = 1000,
     per_pixel_rmsf: bool = False,
     nufft_nthreads: int = 1,
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     log_level: int = logging.WARNING,
 ) -> RMSynth3DResults:
     """Run RM-synthesis on chunked Stokes Q/U cubes.
@@ -499,9 +507,8 @@ def rmsynth_3d(
 
     Args:
         stokes_q (da.Array): Stokes Q cube (n_freq, ny, nx), chunked spatially
-            only. Its chunking is taken as the per-chunk memory budget, and
-            spatial chunks are shrunk where the complex128 FDF output would
-            otherwise outgrow it.
+            only. Its dtype sets the FDF's precision: float32 gives a
+            complex64 FDF, float64 a complex128 one.
         stokes_u (da.Array): Stokes U cube, same shape/chunks as `stokes_q`.
         freq_arr_hz (NDArray[np.float64]): Frequency array in Hz.
         weight_arr (NDArray[np.float64] | None, optional): Weight array,
@@ -558,6 +565,8 @@ def rmsynth_3d(
             to 1 so dask parallelises across chunks without oversubscribing finufft's
             own threads (the fast config on many chunks). Set to 0 (finufft default,
             all cores) only when computing with few chunks on the synchronous scheduler.
+        target_chunk_mb (float, optional): Target size of one FDF chunk in MB.
+            Spatial chunks are shrunk to meet it. Defaults to 256.
         log_level (int, optional): `rm_lite` logger level while chunks run;
             defaults to WARNING to silence per-chunk noise.
 
@@ -623,9 +632,12 @@ def rmsynth_3d(
     phi_double_arr_radm2 = make_double_phi_arr(rmsynth_params.phi_arr_radm2)
     n_phi_double = phi_double_arr_radm2.shape[0]
     fwhm_rmsf_radm2 = get_fwhm_rmsf(rmsynth_params.lambda_sq_arr_m2).fwhm_rmsf_radm2
-    rmsf_arr = _shared_rmsf(rmsynth_params, nufft_nthreads, log_level)
+    fdf_dtype = complex_dtype(np.result_type(stokes_q.dtype, stokes_u.dtype))
+    rmsf_arr = _shared_rmsf(rmsynth_params, nufft_nthreads, log_level, fdf_dtype)
 
-    stokes_q, stokes_u = _match_chunks_to_fdf(stokes_q, stokes_u, n_phi_double)
+    stokes_q, stokes_u = _match_chunks_to_fdf(
+        stokes_q, stokes_u, n_phi_double, fdf_dtype, target_chunk_mb
+    )
 
     pol_cube = complex_pol_dask(stokes_q, stokes_u)
 
@@ -693,6 +705,12 @@ def rmsynth_3d(
         alpha_error_map = fit_cubes.alpha_error_map
 
     if stokes_i_model_cube is not None:
+        # The fit runs in double precision; only what it hands back follows the
+        # cube's, so dividing Q/U by it cannot quietly promote the FDF.
+        model_dtype = real_dtype(fdf_dtype)
+        stokes_i_model_cube = stokes_i_model_cube.astype(model_dtype)
+        if stokes_i_model_error_cube is not None:
+            stokes_i_model_error_cube = stokes_i_model_error_cube.astype(model_dtype)
         pol_cube = divide_quiet(pol_cube, stokes_i_model_cube)
         ref_flux_map = da.map_blocks(
             ref_flux_from_block,
@@ -708,7 +726,7 @@ def rmsynth_3d(
         pol_cube,
         *_weight_arr_map_blocks_args(weight_arr, pol_cube),
         chunks=((n_phi,), pol_cube.chunks[1], pol_cube.chunks[2]),
-        dtype=np.complex128,
+        dtype=fdf_dtype,
         rmsynth_params=rmsynth_params,
         fdf_options=fdf_options,
         n_phi=n_phi,
@@ -718,7 +736,9 @@ def rmsynth_3d(
 
     if ref_flux_map is not None:
         # Rescale fractional FDF to absolute polarised flux per pixel.
-        fdf_dirty_cube = fdf_dirty_cube * ref_flux_map[np.newaxis, :, :]
+        fdf_dirty_cube = fdf_dirty_cube * ref_flux_map[np.newaxis, :, :].astype(
+            real_dtype(fdf_dtype)
+        )
 
     if ref_flux_map is not None and order_map is not None:
         # The rescale needs the flat fallback value, but on unfitted pixels
@@ -742,7 +762,7 @@ def rmsynth_3d(
             pol_cube,
             *_weight_arr_map_blocks_args(weight_arr, pol_cube),
             chunks=((n_phi_double,), pol_cube.chunks[1], pol_cube.chunks[2]),
-            dtype=np.complex128,
+            dtype=fdf_dtype,
             rmsynth_params=rmsynth_params,
             fdf_options=fdf_options,
             n_phi_double=n_phi_double,
@@ -1019,5 +1039,6 @@ def rmsynth_3d_from_fits(
         n_error_samples=n_error_samples,
         per_pixel_rmsf=per_pixel_rmsf,
         nufft_nthreads=nufft_nthreads,
+        target_chunk_mb=target_chunk_mb,
         log_level=log_level,
     )
