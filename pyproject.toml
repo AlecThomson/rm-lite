@@ -11,7 +11,7 @@ authors = [
 ]
 license.file = "LICENSE"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Science/Research",
@@ -21,7 +21,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -36,7 +35,7 @@ dependencies = [
     "finufft",
     "polars",
     "dask[array]",
-    "zarr",
+    "zarr>=3",
 ]
 
 [project.optional-dependencies]
@@ -117,7 +116,7 @@ isort.required-imports = ["from __future__ import annotations"]
 
 [tool.mypy]
 files = ["rm_lite", "tests"]
-python_version = "3.10"
+python_version = "3.11"
 warn_unused_configs = true
 strict = true
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
@@ -136,7 +135,7 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # zarr's installed source uses PEP 695 generic syntax, unparsable under
-# python_version = "3.10"; dask imports it lazily inside Array.to_zarr.
+# python_version = "3.11"; dask imports it lazily inside Array.to_zarr.
 module = ["zarr.*"]
 ignore_missing_imports = true
 follow_imports = "skip"
