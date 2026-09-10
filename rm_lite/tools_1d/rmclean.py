@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from scipy import interpolate
 
 from rm_lite.tools_1d.rmsynth import RMSynth1DResults
+from rm_lite.utils.arrays import column_array
 from rm_lite.utils.clean import (
     MultiscaleOptions,
     RMCleanOptions,
@@ -19,7 +20,6 @@ from rm_lite.utils.clean import (
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
     TheoreticalNoise,
-    column_array,
     frame_with_schema,
     get_fdf_parameters,
     lambda2_to_freq,

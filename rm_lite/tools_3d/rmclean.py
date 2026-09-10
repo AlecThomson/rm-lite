@@ -13,7 +13,11 @@ from dask.base import tokenize
 from dask.highlevelgraph import HighLevelGraph
 from numpy.typing import NDArray
 
-from rm_lite.tools_3d.rmsynth import RMSynth3DResults
+from rm_lite.tools_3d.rmsynth import (
+    PerPixelRMSF,
+    RMSynth3DResults,
+    rmsf_block_for_clean,
+)
 from rm_lite.utils.arrays import format_scalar_or_map
 from rm_lite.utils.clean import (
     PER_PIXEL_CLEAN_FIELDS,
@@ -267,10 +271,28 @@ def _rmclean_on_block(
     )
 
 
+def _rmsf_then_clean_on_block(
+    dirty_fdf_block: NDArray[np.complexfloating],
+    pol_block: NDArray[np.complexfloating],
+    weight_block: NDArray[np.float64] | None,
+    lam_sq_0_block: NDArray[np.float64] | None,
+    recipe: PerPixelRMSF,
+    *clean_args: Any,
+) -> _RMCleanBlockResult:
+    """Build this block's RMSF and clean with it, in one task.
+
+    The RMSF never becomes a graph key, so the scheduler cannot build a queue of
+    them ahead of the CLEAN tasks that consume them.
+    """
+    rmsf_block = rmsf_block_for_clean(pol_block, weight_block, lam_sq_0_block, recipe)
+    return _rmclean_on_block(dirty_fdf_block, rmsf_block, *clean_args)
+
+
 def _build_clean_output_arrays(
     fdf_dirty_cube: da.Array,
     rmsf: NDArray[np.complexfloating] | da.Array,
     rmsf_cube: da.Array | None,
+    rmsf_recipe: PerPixelRMSF | None,
     phi_arr_radm2: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
@@ -299,7 +321,9 @@ def _build_clean_output_arrays(
 
     token = tokenize(
         fdf_dirty_cube.name,
-        rmsf_cube.name if rmsf_cube is not None else rmsf,
+        rmsf_recipe.pol_cube.name
+        if rmsf_recipe is not None
+        else (rmsf_cube.name if rmsf_cube is not None else rmsf),
         phi_arr_radm2,
         phi_double_arr_radm2,
         fwhm_rmsf_radm2,
@@ -314,7 +338,7 @@ def _build_clean_output_arrays(
     # than the same spectrum re-embedded per block or a cube holding ny*nx
     # copies.
     shared_rmsf_key = f"rmclean-rmsf-{token}"
-    if rmsf_cube is None:
+    if rmsf_recipe is None and rmsf_cube is None:
         layer[shared_rmsf_key] = rmsf
 
     # A per-pixel mask/threshold/noise is a map over the whole image, so each
@@ -327,10 +351,7 @@ def _build_clean_output_arrays(
     }
 
     for idx in np.ndindex(numblocks):
-        layer[(block_name, *idx)] = (
-            _rmclean_on_block,
-            (fdf_dirty_cube.name, *idx),
-            (rmsf_cube.name, *idx) if rmsf_cube is not None else shared_rmsf_key,
+        clean_args = (
             phi_arr_radm2,
             phi_double_arr_radm2,
             fwhm_rmsf_radm2,
@@ -344,9 +365,37 @@ def _build_clean_output_arrays(
                 for field in PER_PIXEL_CLEAN_FIELDS
             ),
         )
+        if rmsf_recipe is not None:
+            layer[(block_name, *idx)] = (
+                _rmsf_then_clean_on_block,
+                (fdf_dirty_cube.name, *idx),
+                (rmsf_recipe.pol_cube.name, *idx),
+                None
+                if rmsf_recipe.weight_cube is None
+                else (rmsf_recipe.weight_cube.name, *idx),
+                None
+                if rmsf_recipe.lam_sq_0_map is None
+                else (rmsf_recipe.lam_sq_0_map.name, *idx[1:]),
+                rmsf_recipe,
+                *clean_args,
+            )
+        else:
+            layer[(block_name, *idx)] = (
+                _rmclean_on_block,
+                (fdf_dirty_cube.name, *idx),
+                (rmsf_cube.name, *idx) if rmsf_cube is not None else shared_rmsf_key,
+                *clean_args,
+            )
 
     dependencies = [fdf_dirty_cube]
-    if rmsf_cube is not None:
+    if rmsf_recipe is not None:
+        dependencies.append(rmsf_recipe.pol_cube)
+        dependencies.extend(
+            array
+            for array in (rmsf_recipe.weight_cube, rmsf_recipe.lam_sq_0_map)
+            if array is not None
+        )
+    elif rmsf_cube is not None:
         dependencies.append(rmsf_cube)
     dependencies.extend(option_arrays.values())
     graph = HighLevelGraph.from_collections(
@@ -401,6 +450,7 @@ def run_rmclean(
     fdf_noise: float | NDArray[np.float64] | da.Array | None = None,
     lam_sq_0_m2: float | NDArray[np.float64] | da.Array | None = None,
     lambda_sq_arr_m2: NDArray[np.float64] | None = None,
+    per_pixel_rmsf: PerPixelRMSF | None = None,
     log_level: int = logging.ERROR,
     multiscale: bool = False,
     multiscale_scales: NDArray[np.float64] | None = None,
@@ -446,6 +496,10 @@ def run_rmclean(
         lambda_sq_arr_m2 (NDArray[np.float64] | None, optional): Channel
             lambda^2 in m^2 (`RMSynth3DResults.lambda_sq_arr_m2`), for the
             intrinsic-angle error map. Defaults to None.
+        per_pixel_rmsf (PerPixelRMSF | None, optional): Build each block's RMSF
+            in the CLEAN task rather than reading it from a cube
+            (`RMSynth3DResults.per_pixel_rmsf`). Takes precedence over a 3D
+            `rmsf`. Defaults to None.
         log_level (int, optional): Log level applied to `rm_lite`'s logger while
             each chunk runs. `rmclean`'s Hogbom loop logs at INFO and WARNING
             per pixel (e.g. "Starting minor loop...", "All channels masked...
@@ -524,6 +578,7 @@ def run_rmclean(
         fdf_dirty_cube=fdf_dirty_cube,
         rmsf=rmsf,
         rmsf_cube=rmsf_cube,
+        rmsf_recipe=per_pixel_rmsf,
         phi_arr_radm2=phi_arr_radm2,
         phi_double_arr_radm2=phi_double_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
@@ -634,11 +689,8 @@ def run_rmclean_from_synth(
 
     return run_rmclean(
         fdf_dirty_cube=rm_synth_3d_results.fdf_dirty_cube,
-        rmsf=(
-            rm_synth_3d_results.rmsf_arr
-            if rm_synth_3d_results.rmsf_cube is None
-            else rm_synth_3d_results.rmsf_cube
-        ),
+        rmsf=rm_synth_3d_results.rmsf_arr,
+        per_pixel_rmsf=rm_synth_3d_results.per_pixel_rmsf,
         phi_arr_radm2=rm_synth_3d_results.phi_arr_radm2,
         phi_double_arr_radm2=rm_synth_3d_results.phi_double_arr_radm2,
         fwhm_rmsf_radm2=rm_synth_3d_results.fwhm_rmsf_radm2,

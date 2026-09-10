@@ -203,6 +203,7 @@ def _read_fits_cube_in_one_layer(
 def read_fits_cube_dask(
     path: str | Path,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+    spatial_chunk: tuple[int, int] | None = None,
 ) -> tuple[da.Array, Header]:
     """Lazily read a Stokes FITS cube as a spatially chunked dask array.
 
@@ -229,19 +230,26 @@ def read_fits_cube_dask(
             frequency axis is first in numpy order.
         target_chunk_mb (float, optional): Target chunk memory footprint in
             MB, see `spatial_chunk_size`. Defaults to 256.
+        spatial_chunk (tuple[int, int] | None, optional): Explicit `(cy, cx)` to
+            read at, overriding `target_chunk_mb`. Use it to read straight into
+            the chunking a later step needs, rather than rechunking afterwards.
+            Defaults to None.
 
     Returns:
         tuple[da.Array, Header]: Lazy dask array and the FITS header.
     """
     (n_freq, ny, nx), dtype, header = _cube_meta(path)
 
-    cy, _ = spatial_chunk_size(
-        n_freq=n_freq,
-        ny=ny,
-        nx=nx,
-        itemsize=dtype.itemsize,
-        target_chunk_mb=target_chunk_mb,
-    )
+    if spatial_chunk is None:
+        cy, cx = spatial_chunk_size(
+            n_freq=n_freq,
+            ny=ny,
+            nx=nx,
+            itemsize=dtype.itemsize,
+            target_chunk_mb=target_chunk_mb,
+        )
+    else:
+        cy, cx = spatial_chunk
 
     cube = _read_fits_cube_in_one_layer(
         path=path,
@@ -250,6 +258,10 @@ def read_fits_cube_dask(
         freq_bounds=[(0, n_freq)],
         y_bounds=_chunk_bounds(ny, cy),
     )
+    if cx < nx:
+        # The read stays full-width, one contiguous run per channel; this only
+        # splits blocks that have already been read.
+        cube = cube.rechunk({2: cx})
 
     return cube, header
 

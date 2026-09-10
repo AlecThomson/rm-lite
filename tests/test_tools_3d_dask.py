@@ -1281,6 +1281,48 @@ def test_readers_agree_byte_for_byte_across_dtypes(tmp_path, dtype: str):
     np.testing.assert_array_equal(channels.compute(), spatial.compute())
 
 
+def test_rmsynth_3d_from_fits_reads_at_the_final_chunking(
+    tmp_path, synthetic_cube: SyntheticCube
+):
+    """Reading straight into the FDF's chunking leaves nothing to rechunk.
+
+    The Faraday depth grid follows from the frequencies alone, so how big an FDF
+    chunk will be is known before any cube is read.
+    """
+    freq_arr_hz = synthetic_cube.freq_arr_hz
+    header = Header()
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = freq_arr_hz[0]
+    header["CDELT3"] = freq_arr_hz[1] - freq_arr_hz[0]
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+    for name, data in (
+        ("q", synthetic_cube.stokes_q),
+        ("u", synthetic_cube.stokes_u),
+        ("i", np.ones_like(synthetic_cube.stokes_q)),
+    ):
+        fits.PrimaryHDU(data.astype(">f4"), header=header).writeto(
+            tmp_path / f"{name}.fits"
+        )
+
+    synth = rmsynth_3d_from_fits(
+        tmp_path / "q.fits",
+        tmp_path / "u.fits",
+        stokes_i_file=tmp_path / "i.fits",
+        stokes_i_snr_cut=None,
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=250.0,
+        per_pixel_rmsf=True,
+    )
+    clean = run_rmclean_from_synth(synth)
+
+    # Full image width, so only rows were chosen and the read delivers them.
+    assert synth.fdf_dirty_cube.chunksize[2] == synthetic_cube.stokes_q.shape[2]
+    assert not any(
+        "rechunk" in str(key) for key in clean.clean_fdf_cube.__dask_graph__()
+    )
+
+
 def test_rmsynth_3d_from_fits_on_a_dummy_stokes_axis(
     tmp_path, synthetic_cube: SyntheticCube
 ):
@@ -1501,6 +1543,58 @@ def test_rmsynth_3d_follows_the_input_precision(in_dtype, out_dtype):
         assert cube.dtype == out_dtype
         assert cube.compute().dtype == out_dtype
     assert synth.rmsf_arr.dtype == out_dtype
+
+
+def test_rmclean_3d_builds_the_rmsf_in_its_own_task(synthetic_cube: SyntheticCube):
+    """Building the RMSF inside CLEAN must match reading it from a cube.
+
+    The per-pixel RMSF is the biggest array here and CLEAN is its only reader,
+    so it is built in the CLEAN task; the cube is still offered for anyone who
+    wants it. Both must clean to the same answer.
+    """
+    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    noise = np.linspace(1e-3, 3e-3, synthetic_cube.freq_arr_hz.size)
+    weight = np.broadcast_to(noise[:, None, None], synthetic_cube.stokes_q.shape).copy()
+
+    synth = rmsynth_3d(
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        weight_arr=da.from_array(weight, chunks=(-1, 3, 4)),
+        d_phi_radm2=D_PHI_RADM2,
+        per_pixel_rmsf=True,
+    )
+    assert synth.per_pixel_rmsf is not None
+    assert synth.rmsf_cube is not None
+
+    fused = run_rmclean(
+        synth.fdf_dirty_cube,
+        synth.rmsf_arr,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+        per_pixel_rmsf=synth.per_pixel_rmsf,
+    )
+    # The RMSF is built inside the CLEAN task, so it is not a graph layer.
+    assert not any(
+        "_rmsf_on_block" in str(key) for key in fused.clean_fdf_cube.__dask_graph__()
+    )
+
+    from_cube = run_rmclean(
+        synth.fdf_dirty_cube,
+        synth.rmsf_cube,
+        synth.phi_arr_radm2,
+        synth.phi_double_arr_radm2,
+        synth.fwhm_rmsf_radm2,
+        mask=MASK_THRESHOLD,
+        threshold=CLEAN_THRESHOLD,
+    )
+    np.testing.assert_allclose(
+        fused.clean_fdf_cube.compute(), from_cube.clean_fdf_cube.compute()
+    )
 
 
 def test_rmsynth_3d_narrows_a_cube_too_wide_for_one_row():

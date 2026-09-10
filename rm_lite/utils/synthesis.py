@@ -1602,6 +1602,59 @@ def derotate_to(
     return cast("NDArray[np.complexfloating]", fdf * ramp)
 
 
+class PhiGrid(NamedTuple):
+    """The Faraday depth grid a set of frequencies and options imply."""
+
+    lambda_sq_arr_m2: NDArray[np.float64]
+    """Channel wavelength^2 in m^2."""
+    phi_arr_radm2: NDArray[np.float64]
+    """Faraday depths in rad/m^2."""
+    cell_m2: float
+    """lambda^2 gridding cell, capping the per-channel spacing for the
+    lambda^2-based weights so large gaps do not hand runaway weight to
+    gap-edge channels."""
+
+
+def compute_phi_grid(
+    freq_arr_hz: NDArray[np.float64], fdf_options: FDFOptions
+) -> PhiGrid:
+    """The Faraday depth grid, from the frequencies and options alone.
+
+    Takes no data, so a caller can work out how big an FDF chunk will be before
+    reading any cubes.
+
+    Raises:
+        ValueError: If neither d_phi_radm2 nor n_samples is given.
+    """
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
+    fwhm_rmsf_radm2, d_lambda_sq_max_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
+
+    if fdf_options.d_phi_radm2 is not None:
+        d_phi_radm2 = fdf_options.d_phi_radm2
+    elif fdf_options.n_samples is not None:
+        d_phi_radm2 = fwhm_rmsf_radm2 / fdf_options.n_samples
+    else:
+        msg = "Either d_phi_radm2 or n_samples must be provided."
+        raise ValueError(msg)
+
+    if fdf_options.phi_max_radm2 is None:
+        # Force the minimum phiMax to 10 FWHM
+        phi_max_radm2 = max(np.sqrt(3.0) / d_lambda_sq_max_m2, fwhm_rmsf_radm2 * 10.0)
+    else:
+        phi_max_radm2 = fdf_options.phi_max_radm2
+
+    phi_arr_radm2 = make_phi_arr(phi_max_radm2, d_phi_radm2)
+    logger.debug(
+        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by "
+        f"{d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
+    )
+    return PhiGrid(
+        lambda_sq_arr_m2=lambda_sq_arr_m2,
+        phi_arr_radm2=phi_arr_radm2,
+        cell_m2=float(np.sqrt(3.0) / phi_max_radm2),
+    )
+
+
 def compute_rmsynth_params(
     freq_arr_hz: NDArray[np.float64],
     complex_pol_arr: NDArray[np.complexfloating],
@@ -1625,35 +1678,10 @@ def compute_rmsynth_params(
 
     real_qu_error = np.abs(complex_pol_error.real + complex_pol_error.imag) / 2.0
 
-    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
-
-    fwhm_rmsf_radm2, d_lambda_sq_max_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
-
-    if fdf_options.d_phi_radm2 is None and fdf_options.n_samples is not None:
-        d_phi_radm2 = fwhm_rmsf_radm2 / fdf_options.n_samples
-    elif fdf_options.d_phi_radm2 is not None:
-        d_phi_radm2 = fdf_options.d_phi_radm2
-    else:
-        msg = "Either d_phi_radm2 or n_samples must be provided."
-        raise ValueError(msg)
-
-    if fdf_options.phi_max_radm2 is None:
-        phi_max_radm2 = np.sqrt(3.0) / d_lambda_sq_max_m2
-        phi_max_radm2 = max(
-            phi_max_radm2, fwhm_rmsf_radm2 * 10.0
-        )  # Force the minimum phiMax to 10 FWHM
-    else:
-        phi_max_radm2 = fdf_options.phi_max_radm2
-
-    phi_arr_radm2 = make_phi_arr(phi_max_radm2, d_phi_radm2)
-
-    logger.debug(
-        f"phi = {phi_arr_radm2[0]:0.2f} to {phi_arr_radm2[-1]:0.2f} by {d_phi_radm2:0.2f} ({len(phi_arr_radm2)} chans)."
-    )
-
-    # lambda^2 gridding cell: caps the per-channel spacing for the lambda^2-based
-    # weights so large gaps do not hand runaway weight to gap-edge channels.
-    cell_m2 = float(np.sqrt(3.0) / phi_max_radm2)
+    grid = compute_phi_grid(freq_arr_hz, fdf_options)
+    lambda_sq_arr_m2 = grid.lambda_sq_arr_m2
+    phi_arr_radm2 = grid.phi_arr_radm2
+    cell_m2 = grid.cell_m2
 
     logger.debug(f"Weighting type: {fdf_options.weight_type}")
     mask = ~np.isfinite(complex_pol_arr)
@@ -2219,18 +2247,6 @@ def get_rmsf_nufft(
         fwhm_rmsf_arr=fwhm_rmsf_arr,
         fit_status_arr=fit_status_arr,
     )
-
-
-def column_array(series: pl.Series) -> NDArray[Any]:
-    """A table column as a numpy array, keeping the precision it was stored at.
-
-    Complex columns are held as objects, one value per row, so their element
-    type is the one that matters; `to_numpy` on its own gives back objects.
-    """
-    values = series.to_numpy()
-    if values.dtype != object or values.size == 0:
-        return cast("NDArray[Any]", values)
-    return cast("NDArray[Any]", values.astype(np.asarray(values[0]).dtype))
 
 
 def frame_with_schema(
