@@ -26,13 +26,6 @@ from rm_lite.utils.logging import logger
 
 DEFAULT_TARGET_CHUNK_MB = 256
 
-# Zarr's own default (zstd level 0, no shuffle) reads back at about a quarter of
-# this codec's speed for the same size on noise-dominated cubes, and a store is
-# written once and read by every pass over it.
-DEFAULT_ZARR_COMPRESSORS = (
-    BloscCodec(cname="lz4", clevel=5, shuffle=BloscShuffle.shuffle),
-)
-
 
 def spatial_chunk_size(
     n_freq: int,
@@ -320,7 +313,9 @@ def fits_cube_to_zarr(
     spatial_chunk: tuple[int, int],
     shard_rows: int | None = None,
     overwrite: bool = True,
-    compressors: Sequence[Any] = DEFAULT_ZARR_COMPRESSORS,
+    compressors: Sequence[Any] = (
+        BloscCodec(cname="lz4", clevel=5, shuffle=BloscShuffle.shuffle),
+    ),
 ) -> Path:
     """Copy a FITS cube into a zarr store, chunked the way it will be read.
 
@@ -352,7 +347,8 @@ def fits_cube_to_zarr(
             None, one file per chunk.
         overwrite (bool, optional): Overwrite an existing store. Defaults to True.
         compressors (Sequence[Any], optional): Zarr codecs for the store.
-            Defaults to `DEFAULT_ZARR_COMPRESSORS`.
+            Defaults to blosc lz4 with shuffle, which reads back several times
+            faster than zarr's own zstd0 for the same size.
 
     Returns:
         Path: The store that was written.

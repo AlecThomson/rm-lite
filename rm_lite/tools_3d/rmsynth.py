@@ -992,17 +992,14 @@ def _convert_cubes_to_zarr(
     `cube.fits` gives `cube.zarr`, so a store is always named after the cube it
     came from and two cubes can never land on the same one.
 
-    One blocking convert per cube, so each logs its own time. Putting them all
-    in one dask graph would let one cube's read overlap another's compression,
-    but a cube has far more bands than there are workers, so there is nothing
-    left over for a second cube to fill.
-
     Rewritten every run rather than reused: a store that no longer matches its
     cube would be used without anyone noticing. Convert once with
     `rm_lite.utils.dask_io.fits_cube_to_zarr` and pass the stores in directly to
     keep them between runs.
     """
     converted: dict[str, Path | None] = {}
+    # One at a time, so each logs its own time. Batching them into one graph
+    # gains nothing: a cube already has far more bands than there are workers.
     for name, path in cube_files.items():
         if path is None or Path(path).suffix == ".zarr":
             converted[name] = None if path is None else Path(path)
