@@ -70,17 +70,10 @@ def tile_spatial_chunk(
 ) -> tuple[int, int]:
     """Reshape a full-width chunk into the squarest tile of the same area.
 
-    `spatial_chunk_size` never splits the image width because a FITS block
-    narrower than the image costs a full-width read anyway. A zarr chunk is its
-    own object, so the width is free to split, and a tile costs far less than a
-    stripe for anything that reads a region rather than the whole cube: a
-    128-pixel cutout of a 19533-wide cube touches 128 full-width stripes
-    against a couple of tiles.
-
-    The area is held fixed, so the chunk keeps whatever memory footprint it was
-    sized for. Rows are capped at `band_rows` so a shard spanning one read band
-    still holds a whole number of chunks, which is what keeps a write task
-    owning a whole shard.
+    Full width is a FITS constraint, not a zarr one: a store keeps each chunk
+    separately, so a tile beats a stripe for anything reading a region. The
+    area is unchanged, so the chunk keeps the memory footprint it was sized
+    for, and rows stay within `band_rows` so a shard holds whole chunks.
 
     Args:
         spatial_chunk (tuple[int, int]): Full-width `(cy, cx)` to reshape.
@@ -94,12 +87,10 @@ def tile_spatial_chunk(
     area = cy * cx
     rows = max(1, min(band_rows, math.isqrt(area)))
     cols = min(nx, max(1, area // rows))
-    # Spread the width evenly over the tiles it takes rather than leaving a
-    # sliver at the end: zarr stores a partial edge chunk at its full width, so
-    # a 200-wide cube in 139-wide tiles writes 278 columns to hold 200.
+    # Spread the width evenly rather than leaving a sliver at the end: zarr
+    # stores a partial edge chunk at its full width.
     cols = math.ceil(nx / math.ceil(nx / cols))
-    # Evening up the width frees area, and a cube narrower than one tile never
-    # spent it in the first place. Rows take it back: fewer chunks, same memory.
+    # Give the freed area back to rows: fewer chunks, same memory.
     rows = max(1, min(band_rows, area // cols))
     return rows, cols
 
