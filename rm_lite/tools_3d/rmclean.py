@@ -182,7 +182,7 @@ def faraday_maps_on_block(
     )
 
 
-def _faraday_maps(
+def faraday_maps(
     clean: da.Array,
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
@@ -191,7 +191,12 @@ def _faraday_maps(
     fdf_noise: float | NDArray[np.float64] | da.Array | None,
     moment_threshold: float | NDArray[np.float64] | da.Array | None,
 ) -> dict[str, da.Array]:
-    """The moment and peak maps, from one `map_blocks` over the clean cube."""
+    """The moment and peak maps, from one `map_blocks` over an FDF cube.
+
+    One task a block for all of them, rather than a chain per map. Debiased
+    maps are not included: `debias_fdf` needs neighbouring pixels, so it cannot
+    run inside a per-block task.
+    """
     names = FaradayMoments._fields + FaradayPeaks._fields
     scalars = {
         "fdf_noise": fdf_noise,
@@ -587,7 +592,7 @@ def run_rmclean(
         log_level=log_level,
     )
 
-    maps = _faraday_maps(
+    maps = faraday_maps(
         clean,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
