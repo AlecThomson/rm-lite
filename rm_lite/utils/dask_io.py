@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import astropy.units as u
-import dask
 import dask.array as da
 import numpy as np
 import zarr
@@ -371,7 +370,7 @@ def fits_cube_to_zarr(
     sink.attrs["fits_header"] = header.tostring()
 
     tick = time.time()
-    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
+    with ProgressBar():
         compute(da.store(cube, sink, lock=False, compute=False))
     logger.info(
         f"Wrote {fits_file} to {store} in {time.time() - tick:.3g} seconds, "
@@ -547,12 +546,10 @@ def write_zarr_group(
     """Write a set of dask arrays lazily/incrementally to a shared zarr store.
 
     Written chunk-by-chunk, so no array is ever fully materialised. One
-    `dask.array.store` for the whole set with fusion off, rather than a
-    `to_zarr` per array, so arrays sharing an upstream task (the four outputs of
-    `run_rmclean` come from one task per chunk) compute it once: fusion inlines
-    that task into each consumer branch, and a per-array `to_zarr` bakes the
-    copy in when its `Delayed` is built. The lost task
-    boundary is worth far less than redoing a spatial chunk of RM-CLEAN.
+    `dask.array.store` for the whole set rather than a `to_zarr` per array,
+    which computes on each call: arrays sharing an upstream task (the four
+    outputs of `run_rmclean` come from one task per chunk) would redo it once
+    per array.
 
     Args:
         store (str | Path): Path to the zarr store (a group containing one
@@ -581,7 +578,7 @@ def write_zarr_group(
         for name, array in zip(names, sources, strict=True)
     ]
     tick = time.time()
-    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
+    with ProgressBar():
         compute(da.store(sources, sinks, lock=False, compute=False))
     tock = time.time()
     logger.info(f"Wrote {names} to {store} in {tock - tick:.3g} seconds.")
