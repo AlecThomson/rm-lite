@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 import astropy.units as u
-import dask
 import dask.array as da
 import numpy as np
 import zarr
@@ -20,6 +19,7 @@ from astropy.wcs import WCS
 from dask.base import compute, tokenize
 from dask.diagnostics import ProgressBar
 from numpy.typing import NDArray
+from zarr.codecs import BloscCodec, BloscShuffle
 
 from rm_lite.utils.logging import logger
 
@@ -62,6 +62,36 @@ def spatial_chunk_size(
     rows_per_chunk = target_chunk_bytes / (n_freq * nx * itemsize)
     cy = max(1, int(np.floor(rows_per_chunk)))
     return min(cy, ny), nx
+
+
+def tile_spatial_chunk(
+    spatial_chunk: tuple[int, int], band_rows: int, nx: int
+) -> tuple[int, int]:
+    """Reshape a full-width chunk into the squarest tile of the same area.
+
+    Full width is a FITS constraint, not a zarr one: a store keeps each chunk
+    separately, so a tile beats a stripe for anything reading a region. The
+    area is unchanged, so the chunk keeps the memory footprint it was sized
+    for, and rows stay within `band_rows` so a shard holds whole chunks.
+
+    Args:
+        spatial_chunk (tuple[int, int]): Full-width `(cy, cx)` to reshape.
+        band_rows (int): Rows in one read band, the most a chunk may span.
+        nx (int): Full image width in pixels.
+
+    Returns:
+        tuple[int, int]: Tiled `(cy, cx)`, of no greater area than the input.
+    """
+    cy, cx = spatial_chunk
+    area = cy * cx
+    rows = max(1, min(band_rows, math.isqrt(area)))
+    cols = min(nx, max(1, area // rows))
+    # Spread the width evenly rather than leaving a sliver at the end: zarr
+    # stores a partial edge chunk at its full width.
+    cols = math.ceil(nx / math.ceil(nx / cols))
+    # Give the freed area back to rows: fewer chunks, same memory.
+    rows = max(1, min(band_rows, area // cols))
+    return rows, cols
 
 
 def channel_chunk_size(
@@ -273,6 +303,9 @@ def fits_cube_to_zarr(
     spatial_chunk: tuple[int, int],
     shard_rows: int | None = None,
     overwrite: bool = True,
+    compressors: Sequence[Any] = (
+        BloscCodec(cname="lz4", clevel=5, shuffle=BloscShuffle.shuffle),
+    ),
 ) -> Path:
     """Copy a FITS cube into a zarr store, chunked the way it will be read.
 
@@ -282,9 +315,11 @@ def fits_cube_to_zarr(
     so a read costs the chunk and nothing more.
 
     Size `spatial_chunk` against the work that will consume it, not against the
-    cube: `rm_lite.tools_3d.rmsynth.fdf_spatial_chunk` gives the shape
-    RM-synthesis wants. The frequency axis is never chunked, as everything
-    downstream needs a pixel's whole spectrum in one block.
+    cube: `rm_lite.tools_3d.rmsynth.fdf_spatial_chunk` gives the area
+    RM-synthesis wants, and `tile_spatial_chunk` reshapes that area into a tile,
+    which is what a store wants: the full-width rule the area was sized under is
+    a FITS constraint, not a zarr one. The frequency axis is never chunked, as
+    everything downstream needs a pixel's whole spectrum in one block.
 
     `shard_rows` groups chunks into shards of that many image rows, so fine
     chunks do not mean one file each. Chunking a wide cube by single rows is
@@ -301,6 +336,9 @@ def fits_cube_to_zarr(
         shard_rows (int | None, optional): Rows of chunks per shard. Defaults to
             None, one file per chunk.
         overwrite (bool, optional): Overwrite an existing store. Defaults to True.
+        compressors (Sequence[Any], optional): Zarr codecs for the store.
+            Defaults to blosc lz4 with shuffle, which reads back several times
+            faster than zarr's own zstd0 for the same size.
 
     Returns:
         Path: The store that was written.
@@ -327,11 +365,12 @@ def fits_cube_to_zarr(
         shards=shards,
         dtype=dtype,
         overwrite=overwrite,
+        compressors=tuple(compressors),
     )
     sink.attrs["fits_header"] = header.tostring()
 
     tick = time.time()
-    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
+    with ProgressBar():
         compute(da.store(cube, sink, lock=False, compute=False))
     logger.info(
         f"Wrote {fits_file} to {store} in {time.time() - tick:.3g} seconds, "
@@ -507,12 +546,10 @@ def write_zarr_group(
     """Write a set of dask arrays lazily/incrementally to a shared zarr store.
 
     Written chunk-by-chunk, so no array is ever fully materialised. One
-    `dask.array.store` for the whole set with fusion off, rather than a
-    `to_zarr` per array, so arrays sharing an upstream task (the four outputs of
-    `run_rmclean` come from one task per chunk) compute it once: fusion inlines
-    that task into each consumer branch, and a per-array `to_zarr` bakes the
-    copy in when its `Delayed` is built. The lost task
-    boundary is worth far less than redoing a spatial chunk of RM-CLEAN.
+    `dask.array.store` for the whole set rather than a `to_zarr` per array,
+    which computes on each call: arrays sharing an upstream task (the four
+    outputs of `run_rmclean` come from one task per chunk) would redo it once
+    per array.
 
     Args:
         store (str | Path): Path to the zarr store (a group containing one
@@ -541,7 +578,7 @@ def write_zarr_group(
         for name, array in zip(names, sources, strict=True)
     ]
     tick = time.time()
-    with dask.config.set({"optimization.fuse.active": False}), ProgressBar():
+    with ProgressBar():
         compute(da.store(sources, sinks, lock=False, compute=False))
     tock = time.time()
     logger.info(f"Wrote {names} to {store} in {tock - tick:.3g} seconds.")
