@@ -47,18 +47,46 @@ HYBRID_WIDTH_FACTOR = 1.2
 HYBRID_SCORE_FACTOR = 0.85
 HYBRID_ENGAGE_MASK_FACTOR = 2.0
 
-# Bail out of a spectrum's minor-cycle (scale-selection) loop if the residual
-# peak exceeds this factor times the best (lowest) peak seen: a runaway backstop.
-DIVERGENCE_FACTOR = 2.0
 
-# Stall backstop: if the residual peak fails to improve by this relative fraction
-# for STALL_PATIENCE consecutive minor cycles, the loop has plateaued above the
-# threshold (e.g. grinding scale-0 components into the noise floor) and stops at
-# the best state rather than running to max_iter. A converging minor cycle drops
-# the peak by roughly the sub-minor fraction (~50%), far above this 1%, so real
-# cleaning never trips it; slow noise-grinding (sub-1% ratcheting) does.
-STALL_REL_IMPROVEMENT = 1e-2
-STALL_PATIENCE = 5
+@dataclass
+class CleanProgress:
+    """Best residual seen so far, and the divergence and stall backstops.
+
+    A converging loop drops the peak by roughly the sub-minor fraction each
+    cycle, far more than `stall_rel_improvement`, so only noise-grinding trips
+    the stall guard.
+    """
+
+    model_fdf_spectrum: NDArray[np.complexfloating]
+    resid_fdf_spectrum: NDArray[np.complexfloating]
+    divergence_factor: float = 2.0
+    stall_rel_improvement: float = 1e-2
+    stall_patience: int = 5
+    best_peak: float = np.inf
+    reference_peak: float = np.inf
+    stall_count: int = 0
+
+    def check(
+        self,
+        peak: float,
+        model_fdf_spectrum: NDArray[np.complexfloating],
+        resid_fdf_spectrum: NDArray[np.complexfloating],
+    ) -> Literal["converging", "diverging", "stalled"]:
+        """Record this iteration's peak, and say whether the loop should stop."""
+        if peak > self.best_peak * self.divergence_factor:
+            return "diverging"
+        if peak < self.best_peak:
+            self.best_peak = peak
+            self.model_fdf_spectrum = model_fdf_spectrum.copy()
+            self.resid_fdf_spectrum = resid_fdf_spectrum.copy()
+        # Cumulative, not step-to-step: a single iteration can move the peak
+        # sideways between channels while the loop is converging perfectly well.
+        if peak < self.reference_peak * (1 - self.stall_rel_improvement):
+            self.reference_peak = peak
+            self.stall_count = 0
+        else:
+            self.stall_count += 1
+        return "stalled" if self.stall_count >= self.stall_patience else "converging"
 
 
 class RMCleanResults(NamedTuple):
@@ -288,6 +316,15 @@ def minor_loop(
     )
 
     logger.info(f"Starting minor loop... {mask_arr.sum()} pixels in the mask")
+    # One sweep of the mask before the guard can fire: Hogbom takes the peak
+    # channel down by `gain`, so the masked max only falls once every comparable
+    # channel has had a turn.
+    guarded_mask_size = int(mask_arr.sum())
+    progress = CleanProgress(
+        model_fdf_spectrum.copy(),
+        resid_fdf_spectrum.copy(),
+        stall_patience=max(5, guarded_mask_size),
+    )
     for iter_count in range(
         minor_loop_options.start_iter, minor_loop_options.max_iter + 1
     ):
@@ -323,6 +360,29 @@ def minor_loop(
                 f"Threshold reached. Exiting loop...performed {iter_count} iterations"
             )
             break
+        # Same backstops as the multiscale loop: stop at the best state rather
+        # than grinding to max_iter.
+        # A grown mask admits channels the loop has not seen, so the peak it is
+        # driving down is a different one: start the guard again.
+        if int(mask_arr.sum()) != guarded_mask_size:
+            guarded_mask_size = int(mask_arr.sum())
+            progress = CleanProgress(
+                model_fdf_spectrum.copy(),
+                resid_fdf_spectrum.copy(),
+                stall_patience=max(5, guarded_mask_size),
+            )
+        state = progress.check(
+            float(masked_abs[peak_fdf_index]), model_fdf_spectrum, resid_fdf_spectrum
+        )
+        if state != "converging":
+            logger.warning(
+                f"CLEAN {state} at iter {iter_count} "
+                f"(best peak {progress.best_peak:0.3g}); stopping at best."
+            )
+            model_fdf_spectrum = progress.model_fdf_spectrum
+            resid_fdf_spectrum = progress.resid_fdf_spectrum
+            break
+
         # Get the absolute peak channel, values and Faraday depth
         peak_fdf = resid_fdf_spectrum[peak_fdf_index]
 
@@ -1425,45 +1485,31 @@ def _multiscale_minor_cycles(
     if not support.any():
         return resid_fdf_spectrum, model_fdf_spectrum, n_iter, sub_minor_total
 
-    # Divergence guard: keep the lowest-peak state seen and bail if the residual
-    # runs away. The peak is measured over the WHOLE array, not just `support`:
-    # an over-large scale can grow a spurious feature outside the clean region.
-    best_peak = np.inf
-    best_model = model_fdf_spectrum.copy()
-    best_resid = resid_fdf_spectrum.copy()
-    stall_count = 0
+    progress = CleanProgress(model_fdf_spectrum.copy(), resid_fdf_spectrum.copy())
 
     for n_iter in range(1, max_iter + 1):
+        # Over the whole array, not just `support`: an over-large scale can grow
+        # a spurious feature outside the clean region.
         peak = float(np.nanmax(np.abs(resid_fdf_spectrum)))
         support_peak = float(np.nanmax(np.abs(resid_fdf_spectrum[support])))
-        if peak > best_peak * DIVERGENCE_FACTOR:
+        state = progress.check(peak, model_fdf_spectrum, resid_fdf_spectrum)
+        if state == "diverging":
             logger.warning(
-                f"Multiscale CLEAN diverging at iter {n_iter} "
-                f"(peak {peak:0.3g} > {DIVERGENCE_FACTOR}x best {best_peak:0.3g}); "
-                "reverting to best."
+                f"Multiscale CLEAN diverging at iter {n_iter} (peak {peak:0.3g}, "
+                f"best {progress.best_peak:0.3g}); stopping at best."
             )
-            model_fdf_spectrum, resid_fdf_spectrum = best_model, best_resid
+            model_fdf_spectrum = progress.model_fdf_spectrum
+            resid_fdf_spectrum = progress.resid_fdf_spectrum
             break
-        if peak < best_peak:
-            stall_count = (
-                0
-                if peak < best_peak * (1 - STALL_REL_IMPROVEMENT)
-                else (stall_count + 1)
-            )
-            best_peak = peak
-            best_model = model_fdf_spectrum.copy()
-            best_resid = resid_fdf_spectrum.copy()
-        else:
-            stall_count += 1
         if support_peak < stop_threshold:
             break
-        if stall_count >= STALL_PATIENCE:
+        if state == "stalled":
             logger.warning(
-                f"Multiscale CLEAN stalled at iter {n_iter} "
-                f"(peak {peak:0.3g} not improving, threshold {stop_threshold:0.3g}); "
-                "stopping at best."
+                f"Multiscale CLEAN stalled at iter {n_iter} (peak {peak:0.3g}, "
+                f"threshold {stop_threshold:0.3g}); stopping at best."
             )
-            model_fdf_spectrum, resid_fdf_spectrum = best_model, best_resid
+            model_fdf_spectrum = progress.model_fdf_spectrum
+            resid_fdf_spectrum = progress.resid_fdf_spectrum
             break
 
         scale_index = find_significant_scale(
