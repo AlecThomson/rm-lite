@@ -7,14 +7,14 @@ used by the 3D orchestration matches what the 1D tools derive per pixel.
 
 from __future__ import annotations
 
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 
 import dask.array as da
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
-from rm_lite.tools_3d.rmsynth import rmsynth_3d
+from rm_lite.tools_3d.rmsynth import RMSynth3DResults, rmsynth_3d
 from rm_lite.utils.dask_io import estimate_single_stokes_channel_noise
 from rm_lite.utils.fitting import (
     StokesIFitOptions,
@@ -24,6 +24,7 @@ from rm_lite.utils.fitting import (
     fit_stokes_i_model,
     flat_model_value,
     model_is_usable,
+    model_noise_floor,
     pad_coefficients,
     polynomial,
     power_law,
@@ -613,6 +614,7 @@ def test_stokes_i_model_error_fit_order_zero():
 
 RACS_FREQ = np.arange(800e6, 1800e6, 8e6)
 WIDE_FREQ = np.geomspace(50e6, 10e9, 125)
+DEFAULT_FLOOR_SIGMA = StokesIFitOptions().model_floor_sigma
 
 
 @pytest.mark.parametrize(
@@ -631,6 +633,71 @@ def test_model_is_usable_accepts_real_spectra(
 ) -> None:
     """A positive model is usable however wide the band or steep the spectrum."""
     assert model_is_usable((freq / freq.mean()) ** alpha), label
+
+
+def _at_snr(
+    model: NDArray[np.float64], error_arr: NDArray[np.float64], snr: float
+) -> NDArray[np.float64]:
+    """`model` rescaled to sit at `snr` by `stokes_i_snr`."""
+    scale = snr * np.median(error_arr) / np.sqrt(error_arr.size) / np.median(model)
+    return cast("NDArray[np.float64]", model * scale)
+
+
+def test_noise_floor_accepts_a_barely_detected_real_spectrum() -> None:
+    """A real spectrum at the SNR cut passes despite sitting under the
+    per-channel noise. At snr_cut=5 its median flux is only 5/sqrt(n) of a
+    channel's noise, so a per-channel floor would reject it."""
+    error_arr = np.full(RACS_FREQ.size, 1.0)
+    model = _at_snr((RACS_FREQ / RACS_FREQ.mean()) ** -3.0, error_arr, 5.0)
+    assert model.min() < error_arr.min(), "not the faint regime this is testing"
+    assert model_is_usable(model, model_noise_floor(error_arr, DEFAULT_FLOOR_SIGMA))
+
+
+# Fractional bandwidth through to a factor of 200, since the floor must suit
+# any instrument.
+@pytest.mark.parametrize(
+    ("label", "nu_min", "nu_max"),
+    [
+        ("1.4:1", 744e6, 1032e6),
+        ("2:1", 856e6, 1712e6),
+        ("4:1", 1.0e9, 4.0e9),
+        ("200:1", 50e6, 10.0e9),
+    ],
+)
+@pytest.mark.parametrize("alpha", [-0.8, -2.0, -3.5])
+def test_noise_floor_spares_real_spectra_on_any_band(
+    label: str, nu_min: float, nu_max: float, alpha: float
+) -> None:
+    """The default floor rejects no real power law on any band, at the SNR cut.
+
+    Steeper than anything real, at the faintest a pixel is fitted. These bottom
+    out near a sigma; a runaway fit lands five orders of magnitude lower.
+    """
+    freq = np.linspace(nu_min, nu_max, 288)
+    error_arr = np.full(freq.size, 1.0)
+    model = _at_snr((freq / np.median(freq)) ** alpha, error_arr, 5.0)
+    floor = model_noise_floor(error_arr, DEFAULT_FLOOR_SIGMA)
+    assert model_is_usable(model, floor), f"{label}, alpha {alpha}"
+
+
+def test_model_noise_floor_tracks_the_error_and_sigma() -> None:
+    """`sigma * median(error) / sqrt(n)`, and 0 without a usable error."""
+    error_arr = np.full(100, 2.0)
+    assert model_noise_floor(error_arr, 1.0) == pytest.approx(0.2)
+    assert model_noise_floor(error_arr, 3.0) == pytest.approx(0.6)
+    assert model_noise_floor(error_arr, 0.0) == 0.0
+    assert model_noise_floor(None, 1.0) == 0.0
+    assert model_noise_floor(np.zeros(100), 1.0) == 0.0
+
+
+def test_model_is_usable_rejects_a_model_that_dips_into_the_noise() -> None:
+    """One channel below the floor is enough: that is where Q/U blows up."""
+    error_arr = np.full(100, 1.0)
+    floor = model_noise_floor(error_arr, 1.0)
+    model = np.full(100, 1.0)
+    assert model_is_usable(model, floor)
+    model[50] = 0.5 * floor
+    assert not model_is_usable(model, floor)
 
 
 @pytest.mark.parametrize(
@@ -684,6 +751,105 @@ def test_unusable_model_takes_the_flat_fallback() -> None:
     flat = np.isclose(model.max(axis=0), model.min(axis=0))
     assert flat.any(), "no pixel took the fallback, so it is not under test"
     assert np.allclose(model[:, flat], mean_i[flat])
+
+
+def _artefact_cube(
+    feature_width: float, n_freq: int = 288
+) -> tuple[
+    NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
+]:
+    """A bright Stokes I feature peaked mid-band and near zero at both edges,
+    with a plain 2.5 mJy polarised signal on top.
+
+    An artefact as the fitter sees it: past the SNR cut, but shaped so the
+    curvature term runs to -inf and the model to zero at the edges.
+    """
+    rng = np.random.default_rng(2026)
+    freq = np.linspace(744e6, 1032e6, n_freq)
+    log_x = np.log10(freq / freq[n_freq // 2])
+    stokes_i = 0.05 * np.exp(-0.5 * (log_x / feature_width) ** 2)
+    stokes_i = stokes_i[:, np.newaxis, np.newaxis] + rng.normal(0, 1e-4, (n_freq, 1, 1))
+    pol = 0.0025 * np.exp(2j * (0.3 + 20.0 * freq_to_lambda2(freq)))
+    stokes_q = pol.real[:, np.newaxis, np.newaxis] + rng.normal(0, 1e-4, (n_freq, 1, 1))
+    stokes_u = pol.imag[:, np.newaxis, np.newaxis] + rng.normal(0, 1e-4, (n_freq, 1, 1))
+    return freq, stokes_q, stokes_u, stokes_i
+
+
+def _artefact_synth(feature_width: float, **kwargs: Any) -> RMSynth3DResults:
+    freq, stokes_q, stokes_u, stokes_i = _artefact_cube(feature_width)
+    chunks = stokes_q.shape
+    return rmsynth_3d(
+        da.from_array(stokes_q, chunks=chunks),
+        da.from_array(stokes_u, chunks=chunks),
+        freq,
+        weight_arr=np.full(freq.size, 1.0 / 1e-4**2),
+        stokes_i=da.from_array(stokes_i, chunks=chunks),
+        stokes_i_error=np.full(freq.size, 1e-4),
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=1000.0,
+        **kwargs,
+    )
+
+
+def test_artefact_spectrum_does_not_blow_up_the_fdf() -> None:
+    """The bug this floor is for: a runaway fit took a 2.5 mJy signal to 1e30.
+
+    The model reaches ~1e-37 Jy at the band edges and Q/U are divided by it.
+    """
+    synth = _artefact_synth(0.006)
+    fdf = np.asarray(synth.fdf_dirty_cube.compute())
+    model = np.asarray(_require(synth.stokes_i_model_cube).compute())
+
+    assert np.isclose(model.max(), model.min()), "fit was kept, so no floor applied"
+    assert np.abs(fdf).max() == pytest.approx(0.0025, rel=0.1)
+
+
+def test_unfloored_artefact_fit_carries_its_amplification_into_the_noise() -> None:
+    """A model kept above the floor still amplifies Q/U, and the noise says so.
+
+    The floor caps the amplification rather than removing it, so the error has
+    to rise with the peak.
+    """
+    synth = _artefact_synth(0.006, stokes_i_model_floor_sigma=0.0)
+    peak = np.abs(np.asarray(synth.fdf_dirty_cube.compute())).max()
+    noise = np.asarray(synth.theoretical_noise.fdf_error_noise).item()
+    assert peak / 0.0025 > 1e3, "not the runaway regime this is testing"
+
+    floored = _artefact_synth(0.006)
+    floored_peak = np.abs(np.asarray(floored.fdf_dirty_cube.compute())).max()
+    floored_noise = np.asarray(floored.theoretical_noise.fdf_error_noise).item()
+    # The noise outruns the peak, which averages the amplified channels down.
+    assert peak / noise < floored_peak / floored_noise
+
+
+def test_flat_stokes_i_leaves_the_theoretical_noise_alone() -> None:
+    """A flat model divides and rescales by the same number, so the noise is
+    unchanged: the one case the old estimate got right."""
+    freq, stokes_q, stokes_u, _ = _artefact_cube(0.05)
+    chunks = stokes_q.shape
+    common: dict[str, Any] = {
+        "weight_arr": np.full(freq.size, 1.0 / 1e-4**2),
+        "d_phi_radm2": D_PHI_RADM2,
+        "phi_max_radm2": 1000.0,
+    }
+    plain = rmsynth_3d(
+        da.from_array(stokes_q, chunks=chunks),
+        da.from_array(stokes_u, chunks=chunks),
+        freq,
+        **common,
+    )
+    flat = rmsynth_3d(
+        da.from_array(stokes_q, chunks=chunks),
+        da.from_array(stokes_u, chunks=chunks),
+        freq,
+        stokes_i=da.from_array(np.full((freq.size, 1, 1), 0.05), chunks=chunks),
+        stokes_i_error=np.full(freq.size, 1e-4),
+        fit_order=0,
+        **common,
+    )
+    assert np.asarray(flat.theoretical_noise.fdf_error_noise).item() == pytest.approx(
+        float(cast("float", plain.theoretical_noise.fdf_error_noise))
+    )
 
 
 def test_pixel_with_no_finite_channels_stays_nan() -> None:

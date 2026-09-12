@@ -107,6 +107,8 @@ def format_scalar_or_map(value: float | NDArray[np.float64] | da.Array) -> str:
     """Log-friendly string for a scalar, or the finite range of a map."""
     if np.ndim(value) == 0:
         return f"{float(value):0.3g}"
+    if isinstance(value, da.Array):
+        return f"a lazy {'x'.join(str(size) for size in value.shape)} map"
     values = np.asarray(value)
     finite = values[np.isfinite(values)]
     if finite.size == 0:

@@ -91,11 +91,9 @@ class RMSynth3DResults(NamedTuple):
     what lets an FDF be moved between references afterwards
     (`rm_lite.utils.synthesis.derotate_to`, Brentjens & de Bruyn 2005 eq. 33)."""
     theoretical_noise: TheoreticalNoise
-    """Theoretical FDF-domain noise from the per-channel weight array. This is a
-    per-channel, not per-pixel, estimate, so it is uniform across the cube. When
-    a Stokes I model is used the FDF is rescaled to flux per pixel; this noise
-    stays in the Q/U-error domain it was computed in, which the rescaling keeps
-    roughly consistent (exactly so for a flat Stokes I spectrum)."""
+    """Theoretical FDF-domain noise from the weight array, uniform across the
+    cube unless the weights are per pixel, or a Stokes I model makes it a lazy
+    per-pixel map (see `fractional_theoretical_noise`)."""
     stokes_i_model_cube: da.Array | None = None
     """Per-pixel Stokes I model cube, lazy, shape (n_freq, ny, nx). None unless a
     Stokes I cube or model was supplied to `rmsynth_3d`."""
@@ -198,6 +196,29 @@ def _compute_global_params(
         weight_arr=weight_arr,
     )
     return rmsynth_params, theoretical_noise
+
+
+def fractional_theoretical_noise(
+    weight_arr: NDArray[np.float64] | da.Array,
+    stokes_i_model_cube: da.Array,
+    ref_flux_map: da.Array,
+) -> TheoreticalNoise:
+    """Per-pixel FDF noise once Q/U have been divided by a Stokes I model.
+
+    Scales each channel's error by `ref_flux / model`, as the signal is. Reads
+    the model cube, so compute it with the FDF or the fit runs twice.
+    """
+    complex_pol_error = error_from_weight(weight_arr)
+    if np.ndim(complex_pol_error) == 1:
+        # Spatial axes too, or it will not broadcast against the model cube.
+        complex_pol_error = complex_pol_error[:, np.newaxis, np.newaxis]
+        weight_arr = weight_arr[:, np.newaxis, np.newaxis]
+    scaled_error = complex_pol_error * (
+        ref_flux_map[np.newaxis, :, :] / stokes_i_model_cube
+    )
+    return compute_theoretical_noise(
+        complex_pol_error=scaled_error, weight_arr=weight_arr
+    )
 
 
 class WeightSummary(NamedTuple):
@@ -566,6 +587,7 @@ def rmsynth_3d(
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_snr_cut: float | None = 5.0,
+    stokes_i_model_floor_sigma: float = 0.01,
     stokes_i_robust_loss: RobustLoss = "cauchy",
     stokes_i_f_scale: float = 3.0,
     compute_model_error: bool = False,
@@ -619,6 +641,9 @@ def rmsynth_3d(
             Needs a Stokes I error to measure SNR against, so raises unless one
             of `stokes_i_error` / `estimate_stokes_i_noise` is given.
             Defaults to 5.0.
+        stokes_i_model_floor_sigma (float, optional): Reject a fitted model
+            dipping this many sigma below the pixel's band-averaged Stokes I
+            noise, falling back to a flat one. 0 disables. Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
             the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
             (default), "soft_l1" or "huber"; "linear" is plain least squares.
@@ -674,6 +699,7 @@ def rmsynth_3d(
         fit_order=fit_order,
         fit_function=fit_function,
         snr_cut=stokes_i_snr_cut,
+        model_floor_sigma=stokes_i_model_floor_sigma,
         robust_loss=stokes_i_robust_loss,
         f_scale=stokes_i_f_scale,
         compute_model_error=compute_model_error,
@@ -795,6 +821,11 @@ def rmsynth_3d(
             dtype=np.float64,
             freq_arr_hz=freq_arr_hz,
             ref_freq_hz=ref_freq_hz,
+        )
+        theoretical_noise = fractional_theoretical_noise(
+            weight_arr=weight_arr,
+            stokes_i_model_cube=stokes_i_model_cube,
+            ref_flux_map=ref_flux_map,
         )
 
     fdf_dirty_cube = da.map_blocks(
@@ -1033,6 +1064,7 @@ def rmsynth_3d_from_fits(
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_snr_cut: float | None = 5.0,
+    stokes_i_model_floor_sigma: float = 0.01,
     stokes_i_robust_loss: RobustLoss = "cauchy",
     stokes_i_f_scale: float = 3.0,
     compute_model_error: bool = False,
@@ -1082,6 +1114,7 @@ def rmsynth_3d_from_fits(
         fit_order (int, optional): See `rmsynth_3d`. Defaults to 2.
         fit_function ("log", "linear", optional): See `rmsynth_3d`. Defaults to "log".
         stokes_i_snr_cut (float | None, optional): See `rmsynth_3d`. Defaults to 5.0.
+        stokes_i_model_floor_sigma (float, optional): See `rmsynth_3d`. Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): See `rmsynth_3d`. Defaults to "cauchy".
         stokes_i_f_scale (float, optional): See `rmsynth_3d`. Defaults to 3.0.
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
@@ -1235,6 +1268,7 @@ def rmsynth_3d_from_fits(
         fit_order=fit_order,
         fit_function=fit_function,
         stokes_i_snr_cut=stokes_i_snr_cut,
+        stokes_i_model_floor_sigma=stokes_i_model_floor_sigma,
         stokes_i_robust_loss=stokes_i_robust_loss,
         stokes_i_f_scale=stokes_i_f_scale,
         compute_model_error=compute_model_error,
