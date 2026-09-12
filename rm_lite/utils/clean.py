@@ -322,6 +322,8 @@ def minor_loop(
     # One sweep of the mask before the guard can fire: Hogbom takes the peak
     # channel down by `gain`, so the masked max only falls once every comparable
     # channel has had a turn.
+    # A blank spectrum has no peak to watch, and cannot run away.
+    guard_divergence = bool(np.isfinite(resid_fdf_spectrum).any())
     progress = CleanProgress(model_fdf_spectrum.copy(), resid_fdf_spectrum.copy())
     for iter_count in range(
         minor_loop_options.start_iter, minor_loop_options.max_iter + 1
@@ -358,10 +360,14 @@ def minor_loop(
                 f"Threshold reached. Exiting loop...performed {iter_count} iterations"
             )
             break
-        state = progress.check(
-            float(np.nanmax(np.abs(resid_fdf_spectrum))),
-            model_fdf_spectrum,
-            resid_fdf_spectrum,
+        state = (
+            progress.check(
+                float(np.nanmax(np.abs(resid_fdf_spectrum))),
+                model_fdf_spectrum,
+                resid_fdf_spectrum,
+            )
+            if guard_divergence
+            else "converging"
         )
         if state != "converging":
             logger.warning(
