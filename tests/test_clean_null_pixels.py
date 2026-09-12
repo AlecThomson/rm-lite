@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from rm_lite.utils import clean as clean_mod
 from rm_lite.utils.clean import (
     CleanProgress,
+    CleanState,
     MinorLoopArrays,
     MinorLoopOptions,
     MultiscaleOptions,
@@ -332,7 +333,7 @@ def test_stall_count_resets_while_the_peak_keeps_falling() -> None:
     zeros = np.zeros(4, dtype=complex)
     progress = CleanProgress(zeros, zeros, stall_patience=5)
     peaks = [1.0 * 0.5**i for i in range(8)]
-    assert all(progress.check(p, zeros, zeros) == "converging" for p in peaks)
+    assert all(progress.check(p, zeros, zeros) is CleanState.CONVERGING for p in peaks)
 
 
 def test_stall_still_fires_when_the_peak_barely_moves() -> None:
@@ -340,8 +341,8 @@ def test_stall_still_fires_when_the_peak_barely_moves() -> None:
     zeros = np.zeros(4, dtype=complex)
     progress = CleanProgress(zeros, zeros, stall_patience=5)
     states = [progress.check(1.0 * 0.999**i, zeros, zeros) for i in range(8)]
-    assert states[:5] == ["converging"] * 5
-    assert states[5:] == ["stalled"] * 3
+    assert states[:5] == [CleanState.CONVERGING] * 5
+    assert states[5:] == [CleanState.STALLED] * 3
 
 
 def test_divergence_guard_stops_and_keeps_the_best_state(caplog) -> None:

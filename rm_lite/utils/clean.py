@@ -6,6 +6,7 @@ import dataclasses
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from typing import Literal, NamedTuple, TypeAlias, TypeVar
 
 import numpy as np
@@ -33,6 +34,15 @@ DType = TypeVar("DType", bound=np.generic)
 KernelType: TypeAlias = Literal["tapered_quad", "gaussian"]
 
 SelectionType: TypeAlias = Literal["snr", "hybrid"]
+
+
+class CleanState(StrEnum):
+    """What a CLEAN loop is doing: still working, running away, or grinding."""
+
+    CONVERGING = "converging"
+    DIVERGING = "diverging"
+    STALLED = "stalled"
+
 
 # Hybrid (width-gated snr) selection.
 # Engage an extended scale only when the residual peak fits wider than
@@ -72,21 +82,21 @@ class CleanProgress:
         peak: float,
         model_fdf_spectrum: NDArray[np.complexfloating],
         resid_fdf_spectrum: NDArray[np.complexfloating],
-    ) -> Literal["converging", "diverging", "stalled"]:
+    ) -> CleanState:
         """Record this iteration's peak, and say whether the loop should stop."""
+        if peak - self.best_peak > self.divergence_fraction * self.best_peak:
+            return CleanState.DIVERGING
         if peak < self.best_peak:
             improved = peak < self.best_peak * (1 - self.stall_rel_improvement)
             self.best_peak = peak
             self.model_fdf_spectrum = model_fdf_spectrum.copy()
             self.resid_fdf_spectrum = resid_fdf_spectrum.copy()
             self.stall_count = 0 if improved else self.stall_count + 1
-        elif peak - self.best_peak > self.divergence_fraction * self.best_peak:
-            return "diverging"
         else:
             self.stall_count += 1
         if self.stall_patience and self.stall_count >= self.stall_patience:
-            return "stalled"
-        return "converging"
+            return CleanState.STALLED
+        return CleanState.CONVERGING
 
 
 class RMCleanResults(NamedTuple):
@@ -361,9 +371,9 @@ def minor_loop(
                 resid_fdf_spectrum,
             )
             if guard_divergence
-            else "converging"
+            else CleanState.CONVERGING
         )
-        if state != "converging":
+        if state is not CleanState.CONVERGING:
             logger.warning(
                 f"CLEAN {state} at iter {iter_count} (best peak "
                 f"{progress.best_peak:0.3g}); "
@@ -1488,7 +1498,7 @@ def _multiscale_minor_cycles(
         peak = float(np.nanmax(np.abs(resid_fdf_spectrum)))
         support_peak = float(np.nanmax(np.abs(resid_fdf_spectrum[support])))
         state = progress.check(peak, model_fdf_spectrum, resid_fdf_spectrum)
-        if state == "diverging":
+        if state is CleanState.DIVERGING:
             logger.warning(
                 f"Multiscale CLEAN diverging at iter {n_iter} (peak {peak:0.3g}, "
                 f"best {progress.best_peak:0.3g}); stopping at best."
@@ -1498,7 +1508,7 @@ def _multiscale_minor_cycles(
             break
         if support_peak < stop_threshold:
             break
-        if state == "stalled":
+        if state is CleanState.STALLED:
             logger.warning(
                 f"Multiscale CLEAN stalled at iter {n_iter} (peak {peak:0.3g}, "
                 f"threshold {stop_threshold:0.3g}); stopping at best."
