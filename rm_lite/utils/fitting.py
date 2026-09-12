@@ -173,7 +173,9 @@ def fit_rmsf(
     sigma_rmsf_radm2 = fwhm_to_sigma(fwhm_rmsf_radm2)
     sigma_rmsf_arr_pix = sigma_rmsf_radm2 / d_phi
     for i in np.where(mask)[0]:
-        start = int(i - sigma_rmsf_arr_pix / 2)
+        # Clamped: a negative start wraps and empties the slice, leaving one
+        # point and a fit with no degrees of freedom.
+        start = max(0, int(i - sigma_rmsf_arr_pix / 2))
         end = int(i + sigma_rmsf_arr_pix / 2)
         mask[start : end + 2] = True
     popt, _ = optimize.curve_fit(

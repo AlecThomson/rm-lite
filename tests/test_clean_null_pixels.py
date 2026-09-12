@@ -10,12 +10,17 @@ import pytest
 from numpy.typing import NDArray
 from rm_lite.utils import clean as clean_mod
 from rm_lite.utils.clean import (
+    CleanProgress,
+    CleanState,
+    MinorLoopArrays,
+    MinorLoopOptions,
     MultiscaleOptions,
     RMCleanOptions,
     RMCleanResults,
     RMSynthArrays,
     _blank_pixels,
     _null_clean_pixels,
+    minor_loop,
     rmclean,
 )
 from rm_lite.utils.logging import quiet_logs
@@ -266,3 +271,120 @@ def test_null_pixel_screen_strips_match_whole_array() -> None:
     dirty[:, ::7] = np.nan
     expected = ~(np.fmax.reduce(np.abs(dirty), axis=0) > 1.0)
     assert np.array_equal(_null_clean_pixels(dirty, 1.0), expected)
+
+
+def test_divergence_guard_never_fires_on_a_converging_clean(caplog) -> None:
+    """The backstop must not change a clean that was already working.
+
+    Sweeps narrow, broad, noise-only and blank spectra over four decades of
+    noise, masked and unmasked. None of them should trip the guard.
+    """
+    n_phi, fwhm = 401, 40.0
+    phi_arr_radm2 = np.linspace(-2000, 2000, n_phi)
+    phi_double_arr_radm2 = np.linspace(-4000, 4000, 2 * n_phi - 1)
+    rmsf_spectrum = np.exp(-0.5 * (phi_double_arr_radm2 / (fwhm / 2.355)) ** 2).astype(
+        np.complex128
+    )
+
+    with caplog.at_level(logging.WARNING, logger="rm_lite"):
+        for case in range(40):
+            rng = np.random.default_rng(case)
+            noise = 10 ** rng.uniform(-4, -2)
+            spectrum = rng.normal(0, noise, n_phi) + 1j * rng.normal(0, noise, n_phi)
+            kind = case % 4
+            if kind == 1:
+                spectrum += 10 ** rng.uniform(-3, -1) * np.exp(
+                    -0.5
+                    * ((phi_arr_radm2 - rng.uniform(-500, 500)) / (fwhm / 2.355)) ** 2
+                )
+            elif kind == 2:
+                for depth in np.linspace(-300, 300, 7):
+                    spectrum += 10 ** rng.uniform(-3, -2) * np.exp(
+                        -0.5 * ((phi_arr_radm2 - depth) / (fwhm / 2.355)) ** 2
+                    )
+            elif kind == 3:
+                spectrum[:] = np.nan
+            for update_mask in (False, True):
+                minor_loop(
+                    MinorLoopArrays(
+                        resid_fdf_spectrum_mask=np.ma.array(
+                            spectrum.copy(), mask=np.zeros(n_phi, bool)
+                        ),
+                        phi_arr_radm2=phi_arr_radm2,
+                        phi_double_arr_radm2=phi_double_arr_radm2,
+                        rmsf_spectrum=rmsf_spectrum,
+                        rmsf_fwhm=fwhm,
+                    ),
+                    MinorLoopOptions(
+                        max_iter=2000,
+                        gain=0.1,
+                        mask_threshold=3 * noise,
+                        stopping_threshold=noise,
+                        update_mask=update_mask,
+                        noise=noise if update_mask else None,
+                    ),
+                )
+
+    assert "diverging" not in caplog.text
+
+
+def test_stall_count_resets_while_the_peak_keeps_falling() -> None:
+    """A loop halving its peak every iteration is converging, not stalled."""
+    zeros = np.zeros(4, dtype=complex)
+    progress = CleanProgress(zeros, zeros, stall_patience=5)
+    peaks = [1.0 * 0.5**i for i in range(8)]
+    assert all(progress.check(p, zeros, zeros) is CleanState.CONVERGING for p in peaks)
+
+
+def test_stall_still_fires_when_the_peak_barely_moves() -> None:
+    """A peak falling 0.1% an iteration stalls once patience runs out."""
+    zeros = np.zeros(4, dtype=complex)
+    progress = CleanProgress(zeros, zeros, stall_patience=5)
+    states = [progress.check(1.0 * 0.999**i, zeros, zeros) for i in range(8)]
+    assert states[:5] == [CleanState.CONVERGING] * 5
+    assert states[5:] == [CleanState.STALLED] * 3
+
+
+def test_divergence_guard_stops_and_keeps_the_best_state(caplog) -> None:
+    """A runaway clean stops at its best peak rather than running to max_iter."""
+    n_phi, fwhm, noise = 201, 20.0, 1e-3
+    phi_arr_radm2 = np.linspace(-1000, 1000, n_phi)
+    phi_double_arr_radm2 = np.linspace(-2000, 2000, 2 * n_phi - 1)
+    sigma = fwhm / 2.355
+    # A sidelobe towering over the main lobe: subtracting a component injects
+    # more flux than it removes, so the residual peak climbs every iteration.
+    rmsf_spectrum = (
+        np.exp(-0.5 * (phi_double_arr_radm2 / sigma) ** 2)
+        + 6.0 * np.exp(-0.5 * ((phi_double_arr_radm2 - 400) / sigma) ** 2)
+    ).astype(np.complex128)
+    rng = np.random.default_rng(0)
+    spectrum = rng.normal(0, noise, n_phi) + 1j * rng.normal(0, noise, n_phi)
+    spectrum += 0.05 * np.exp(-0.5 * (phi_arr_radm2 / sigma) ** 2)
+
+    with caplog.at_level(logging.WARNING, logger="rm_lite"):
+        results = minor_loop(
+            MinorLoopArrays(
+                resid_fdf_spectrum_mask=np.ma.array(
+                    spectrum, mask=np.zeros(n_phi, bool)
+                ),
+                phi_arr_radm2=phi_arr_radm2,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                rmsf_spectrum=rmsf_spectrum,
+                rmsf_fwhm=fwhm,
+            ),
+            MinorLoopOptions(
+                max_iter=200,
+                gain=0.5,
+                mask_threshold=3 * noise,
+                stopping_threshold=noise,
+                update_mask=False,
+            ),
+        )
+
+    assert "diverging" in caplog.text
+    assert results.iter_count < 200
+    # Reverted to the best state, not left at the runaway one.
+    assert np.isclose(
+        float(np.nanmax(np.abs(results.resid_fdf_spectrum))),
+        float(np.nanmax(np.abs(spectrum))),
+    )
