@@ -93,8 +93,8 @@ class RMSynth3DResults(NamedTuple):
     theoretical_noise: TheoreticalNoise
     """Theoretical FDF-domain noise from the weight array, uniform across the
     cube unless the weights are per pixel. With a Stokes I model it is a lazy
-    per-pixel map instead, carrying the same `ref_flux / model` scaling the
-    fractional correction applies to Q/U (`fractional_theoretical_noise`)."""
+    per-pixel map carrying the same scaling as Q/U (see
+    `fractional_theoretical_noise`)."""
     stokes_i_model_cube: da.Array | None = None
     """Per-pixel Stokes I model cube, lazy, shape (n_freq, ny, nx). None unless a
     Stokes I cube or model was supplied to `rmsynth_3d`."""
@@ -206,15 +206,13 @@ def fractional_theoretical_noise(
 ) -> TheoreticalNoise:
     """Per-pixel FDF noise once Q/U have been divided by a Stokes I model.
 
-    The correction scales each channel's error by `ref_flux / model` exactly as
-    it does the signal, so the peak and its error rise together and
-    `peak_pi / peak_pi_error` stays an SNR. Reads the model cube, so compute it
-    alongside the FDF or the Stokes I fit runs twice.
+    Each channel's error is scaled by `ref_flux / model` as the signal is, so a
+    peak and its error rise together and their ratio stays an SNR. Reads the
+    model cube, so compute it alongside the FDF or the fit runs twice.
     """
     complex_pol_error = error_from_weight(weight_arr)
     if np.ndim(complex_pol_error) == 1:
-        # A per-channel weight has to gain the spatial axes too, or it cannot
-        # broadcast against the model cube the error is now scaled by.
+        # Spatial axes too, or it will not broadcast against the model cube.
         complex_pol_error = complex_pol_error[:, np.newaxis, np.newaxis]
         weight_arr = weight_arr[:, np.newaxis, np.newaxis]
     scaled_error = complex_pol_error * (
@@ -645,14 +643,13 @@ def rmsynth_3d(
             Needs a Stokes I error to measure SNR against, so raises unless one
             of `stokes_i_error` / `estimate_stokes_i_noise` is given.
             Defaults to 5.0.
-        stokes_i_model_floor_sigma (float, optional): Reject a fitted model that
-            dips this many sigma below the pixel's band-averaged Stokes I noise
-            and fall back to a flat one. Without it a fit that runs to zero in a
-            channel gives Q/U an unbounded amplification. The two populations are
-            five orders of magnitude apart, so the default sits in the gap rather
-            than near either edge: at the SNR cut a real power law bottoms out
-            around a sigma whatever the band, a runaway fit at 1e-5 sigma and
-            below. 0 disables. Fit path only. Defaults to 0.01.
+        stokes_i_model_floor_sigma (float, optional): Reject a fitted model
+            dipping this many sigma below the pixel's band-averaged Stokes I
+            noise, falling back to a flat one; without it a fit running to zero
+            in a channel amplifies Q/U without bound. At the SNR cut a real
+            power law bottoms out near a sigma on any band and a runaway fit at
+            1e-5 and below, so the default sits between them rather than at
+            either edge. 0 disables. Fit path only. Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
             the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
             (default), "soft_l1" or "huber"; "linear" is plain least squares.

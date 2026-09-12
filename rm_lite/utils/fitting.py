@@ -571,10 +571,10 @@ def check_snr_cut_has_error(
 def model_noise_floor(
     stokes_i_error_arr: NDArray[np.float64] | None, sigma: float
 ) -> float:
-    """Flux `sigma` times the band-averaged Stokes I noise, `median(error)/sqrt(n)`.
+    """Flux `sigma` times the band-averaged noise, `median(error)/sqrt(n)`.
 
-    Same noise `stokes_i_snr` measures against, so the floor and `snr_cut` are in
-    the same units. 0.0 without a usable error.
+    The noise `stokes_i_snr` measures against, so this and `snr_cut` share units.
+    0.0 without a usable error.
     """
     if stokes_i_error_arr is None or sigma <= 0:
         return 0.0
@@ -590,11 +590,10 @@ def model_is_usable(model: NDArray[np.float64], noise_floor: float = 0.0) -> boo
     """Whether a Stokes I model can safely divide Q/U: finite, and never below
     `noise_floor` or too small to divide by.
 
-    Dividing Q/U by a model and rescaling the FDF by its reference flux
-    amplifies them by `model(ref_freq) / min(model)`, which runs away once a fit
-    drives the model towards zero in a channel. The bare guard is float32's
-    smallest normal, since the model is taken down to the data's dtype before it
-    divides anything.
+    Dividing by the model and rescaling by its reference flux amplifies Q/U by
+    `model(ref_freq) / min(model)`, unbounded once a fit runs to zero in a
+    channel. The bare guard is float32's smallest normal, the dtype the model is
+    taken down to before it divides anything.
     """
     floor = max(float(noise_floor), float(np.finfo(np.float32).tiny))
     return bool(np.all(np.isfinite(model)) and np.min(model) > floor)
@@ -882,7 +881,7 @@ class PixelFit(NamedTuple):
     i_spec: NDArray[np.float64]
     """The pixel's Stokes I spectrum (unmasked), for the flat-model fallback."""
     e_spec: NDArray[np.float64]
-    """The pixel's Stokes I error spectrum, for the model noise floor."""
+    """The pixel's error spectrum, for the noise floor."""
     good: NDArray[np.bool_]
     """Finite-channel mask, for the flat-model fallback."""
     fit: FitResult | None
@@ -1052,7 +1051,7 @@ def _fit_stokes_i_block(
     per-pixel `ref_freq_hz` block when `has_ref_block`; the error cube is
     optional (see `_pixel_stokes_i_error`). A pixel that was not fitted (too few
     finite channels or SNR below `fit_options.snr_cut`) or whose model is
-    unusable (dips below `fit_options.model_floor_sigma` times the pixel's
+    unusable (below `fit_options.model_floor_sigma` times the pixel's
     band-averaged noise, see `model_is_usable`) falls back to a flat
     model at its mean Stokes I, so it gets no spectral correction and its alpha,
     order, terms and errors stay NaN. A pixel with no finite channels stays NaN.
@@ -1111,8 +1110,8 @@ def _fit_stokes_i_block(
             "Stokes I model and fell back to a flat one (see "
             "`rm_lite.utils.fitting.model_is_usable`). Expect this on pixels with "
             "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None, and "
-            "on deconvolution artefacts, whose Stokes I spectrum passes through "
-            "zero and drives the fitted model down with it."
+            "on artefacts, whose Stokes I passes through zero and takes the "
+            "fitted model down with it."
         )
     return out
 

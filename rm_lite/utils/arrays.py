@@ -106,8 +106,8 @@ def float_if_scalar(value: Any) -> float | NDArray[np.float64] | da.Array:
 def format_scalar_or_map(value: float | NDArray[np.float64] | da.Array) -> str:
     """Log-friendly string for a scalar, or the finite range of a map.
 
-    A lazy map is described, not computed: reporting its range would run
-    whatever built it, which for a Stokes I noise map is the whole fit.
+    A lazy map is described rather than computed, since its range would cost
+    whatever built it.
     """
     if np.ndim(value) == 0:
         return f"{float(value):0.3g}"

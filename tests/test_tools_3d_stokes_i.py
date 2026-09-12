@@ -638,27 +638,23 @@ def test_model_is_usable_accepts_real_spectra(
 def _at_snr(
     model: NDArray[np.float64], error_arr: NDArray[np.float64], snr: float
 ) -> NDArray[np.float64]:
-    """`model` rescaled to sit at `snr` by `stokes_i_snr`, the faintest a pixel
-    can be fitted at."""
+    """`model` rescaled to sit at `snr` by `stokes_i_snr`."""
     scale = snr * np.median(error_arr) / np.sqrt(error_arr.size) / np.median(model)
     return cast("NDArray[np.float64]", model * scale)
 
 
 def test_noise_floor_accepts_a_barely_detected_real_spectrum() -> None:
-    """A real spectrum at the SNR cut passes even though it is under the
-    per-channel noise, which is why the floor is band-averaged.
-
-    At snr_cut=5 a pixel's median flux is only 5/sqrt(n) of a channel's noise, so
-    a per-channel floor would reject every faint real source.
-    """
+    """A real spectrum at the SNR cut passes despite sitting under the
+    per-channel noise, which is why the floor is band-averaged: at snr_cut=5 a
+    median flux is only 5/sqrt(n) of a channel's noise."""
     error_arr = np.full(RACS_FREQ.size, 1.0)
     model = _at_snr((RACS_FREQ / RACS_FREQ.mean()) ** -3.0, error_arr, 5.0)
     assert model.min() < error_arr.min(), "not the faint regime this is testing"
     assert model_is_usable(model, model_noise_floor(error_arr, DEFAULT_FLOOR_SIGMA))
 
 
-# Fractional bandwidth through to a factor of 200, since the floor must not be
-# tuned to one instrument's band.
+# Fractional bandwidth through to a factor of 200: the floor must not be tuned
+# to one instrument's band.
 @pytest.mark.parametrize(
     ("label", "nu_min", "nu_max"),
     [
@@ -674,11 +670,9 @@ def test_noise_floor_spares_real_spectra_on_any_band(
 ) -> None:
     """The default floor rejects no real power law on any band, at the SNR cut.
 
-    The faintest a pixel gets fitted at, and alpha -3.5 is steeper than anything
-    real, so this is the corner the floor has to clear. It bottoms out near a
-    sigma here; a runaway fit is five orders of magnitude further down, which is
-    the gap the default sits in. Tying the floor to one band's dynamic range
-    instead would reject ordinary spectral indices on a wider one.
+    The faintest a pixel is fitted at, and alpha -3.5 is steeper than anything
+    real, so this is the corner to clear. It bottoms out near a sigma; a runaway
+    fit is five orders of magnitude below that.
     """
     freq = np.linspace(nu_min, nu_max, 288)
     error_arr = np.full(freq.size, 1.0)
@@ -698,7 +692,7 @@ def test_model_noise_floor_tracks_the_error_and_sigma() -> None:
 
 
 def test_model_is_usable_rejects_a_model_that_dips_into_the_noise() -> None:
-    """One channel below the floor is enough: that is the channel Q/U blows up in."""
+    """One channel below the floor is enough: that is where Q/U blows up."""
     error_arr = np.full(100, 1.0)
     floor = model_noise_floor(error_arr, 1.0)
     model = np.full(100, 1.0)
@@ -768,9 +762,9 @@ def _artefact_cube(
     """A bright Stokes I feature peaked mid-band and near zero at both edges,
     with a plain 2.5 mJy polarised signal on top.
 
-    What a deconvolution artefact looks like to the fitter: bright enough to
-    pass the SNR cut, and shaped so the least-squares optimum drives the power
-    law's curvature term towards -inf, taking the model to zero at the edges.
+    An artefact as the fitter sees it: past the SNR cut, but shaped so the
+    least-squares optimum sends the curvature term towards -inf and the model to
+    zero at the edges.
     """
     rng = np.random.default_rng(2026)
     freq = np.linspace(744e6, 1032e6, n_freq)
@@ -800,11 +794,10 @@ def _artefact_synth(feature_width: float, **kwargs: Any) -> RMSynth3DResults:
 
 
 def test_artefact_spectrum_does_not_blow_up_the_fdf() -> None:
-    """The bug this floor is for: a runaway fit amplified a 2.5 mJy signal to 1e30.
+    """The bug this floor is for: a runaway fit took a 2.5 mJy signal to 1e30.
 
-    The fit drives the model to ~1e-37 Jy at the band edges, Q/U are divided by
-    it, and the FDF is then rescaled by the model's reference flux. Without the
-    floor the peak comes back 33 orders of magnitude high.
+    The model reaches ~1e-37 Jy at the band edges, Q/U are divided by it, and the
+    FDF is rescaled by the reference flux.
     """
     synth = _artefact_synth(0.006)
     fdf = np.asarray(synth.fdf_dirty_cube.compute())
@@ -817,8 +810,8 @@ def test_artefact_spectrum_does_not_blow_up_the_fdf() -> None:
 def test_unfloored_artefact_fit_carries_its_amplification_into_the_noise() -> None:
     """A model kept above the floor still amplifies Q/U, and the noise says so.
 
-    The floor caps that amplification at the pixel's own Stokes I SNR rather than
-    removing it, so what keeps the peak honest is the error rising with it.
+    The floor caps that amplification rather than removing it, so the error
+    rising with the peak is what keeps it honest.
     """
     synth = _artefact_synth(0.006, stokes_i_model_floor_sigma=0.0)
     peak = np.abs(np.asarray(synth.fdf_dirty_cube.compute())).max()
@@ -829,13 +822,13 @@ def test_unfloored_artefact_fit_carries_its_amplification_into_the_noise() -> No
     floored_peak = np.abs(np.asarray(floored.fdf_dirty_cube.compute())).max()
     floored_noise = np.asarray(floored.theoretical_noise.fdf_error_noise).item()
     # The noise outruns the peak, which averages the amplified channels down,
-    # so the amplification reads as lost SNR rather than as signal.
+    # so the amplification reads as lost SNR, not as signal.
     assert peak / noise < floored_peak / floored_noise
 
 
 def test_flat_stokes_i_leaves_the_theoretical_noise_alone() -> None:
     """A flat model divides and rescales by the same number, so the noise is
-    unchanged: the one case the old per-channel estimate got right."""
+    unchanged: the one case the old estimate got right."""
     freq, stokes_q, stokes_u, _ = _artefact_cube(0.05)
     chunks = stokes_q.shape
     common: dict[str, Any] = {
