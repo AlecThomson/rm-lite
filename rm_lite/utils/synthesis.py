@@ -48,6 +48,7 @@ from rm_lite.utils.fitting import (
     flat_model_value,
     gaussian_integrand,
     model_is_usable,
+    model_noise_floor,
     sample_model_error,
 )
 from rm_lite.utils.logging import logger
@@ -1128,7 +1129,10 @@ def create_fractional_spectra(
         stokes_data.freq_arr_hz[no_nan_idx] / ref_freq_hz,
         *np.asarray(fit_result.popt),
     )
-    if not model_is_usable(model_good):
+    noise_floor = model_noise_floor(
+        stokes_data.stokes_i_error_arr[no_nan_idx], fit_options.model_floor_sigma
+    )
+    if not model_is_usable(model_good, noise_floor):
         logger.warning(
             "The fitted Stokes I model cannot safely divide Q/U (see "
             "`rm_lite.utils.fitting.model_is_usable`); falling back to a flat "

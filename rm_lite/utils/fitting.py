@@ -57,6 +57,9 @@ class StokesIFitOptions:
     """Downweight channels far from the model; "linear" is plain least squares"""
     f_scale: float = 3.0
     """How far, in sigma, before a channel is downweighted. Flat from 1 to 10"""
+    model_floor_sigma: float = 1.0
+    """Reject a model dipping this many sigma below the band-averaged Stokes I
+    noise, falling back to a flat one (see `model_noise_floor`); 0 disables"""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -73,6 +76,11 @@ class StokesIFitOptions:
             raise ValueError(msg)
         if self.f_scale <= 0:
             msg = f"f_scale must be positive, got {self.f_scale}."
+            raise ValueError(msg)
+        if self.model_floor_sigma < 0:
+            msg = (
+                f"model_floor_sigma must be non-negative, got {self.model_floor_sigma}."
+            )
             raise ValueError(msg)
 
 
@@ -560,12 +568,36 @@ def check_snr_cut_has_error(
         raise ValueError(msg)
 
 
-def model_is_usable(model: NDArray[np.float64]) -> bool:
-    """Whether a Stokes I model can safely divide Q/U: finite, and not zero,
-    negative, or too small to divide by."""
-    return bool(
-        np.all(np.isfinite(model)) and np.min(model) > np.finfo(np.float64).tiny
-    )
+def model_noise_floor(
+    stokes_i_error_arr: NDArray[np.float64] | None, sigma: float
+) -> float:
+    """Flux `sigma` times the band-averaged Stokes I noise, `median(error)/sqrt(n)`.
+
+    Same noise `stokes_i_snr` measures against, so the floor and `snr_cut` are in
+    the same units. 0.0 without a usable error.
+    """
+    if stokes_i_error_arr is None or sigma <= 0:
+        return 0.0
+    err_arr = np.asarray(stokes_i_error_arr, dtype=np.float64)
+    usable = np.isfinite(err_arr) & (err_arr > 0)
+    n = int(usable.sum())
+    if not n:
+        return 0.0
+    return float(sigma * np.median(err_arr[usable]) / np.sqrt(n))
+
+
+def model_is_usable(model: NDArray[np.float64], noise_floor: float = 0.0) -> bool:
+    """Whether a Stokes I model can safely divide Q/U: finite, and never below
+    `noise_floor` or too small to divide by.
+
+    Dividing Q/U by a model and rescaling the FDF by its reference flux
+    amplifies them by `model(ref_freq) / min(model)`, which runs away once a fit
+    drives the model towards zero in a channel. The bare guard is float32's
+    smallest normal, since the model is taken down to the data's dtype before it
+    divides anything.
+    """
+    floor = max(float(noise_floor), float(np.finfo(np.float32).tiny))
+    return bool(np.all(np.isfinite(model)) and np.min(model) > floor)
 
 
 def flat_model_value(mean_flux: float) -> float:
@@ -849,6 +881,8 @@ class PixelFit(NamedTuple):
     """x pixel"""
     i_spec: NDArray[np.float64]
     """The pixel's Stokes I spectrum (unmasked), for the flat-model fallback."""
+    e_spec: NDArray[np.float64]
+    """The pixel's Stokes I error spectrum, for the model noise floor."""
     good: NDArray[np.bool_]
     """Finite-channel mask, for the flat-model fallback."""
     fit: FitResult | None
@@ -883,7 +917,7 @@ def _iter_pixel_fits(
                 stokes_i_error_arr=e_spec,
                 options=fit_options,
             )
-            yield PixelFit(y, x, i_spec, good, fit)
+            yield PixelFit(y, x, i_spec, e_spec, good, fit)
 
 
 class BlockPlanes(NamedTuple):
@@ -1018,7 +1052,8 @@ def _fit_stokes_i_block(
     per-pixel `ref_freq_hz` block when `has_ref_block`; the error cube is
     optional (see `_pixel_stokes_i_error`). A pixel that was not fitted (too few
     finite channels or SNR below `fit_options.snr_cut`) or whose model is
-    unusable (see `rm_lite.utils.fitting.model_is_usable`) falls back to a flat
+    unusable (dips below `fit_options.model_floor_sigma` times the pixel's
+    band-averaged noise, see `model_is_usable`) falls back to a flat
     model at its mean Stokes I, so it gets no spectral correction and its alpha,
     order, terms and errors stay NaN. A pixel with no finite channels stays NaN.
     """
@@ -1038,7 +1073,7 @@ def _fit_stokes_i_block(
     # The 1D fitter logs per fit and per failure. At cube scale that floods, so
     # quiet it to at least ERROR whatever the caller's log_level.
     with quiet_logs(max(log_level, logging.ERROR)):
-        for y, x, i_spec, good, fit in _iter_pixel_fits(
+        for y, x, i_spec, e_spec, good, fit in _iter_pixel_fits(
             i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options
         ):
             if not good.any():
@@ -1051,7 +1086,8 @@ def _fit_stokes_i_block(
             model = fit.stokes_i_model_func(
                 freq_arr_hz / pixel_ref_hz, *np.asarray(fit.popt)
             )
-            if not model_is_usable(model[good]):
+            noise_floor = model_noise_floor(e_spec[good], fit_options.model_floor_sigma)
+            if not model_is_usable(model[good], noise_floor):
                 n_rejected += 1
                 _write_flat_model(out, y, x, planes, mean_flux)
                 continue
@@ -1074,7 +1110,9 @@ def _fit_stokes_i_block(
             f"{n_rejected} of {cy * cx} pixels in this chunk fitted an unusable "
             "Stokes I model and fell back to a flat one (see "
             "`rm_lite.utils.fitting.model_is_usable`). Expect this on pixels with "
-            "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None."
+            "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None, and "
+            "on deconvolution artefacts, whose Stokes I spectrum passes through "
+            "zero and drives the fitted model down with it."
         )
     return out
 
