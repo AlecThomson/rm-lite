@@ -283,6 +283,7 @@ def test_snr_only_counts_usable_channels() -> None:
         ({"robust_loss": "arctan"}, "robust_loss must be 'cauchy' or 'linear'"),
         ({"f_scale": 0.0}, "f_scale must be positive"),
         ({"f_scale": -1.0}, "f_scale must be positive"),
+        ({"model_floor_sigma": -1.0}, "model_floor_sigma must be non-negative"),
     ],
 )
 def test_options_reject_nonsense(kwargs: dict[str, object], match: str) -> None:
