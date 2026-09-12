@@ -342,3 +342,48 @@ def test_stall_still_fires_when_the_peak_barely_moves() -> None:
     states = [progress.check(1.0 * 0.999**i, zeros, zeros) for i in range(8)]
     assert states[:5] == ["converging"] * 5
     assert states[5:] == ["stalled"] * 3
+
+
+def test_divergence_guard_stops_and_keeps_the_best_state(caplog) -> None:
+    """A runaway clean stops at its best peak rather than running to max_iter."""
+    n_phi, fwhm, noise = 201, 20.0, 1e-3
+    phi_arr_radm2 = np.linspace(-1000, 1000, n_phi)
+    phi_double_arr_radm2 = np.linspace(-2000, 2000, 2 * n_phi - 1)
+    sigma = fwhm / 2.355
+    # A sidelobe towering over the main lobe: subtracting a component injects
+    # more flux than it removes, so the residual peak climbs every iteration.
+    rmsf_spectrum = (
+        np.exp(-0.5 * (phi_double_arr_radm2 / sigma) ** 2)
+        + 6.0 * np.exp(-0.5 * ((phi_double_arr_radm2 - 400) / sigma) ** 2)
+    ).astype(np.complex128)
+    rng = np.random.default_rng(0)
+    spectrum = rng.normal(0, noise, n_phi) + 1j * rng.normal(0, noise, n_phi)
+    spectrum += 0.05 * np.exp(-0.5 * (phi_arr_radm2 / sigma) ** 2)
+
+    with caplog.at_level(logging.WARNING, logger="rm_lite"):
+        results = minor_loop(
+            MinorLoopArrays(
+                resid_fdf_spectrum_mask=np.ma.array(
+                    spectrum, mask=np.zeros(n_phi, bool)
+                ),
+                phi_arr_radm2=phi_arr_radm2,
+                phi_double_arr_radm2=phi_double_arr_radm2,
+                rmsf_spectrum=rmsf_spectrum,
+                rmsf_fwhm=fwhm,
+            ),
+            MinorLoopOptions(
+                max_iter=200,
+                gain=0.5,
+                mask_threshold=3 * noise,
+                stopping_threshold=noise,
+                update_mask=False,
+            ),
+        )
+
+    assert "diverging" in caplog.text
+    assert results.iter_count < 200
+    # Reverted to the best state, not left at the runaway one.
+    assert np.isclose(
+        float(np.nanmax(np.abs(results.resid_fdf_spectrum))),
+        float(np.nanmax(np.abs(spectrum))),
+    )
