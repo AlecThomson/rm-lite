@@ -316,9 +316,6 @@ def minor_loop(
     )
 
     logger.info(f"Starting minor loop... {mask_arr.sum()} pixels in the mask")
-    # One sweep of the mask before the guard can fire: Hogbom takes the peak
-    # channel down by `gain`, so the masked max only falls once every comparable
-    # channel has had a turn.
     # A blank spectrum has no peak to watch, and cannot run away.
     guard_divergence = bool(np.isfinite(resid_fdf_spectrum).any())
     progress = CleanProgress(model_fdf_spectrum.copy(), resid_fdf_spectrum.copy())
