@@ -92,9 +92,8 @@ class RMSynth3DResults(NamedTuple):
     (`rm_lite.utils.synthesis.derotate_to`, Brentjens & de Bruyn 2005 eq. 33)."""
     theoretical_noise: TheoreticalNoise
     """Theoretical FDF-domain noise from the weight array, uniform across the
-    cube unless the weights are per pixel. With a Stokes I model it is a lazy
-    per-pixel map carrying the same scaling as Q/U (see
-    `fractional_theoretical_noise`)."""
+    cube unless the weights are per pixel, or a Stokes I model makes it a lazy
+    per-pixel map (see `fractional_theoretical_noise`)."""
     stokes_i_model_cube: da.Array | None = None
     """Per-pixel Stokes I model cube, lazy, shape (n_freq, ny, nx). None unless a
     Stokes I cube or model was supplied to `rmsynth_3d`."""
@@ -206,9 +205,8 @@ def fractional_theoretical_noise(
 ) -> TheoreticalNoise:
     """Per-pixel FDF noise once Q/U have been divided by a Stokes I model.
 
-    Each channel's error is scaled by `ref_flux / model` as the signal is, so a
-    peak and its error rise together and their ratio stays an SNR. Reads the
-    model cube, so compute it alongside the FDF or the fit runs twice.
+    Scales each channel's error by `ref_flux / model`, as the signal is. Reads
+    the model cube, so compute it with the FDF or the fit runs twice.
     """
     complex_pol_error = error_from_weight(weight_arr)
     if np.ndim(complex_pol_error) == 1:
@@ -645,11 +643,7 @@ def rmsynth_3d(
             Defaults to 5.0.
         stokes_i_model_floor_sigma (float, optional): Reject a fitted model
             dipping this many sigma below the pixel's band-averaged Stokes I
-            noise, falling back to a flat one; without it a fit running to zero
-            in a channel amplifies Q/U without bound. At the SNR cut a real
-            power law bottoms out near a sigma on any band and a runaway fit at
-            1e-5 and below, so the default sits between them rather than at
-            either edge. 0 disables. Fit path only. Defaults to 0.01.
+            noise, falling back to a flat one. 0 disables. Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
             the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
             (default), "soft_l1" or "huber"; "linear" is plain least squares.

@@ -573,8 +573,8 @@ def model_noise_floor(
 ) -> float:
     """Flux `sigma` times the band-averaged noise, `median(error)/sqrt(n)`.
 
-    The noise `stokes_i_snr` measures against, so this and `snr_cut` share units.
-    0.0 without a usable error.
+    Same noise as `stokes_i_snr`, so this and `snr_cut` share units. 0.0 without
+    a usable error.
     """
     if stokes_i_error_arr is None or sigma <= 0:
         return 0.0
@@ -590,10 +590,9 @@ def model_is_usable(model: NDArray[np.float64], noise_floor: float = 0.0) -> boo
     """Whether a Stokes I model can safely divide Q/U: finite, and never below
     `noise_floor` or too small to divide by.
 
-    Dividing by the model and rescaling by its reference flux amplifies Q/U by
-    `model(ref_freq) / min(model)`, unbounded once a fit runs to zero in a
-    channel. The bare guard is float32's smallest normal, the dtype the model is
-    taken down to before it divides anything.
+    Dividing by it amplifies Q/U by `model(ref_freq) / min(model)`, unbounded
+    once a fit runs to zero in a channel. The bare guard is float32's smallest
+    normal, the dtype it divides in.
     """
     floor = max(float(noise_floor), float(np.finfo(np.float32).tiny))
     return bool(np.all(np.isfinite(model)) and np.min(model) > floor)
@@ -1110,8 +1109,7 @@ def _fit_stokes_i_block(
             "Stokes I model and fell back to a flat one (see "
             "`rm_lite.utils.fitting.model_is_usable`). Expect this on pixels with "
             "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None, and "
-            "on artefacts, whose Stokes I passes through zero and takes the "
-            "fitted model down with it."
+            "on artefacts, whose Stokes I passes through zero."
         )
     return out
 
