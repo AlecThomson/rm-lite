@@ -57,7 +57,7 @@ class StokesIFitOptions:
     """Downweight channels far from the model; "linear" is plain least squares"""
     f_scale: float = 3.0
     """How far, in sigma, before a channel is downweighted. Flat from 1 to 10"""
-    model_floor_sigma: float = 1.0
+    model_floor_sigma: float = 0.01
     """Reject a model dipping this many sigma below the band-averaged Stokes I
     noise, falling back to a flat one (see `model_noise_floor`); 0 disables"""
 

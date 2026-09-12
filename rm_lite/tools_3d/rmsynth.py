@@ -591,7 +591,7 @@ def rmsynth_3d(
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_snr_cut: float | None = 5.0,
-    stokes_i_model_floor_sigma: float = 1.0,
+    stokes_i_model_floor_sigma: float = 0.01,
     stokes_i_robust_loss: RobustLoss = "cauchy",
     stokes_i_f_scale: float = 3.0,
     compute_model_error: bool = False,
@@ -648,8 +648,11 @@ def rmsynth_3d(
         stokes_i_model_floor_sigma (float, optional): Reject a fitted model that
             dips this many sigma below the pixel's band-averaged Stokes I noise
             and fall back to a flat one. Without it a fit that runs to zero in a
-            channel gives Q/U an unbounded amplification. 0 disables. Fit path
-            only. Defaults to 1.0.
+            channel gives Q/U an unbounded amplification. The two populations are
+            five orders of magnitude apart, so the default sits in the gap rather
+            than near either edge: at the SNR cut a real power law bottoms out
+            around a sigma whatever the band, a runaway fit at 1e-5 sigma and
+            below. 0 disables. Fit path only. Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
             the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
             (default), "soft_l1" or "huber"; "linear" is plain least squares.
@@ -1070,7 +1073,7 @@ def rmsynth_3d_from_fits(
     fit_order: int = 2,
     fit_function: Literal["log", "linear"] = "log",
     stokes_i_snr_cut: float | None = 5.0,
-    stokes_i_model_floor_sigma: float = 1.0,
+    stokes_i_model_floor_sigma: float = 0.01,
     stokes_i_robust_loss: RobustLoss = "cauchy",
     stokes_i_f_scale: float = 3.0,
     compute_model_error: bool = False,
@@ -1120,7 +1123,7 @@ def rmsynth_3d_from_fits(
         fit_order (int, optional): See `rmsynth_3d`. Defaults to 2.
         fit_function ("log", "linear", optional): See `rmsynth_3d`. Defaults to "log".
         stokes_i_snr_cut (float | None, optional): See `rmsynth_3d`. Defaults to 5.0.
-        stokes_i_model_floor_sigma (float, optional): See `rmsynth_3d`. Defaults to 1.0.
+        stokes_i_model_floor_sigma (float, optional): See `rmsynth_3d`. Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): See `rmsynth_3d`. Defaults to "cauchy".
         stokes_i_f_scale (float, optional): See `rmsynth_3d`. Defaults to 3.0.
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.

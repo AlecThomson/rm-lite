@@ -614,6 +614,7 @@ def test_stokes_i_model_error_fit_order_zero():
 
 RACS_FREQ = np.arange(800e6, 1800e6, 8e6)
 WIDE_FREQ = np.geomspace(50e6, 10e9, 125)
+DEFAULT_FLOOR_SIGMA = StokesIFitOptions().model_floor_sigma
 
 
 @pytest.mark.parametrize(
@@ -643,8 +644,7 @@ def _at_snr(
     return cast("NDArray[np.float64]", model * scale)
 
 
-@pytest.mark.parametrize("alpha", [-0.8, -3.0])
-def test_noise_floor_accepts_a_barely_detected_real_spectrum(alpha: float) -> None:
+def test_noise_floor_accepts_a_barely_detected_real_spectrum() -> None:
     """A real spectrum at the SNR cut passes even though it is under the
     per-channel noise, which is why the floor is band-averaged.
 
@@ -652,25 +652,39 @@ def test_noise_floor_accepts_a_barely_detected_real_spectrum(alpha: float) -> No
     a per-channel floor would reject every faint real source.
     """
     error_arr = np.full(RACS_FREQ.size, 1.0)
-    model = _at_snr((RACS_FREQ / RACS_FREQ.mean()) ** alpha, error_arr, 5.0)
+    model = _at_snr((RACS_FREQ / RACS_FREQ.mean()) ** -3.0, error_arr, 5.0)
     assert model.min() < error_arr.min(), "not the faint regime this is testing"
-    assert model_is_usable(model, model_noise_floor(error_arr, 1.0))
+    assert model_is_usable(model, model_noise_floor(error_arr, DEFAULT_FLOOR_SIGMA))
 
 
-def test_noise_floor_rejects_a_faint_source_steeper_than_its_own_snr() -> None:
-    """The floor's one real limit, pinned rather than left to be discovered.
+# Fractional bandwidth through to a factor of 200, since the floor must not be
+# tuned to one instrument's band.
+@pytest.mark.parametrize(
+    ("label", "nu_min", "nu_max"),
+    [
+        ("1.4:1", 744e6, 1032e6),
+        ("2:1", 856e6, 1712e6),
+        ("4:1", 1.0e9, 4.0e9),
+        ("200:1", 50e6, 10.0e9),
+    ],
+)
+@pytest.mark.parametrize("alpha", [-0.8, -2.0, -3.5])
+def test_noise_floor_spares_real_spectra_on_any_band(
+    label: str, nu_min: float, nu_max: float, alpha: float
+) -> None:
+    """The default floor rejects no real power law on any band, at the SNR cut.
 
-    It caps the Q/U amplification at the pixel's own Stokes I SNR, so a spectrum
-    spanning more than that across the band loses the fit and takes the flat
-    fallback. Needs both a wide band and a source at the SNR cut: over a
-    fractional bandwidth like RACS's no real spectral index gets close. Set
-    `model_floor_sigma=0` to fit these anyway, and read `peak_pi_error` for what
-    dividing by a model that faint does to the noise.
+    The faintest a pixel gets fitted at, and alpha -3.5 is steeper than anything
+    real, so this is the corner the floor has to clear. It bottoms out near a
+    sigma here; a runaway fit is five orders of magnitude further down, which is
+    the gap the default sits in. Tying the floor to one band's dynamic range
+    instead would reject ordinary spectral indices on a wider one.
     """
-    error_arr = np.full(WIDE_FREQ.size, 1.0)
-    model = _at_snr((WIDE_FREQ / WIDE_FREQ.mean()) ** -2.5, error_arr, 5.0)
-    assert not model_is_usable(model, model_noise_floor(error_arr, 1.0))
-    assert model_is_usable(model, model_noise_floor(error_arr, 0.0))
+    freq = np.linspace(nu_min, nu_max, 288)
+    error_arr = np.full(freq.size, 1.0)
+    model = _at_snr((freq / np.median(freq)) ** alpha, error_arr, 5.0)
+    floor = model_noise_floor(error_arr, DEFAULT_FLOOR_SIGMA)
+    assert model_is_usable(model, floor), f"{label}, alpha {alpha}"
 
 
 def test_model_noise_floor_tracks_the_error_and_sigma() -> None:
