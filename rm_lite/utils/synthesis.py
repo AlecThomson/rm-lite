@@ -61,8 +61,8 @@ POLARISATION_BIAS_FACTOR = 2.3
 class FWHM(NamedTuple):
     fwhm_rmsf_radm2: float
     """The FWHM of the RMSF main lobe"""
-    d_lambda_sq_max_m2: float
-    """The maximum difference in lambda^2 values"""
+    d_lambda_sq_rms_m2: float
+    """The RMS spacing between lambda^2 samples"""
     lambda_sq_range_m2: float
     """The range of lambda^2 values"""
 
@@ -1627,7 +1627,7 @@ def compute_phi_grid(
         ValueError: If neither d_phi_radm2 nor n_samples is given.
     """
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
-    fwhm_rmsf_radm2, d_lambda_sq_max_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
+    fwhm_rmsf_radm2, d_lambda_sq_rms_m2, _ = get_fwhm_rmsf(lambda_sq_arr_m2)
 
     if fdf_options.d_phi_radm2 is not None:
         d_phi_radm2 = fdf_options.d_phi_radm2
@@ -1639,7 +1639,7 @@ def compute_phi_grid(
 
     if fdf_options.phi_max_radm2 is None:
         # Force the minimum phiMax to 10 FWHM
-        phi_max_radm2 = max(np.sqrt(3.0) / d_lambda_sq_max_m2, fwhm_rmsf_radm2 * 10.0)
+        phi_max_radm2 = max(np.sqrt(3.0) / d_lambda_sq_rms_m2, fwhm_rmsf_radm2 * 10.0)
     else:
         phi_max_radm2 = fdf_options.phi_max_radm2
 
@@ -1758,12 +1758,14 @@ def get_fwhm_rmsf(
         super_resolution (bool, optional): Use Cotton+Rudnick superresolution. Defaults to False.
 
     Returns:
-        fwhm_rmsf_arr: FWHM of the RMSF main lobe, maximum difference in lambda^2 values, range of lambda^2 values
+        fwhm_rmsf_arr: FWHM of the RMSF main lobe, RMS lambda^2 spacing, range of lambda^2 values
     """
     lambda_sq_range_m2 = float(
         np.nanmax(lambda_sq_arr_m2) - np.nanmin(lambda_sq_arr_m2)
     )
-    d_lambda_sq_max_m2 = np.nanmax(np.abs(np.diff(lambda_sq_arr_m2)))
+    # RMS, not max: that is where Brentjens & de Bruyn 2005 eq. 63 puts the 50%
+    # point once the channels are unequal.
+    d_lambda_sq_rms_m2 = float(np.sqrt(np.nanmean(np.diff(lambda_sq_arr_m2) ** 2)))
 
     # Set the Faraday depth range
     fwhm_rmsf_radm2 = float(
@@ -1771,7 +1773,7 @@ def get_fwhm_rmsf(
     )  # Dickey+2019 theoretical RMSF width
     return FWHM(
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
-        d_lambda_sq_max_m2=d_lambda_sq_max_m2,
+        d_lambda_sq_rms_m2=d_lambda_sq_rms_m2,
         lambda_sq_range_m2=lambda_sq_range_m2,
     )
 

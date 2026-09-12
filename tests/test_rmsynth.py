@@ -87,7 +87,7 @@ def test_get_fwhm_rmsf(racs_data, racs_model):
     fwhm: FWHM = get_fwhm_rmsf(racs_data.lsq)
     assert np.isclose(fwhm.fwhm_rmsf_radm2, racs_model.fwhm, atol=1)
     assert np.isclose(
-        fwhm.d_lambda_sq_max_m2, np.nanmax(np.abs(np.diff(racs_data.lsq)))
+        fwhm.d_lambda_sq_rms_m2, np.sqrt(np.nanmean(np.diff(racs_data.lsq) ** 2))
     )
     assert np.isclose(
         fwhm.lambda_sq_range_m2,
@@ -450,3 +450,28 @@ def test_stokes_i_terms_empty_for_a_supplied_model():
         "ref_freq_hz",
         "fit_function",
     ]
+
+
+def test_phi_max_matches_brentjens_when_channels_are_equal() -> None:
+    """The RMS rule must be the published sqrt(3)/dlambda^2 for a uniform band."""
+    lsq = np.linspace(0.03, 0.08, 125)
+    fwhm = get_fwhm_rmsf(lsq)
+    spacing = float(np.diff(lsq)[0])
+    assert np.isclose(np.sqrt(3.0) / fwhm.d_lambda_sq_rms_m2, np.sqrt(3.0) / spacing)
+
+
+def test_phi_max_sits_between_the_widest_and_narrowest_channel() -> None:
+    """Over a wide fractional band the two extremes disagree; take neither."""
+    lsq = (299792458.0 / np.linspace(800e6, 1800e6, 124)) ** 2
+    spacings = np.abs(np.diff(lsq))
+    phi_max = np.sqrt(3.0) / get_fwhm_rmsf(lsq).d_lambda_sq_rms_m2
+    assert np.sqrt(3.0) / spacings.max() < phi_max < np.sqrt(3.0) / spacings.min()
+
+
+def test_phi_max_keeps_half_the_band_averaged_response() -> None:
+    """Brentjens & de Bruyn's criterion: sensitivity is still about 50% at phi_max."""
+    lsq = (299792458.0 / np.linspace(800e6, 1800e6, 124)) ** 2
+    spacings = np.abs(np.diff(lsq))
+    phi_max = np.sqrt(3.0) / get_fwhm_rmsf(lsq).d_lambda_sq_rms_m2
+    response = float(np.mean(np.sinc(phi_max * spacings / np.pi)))
+    assert 0.5 <= response <= 0.7
