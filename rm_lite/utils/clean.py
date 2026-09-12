@@ -37,7 +37,7 @@ SelectionType: TypeAlias = Literal["snr", "hybrid"]
 
 
 class CleanState(StrEnum):
-    """What a CLEAN loop is doing: still working, running away, or grinding."""
+    """What a CLEAN loop is doing"""
 
     CONVERGING = "converging"
     DIVERGING = "diverging"
