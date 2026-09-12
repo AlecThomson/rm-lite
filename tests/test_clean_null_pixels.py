@@ -10,6 +10,7 @@ import pytest
 from numpy.typing import NDArray
 from rm_lite.utils import clean as clean_mod
 from rm_lite.utils.clean import (
+    CleanProgress,
     MinorLoopArrays,
     MinorLoopOptions,
     MultiscaleOptions,
@@ -324,3 +325,20 @@ def test_divergence_guard_never_fires_on_a_converging_clean(caplog) -> None:
                 )
 
     assert "diverging" not in caplog.text
+
+
+def test_stall_count_resets_while_the_peak_keeps_falling() -> None:
+    """A loop halving its peak every iteration is converging, not stalled."""
+    zeros = np.zeros(4, dtype=complex)
+    progress = CleanProgress(zeros, zeros, stall_patience=5)
+    peaks = [1.0 * 0.5**i for i in range(8)]
+    assert all(progress.check(p, zeros, zeros) == "converging" for p in peaks)
+
+
+def test_stall_still_fires_when_the_peak_barely_moves() -> None:
+    """A peak falling 0.1% an iteration stalls once patience runs out."""
+    zeros = np.zeros(4, dtype=complex)
+    progress = CleanProgress(zeros, zeros, stall_patience=5)
+    states = [progress.check(1.0 * 0.999**i, zeros, zeros) for i in range(8)]
+    assert states[:5] == ["converging"] * 5
+    assert states[5:] == ["stalled"] * 3

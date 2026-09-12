@@ -75,14 +75,11 @@ class CleanProgress:
     ) -> Literal["converging", "diverging", "stalled"]:
         """Record this iteration's peak, and say whether the loop should stop."""
         if peak < self.best_peak:
+            improved = peak < self.best_peak * (1 - self.stall_rel_improvement)
             self.best_peak = peak
             self.model_fdf_spectrum = model_fdf_spectrum.copy()
             self.resid_fdf_spectrum = resid_fdf_spectrum.copy()
-            self.stall_count = (
-                0
-                if peak < self.best_peak * (1 - self.stall_rel_improvement)
-                else self.stall_count + 1
-            )
+            self.stall_count = 0 if improved else self.stall_count + 1
         elif peak - self.best_peak > self.divergence_fraction * self.best_peak:
             return "diverging"
         else:
