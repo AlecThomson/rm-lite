@@ -304,10 +304,19 @@ def target_chunk_mb_for_worker(
 ) -> float:
     """The `target_chunk_mb` a worker of this size can afford.
 
-    One task peaks at a multiple of the target, measured in
-    `tests/test_tools_3d_memory.py`, and a worker runs one task per thread.
+    One task peaks at a multiple of the target, and a worker runs one task per
+    thread.
     """
-    factor = 9.0 if debias else 3.6 if per_pixel_rmsf else 2.5
+    # MB of peak per MB of target, measured by the budget arm of
+    # tests/test_tools_3d_memory.py and rounded up from 1.9 / 3.0 / 7.8.
+    factors = {"base": 2.5, "per_pixel_rmsf": 3.6, "debias": 9.0}
+    factor = (
+        factors["debias"]
+        if debias
+        else factors["per_pixel_rmsf"]
+        if per_pixel_rmsf
+        else factors["base"]
+    )
     return worker_memory_mb / (threads_per_worker * factor)
 
 

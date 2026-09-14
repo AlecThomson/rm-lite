@@ -102,19 +102,18 @@ def zarr_store_layout(
     chunk_budget: tuple[int, int],
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
 ) -> tuple[tuple[int, int], int]:
-    """Chunk and shard rows for a cube's zarr store, from `chunk_budget`'s area.
-
-    One task owns a whole shard, so the shard height is also the height of the
-    band read out of the FITS cube, and a task holds that band about three times
-    over: the raw read, zarr's encode buffer, and a copy between them. Hence the
-    third of the target.
-    """
+    """Chunk and shard rows for a cube's zarr store, from `chunk_budget`'s area."""
+    # One task owns a whole shard, so the shard height is also the height of the
+    # band read out of the FITS cube, and a task holds that band three times
+    # over: the raw read, zarr's encode buffer, and a copy between them. Bounded
+    # by `test_zarr_conversion_peak_stays_inside_the_target`.
+    zarr_mem_factor = 3
     shard_rows, _ = spatial_chunk_size(
         n_freq=n_freq,
         ny=ny,
         nx=nx,
         itemsize=itemsize,
-        target_chunk_mb=target_chunk_mb / 3,
+        target_chunk_mb=target_chunk_mb / zarr_mem_factor,
     )
     return tile_spatial_chunk(chunk_budget, shard_rows, nx), shard_rows
 
