@@ -28,8 +28,7 @@ from rm_lite.utils.dask_io import (
     freq_arr_hz_from_header,
     read_cube_channel_chunks,
     read_cube_dask,
-    spatial_chunk_size,
-    tile_spatial_chunk,
+    zarr_store_layout,
 )
 from rm_lite.utils.fitting import (
     RobustLoss,
@@ -294,6 +293,51 @@ def _shared_rmsf(
     # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is complex at
     # runtime (built from a finufft complex output).
     return np.asarray(rmsf_result.rmsf_cube, dtype=dtype)
+
+
+# Peak memory one task reaches, as a multiple of `target_chunk_mb`, measured by
+# `tests/test_tools_3d_memory.py`: the same file that pins them is the only
+# other reader. The worst applicable one wins.
+PEAK_MEMORY_FACTORS = {
+    "base": 2.5,
+    "per_pixel_rmsf": 3.6,
+    "debias": 9.0,
+}
+
+
+def chunk_target_for_budget(
+    worker_memory_mb: float,
+    threads_per_worker: int = 1,
+    *,
+    per_pixel_rmsf: bool = False,
+    debias: bool = False,
+) -> float:
+    """Largest `target_chunk_mb` that keeps one worker inside its memory.
+
+    `target_chunk_mb` sizes one chunk; a task costs a multiple of it, and a
+    worker runs `threads_per_worker` of them at once. This inverts that, so a
+    caller who knows what its workers have can ask what to set.
+
+    Args:
+        worker_memory_mb (float): Memory one worker has, in MB.
+        threads_per_worker (int, optional): Tasks a worker runs at once.
+            Defaults to 1.
+        per_pixel_rmsf (bool, optional): Whether every pixel gets its own RMSF,
+            which `rmsynth_3d` turns on itself when pixels weight channels
+            differently. Defaults to False.
+        debias (bool, optional): Whether the debiased FDF is computed, which
+            reads neighbouring pixels and costs the most of anything here.
+            Defaults to False.
+
+    Returns:
+        float: The `target_chunk_mb` to use.
+    """
+    factor = PEAK_MEMORY_FACTORS["base"]
+    if per_pixel_rmsf:
+        factor = max(factor, PEAK_MEMORY_FACTORS["per_pixel_rmsf"])
+    if debias:
+        factor = max(factor, PEAK_MEMORY_FACTORS["debias"])
+    return worker_memory_mb / (threads_per_worker * factor)
 
 
 def fdf_spatial_chunk(
@@ -1017,11 +1061,16 @@ def _convert_cubes_to_zarr(
     cube_files: dict[str, str | Path | None],
     spatial_chunk: tuple[int, int],
     shard_rows: int,
+    target_chunk_mb: float,
 ) -> dict[str, Path | None]:
     """Copy each cube to a zarr store beside it, chunked for the FDF.
 
     `cube.fits` gives `cube.zarr`, so a store is always named after the cube it
     came from and two cubes can never land on the same one.
+
+    `shard_rows` is sized against Stokes Q, so `target_chunk_mb` goes along too:
+    a cube with more channels or a wider dtype would otherwise read a band that
+    much larger than Q's, and the worst cube sets the real peak.
 
     Rewritten every run rather than reused: a store that no longer matches its
     cube would be used without anyone noticing. Convert once with
@@ -1040,6 +1089,7 @@ def _convert_cubes_to_zarr(
             Path(path).with_suffix(".zarr"),
             spatial_chunk=spatial_chunk,
             shard_rows=shard_rows,
+            target_chunk_mb=target_chunk_mb,
         )
     return converted
 
@@ -1161,21 +1211,16 @@ def rmsynth_3d_from_fits(
     spatial_u_file: str | Path = stokes_u_file
     spatial_i_file: str | Path | None = stokes_i_file
     if convert_to_zarr:
-        # One shard per band the FITS reader would have read anyway, so a cube
-        # chunked more finely than that is still a handful of files rather than one
-        # per chunk.
-        shard_rows, _ = spatial_chunk_size(
+        # A zarr chunk is its own object, so the full-width rule `spatial_chunk`
+        # was sized under does not apply to the store. Same area, so the FDF
+        # chunk costs what it did, but a region read costs a tile not a stripe.
+        store_chunk, shard_rows = zarr_store_layout(
             n_freq=int(stokes_q.shape[0]),
             ny=int(stokes_q.shape[1]),
             nx=int(stokes_q.shape[2]),
             itemsize=stokes_q.dtype.itemsize,
+            chunk_budget=spatial_chunk,
             target_chunk_mb=target_chunk_mb,
-        )
-        # A zarr chunk is its own object, so the full-width rule `spatial_chunk`
-        # was sized under does not apply to the store. Same area, so the FDF
-        # chunk costs what it did, but a region read costs a tile not a stripe.
-        store_chunk = tile_spatial_chunk(
-            spatial_chunk, shard_rows, int(stokes_q.shape[2])
         )
 
         converted = _convert_cubes_to_zarr(
@@ -1190,6 +1235,7 @@ def rmsynth_3d_from_fits(
             },
             store_chunk,
             shard_rows,
+            target_chunk_mb,
         )
         # Only the spatial reads move to the stores. The per-channel noise
         # estimates want whole planes, which a spatially chunked store can only

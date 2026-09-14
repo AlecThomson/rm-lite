@@ -24,6 +24,7 @@ import sys
 import numpy as np
 import pytest
 from astropy.io import fits
+from rm_lite.tools_3d.rmsynth import PEAK_MEMORY_FACTORS
 
 WORKER = pathlib.Path(__file__).parent / "_dask_memory_worker.py"
 
@@ -84,6 +85,95 @@ MAX_PEAK_PER_TARGET_MB = 20
 
 def _cube_mb(side: int) -> float:
     return FITS_N_FREQ * side**2 * 4 / 1024**2
+
+
+# --------------------------------------------------------------- budget arm
+
+BUDGET_WORKER = pathlib.Path(__file__).parent / "_budget_memory_worker.py"
+
+# Small and coarse, so RM-CLEAN over every pixel stays quick, but with a long
+# enough Faraday axis that the chunk dominates the fixed cost at the larger
+# target.
+BUDGET_N_FREQ = 48
+BUDGET_SIDE = 256
+BUDGET_D_PHI_RADM2 = 2.0
+BUDGET_PHI_MAX_RADM2 = 400.0
+# Two targets, because peak is a fixed cost plus a multiple of the target and
+# only the slope between them is the multiple. One target alone measures the
+# interpreter.
+BUDGET_TARGETS_MB = (16.0, 64.0)
+# Measured slopes are 1.9 MB of peak per MB of target for the default
+# configuration and 3.0 once every pixel has its own RMSF, which is what flint's
+# linmos weights produce. The bars are the factors `chunk_target_for_budget`
+# divides by, so a regression past one of them silently under-budgets a run.
+BUDGET_MAX_SLOPE = {
+    "clean,maps": PEAK_MEMORY_FACTORS["base"],
+    "clean,maps,per_pixel_rmsf": PEAK_MEMORY_FACTORS["per_pixel_rmsf"],
+    "clean,maps,debias": PEAK_MEMORY_FACTORS["debias"],
+}
+
+
+@pytest.fixture(scope="module")
+def budget_fits_cubes(tmp_path_factory) -> tuple[pathlib.Path, pathlib.Path]:
+    """One Q/U pair small enough to RM-CLEAN twice per configuration."""
+    tmpdir = tmp_path_factory.mktemp("budget_memory")
+    rng = np.random.default_rng(1)
+    header = fits.Header()
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = 8.0e8
+    header["CDELT3"] = 1.0e6
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+    paths = []
+    for stokes in ("q", "u"):
+        path = tmpdir / f"{stokes}.fits"
+        data = rng.normal(0, 1, (1, BUDGET_N_FREQ, BUDGET_SIDE, BUDGET_SIDE))
+        fits.PrimaryHDU(data.astype(">f4"), header=header).writeto(path)
+        paths.append(path)
+    return paths[0], paths[1]
+
+
+def _budget_peak_mb(
+    paths: tuple[pathlib.Path, pathlib.Path], target_chunk_mb: float, options: str
+) -> float:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BUDGET_WORKER),
+            str(paths[0]),
+            str(paths[1]),
+            str(target_chunk_mb),
+            str(BUDGET_D_PHI_RADM2),
+            str(BUDGET_PHI_MAX_RADM2),
+            options,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(result.stdout.strip().splitlines()[-1]) / 1024
+
+
+@pytest.mark.parametrize("options", sorted(BUDGET_MAX_SLOPE))
+def test_peak_memory_per_target_matches_the_budget_function(budget_fits_cubes, options):
+    """Peak grows by no more than the multiple `chunk_target_for_budget` assumes.
+
+    That function turns a worker's memory into a `target_chunk_mb`, so it is only
+    as good as these numbers. If a configuration starts costing more per MB of
+    target than assumed here, a budget derived from it sends a run to a cluster
+    that cannot hold it.
+    """
+    small_target, large_target = BUDGET_TARGETS_MB
+    small = _budget_peak_mb(budget_fits_cubes, small_target, options)
+    large = _budget_peak_mb(budget_fits_cubes, large_target, options)
+
+    slope = (large - small) / (large_target - small_target)
+    assert slope <= BUDGET_MAX_SLOPE[options], (
+        f"{options} costs {slope:.2f} MB of peak per MB of target "
+        f"({small:.0f} MB at {small_target:g} MB, {large:.0f} MB at "
+        f"{large_target:g} MB), over the {BUDGET_MAX_SLOPE[options]} "
+        "`chunk_target_for_budget` budgets for"
+    )
 
 
 @pytest.fixture(scope="module")

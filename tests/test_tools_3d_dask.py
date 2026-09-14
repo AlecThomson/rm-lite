@@ -46,6 +46,7 @@ from rm_lite.utils.dask_io import (
     spatial_chunk_size,
     tile_spatial_chunk,
     write_zarr_group,
+    zarr_store_layout,
 )
 from rm_lite.utils.synthesis import (
     FDFOptions,
@@ -534,11 +535,15 @@ def test_zarr_layout_holds_at_every_cube_size(n_freq, n_phi_double, ny, nx):
     also stay inside the memory budget it was sized for, and must not pad the
     image edge with columns that are written but never read.
     """
-    band_rows, _ = spatial_chunk_size(
-        n_freq=n_freq, ny=ny, nx=nx, itemsize=4, target_chunk_mb=256
-    )
     budget = fdf_spatial_chunk(n_phi_double, np.dtype("complex64"), 256, ny, nx)
-    cy, cx = tile_spatial_chunk(budget, band_rows, nx)
+    (cy, cx), band_rows = zarr_store_layout(
+        n_freq=n_freq,
+        ny=ny,
+        nx=nx,
+        itemsize=4,
+        chunk_budget=budget,
+        target_chunk_mb=256,
+    )
     shard_rows = min(ny, max(cy, band_rows - band_rows % cy))
     shards = (n_freq, shard_rows, math.ceil(nx / cx) * cx)
 

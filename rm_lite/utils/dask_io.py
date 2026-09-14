@@ -25,6 +25,12 @@ from rm_lite.utils.logging import logger
 
 DEFAULT_TARGET_CHUNK_MB = 256
 
+# A `fits_cube_to_zarr` write task holds its band this many times over: the raw
+# read, zarr's encode buffer, and a copy between them. Measured, not derived,
+# so `zarr_store_layout` divides a budget by it and
+# `rm_lite.tools_3d.rmsynth.chunk_target_for_budget` multiplies back.
+ZARR_WRITE_MEMORY_FACTOR = 3
+
 
 def spatial_chunk_size(
     n_freq: int,
@@ -92,6 +98,47 @@ def tile_spatial_chunk(
     # Give the freed area back to rows: fewer chunks, same memory.
     rows = max(1, min(band_rows, area // cols))
     return rows, cols
+
+
+def zarr_store_layout(
+    n_freq: int,
+    ny: int,
+    nx: int,
+    itemsize: int,
+    chunk_budget: tuple[int, int],
+    target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
+) -> tuple[tuple[int, int], int]:
+    """Chunk and shard rows for a cube's zarr store, within a memory budget.
+
+    One write task owns a whole shard, so the shard height is also the height of
+    the band read out of the FITS cube, and that band is what the task pays for:
+    `ZARR_WRITE_MEMORY_FACTOR` times over. Sizing the shard at `target_chunk_mb`
+    would therefore cost several times it, so the budget is divided first.
+
+    `chunk_budget` is the `(cy, cx)` area the reader wants, which
+    `tile_spatial_chunk` reshapes to a tile of no greater area.
+
+    Args:
+        n_freq (int): Size of the (unchunked) spectral axis.
+        ny (int): Full image height in pixels.
+        nx (int): Full image width in pixels.
+        itemsize (int): Size in bytes of one array element.
+        chunk_budget (tuple[int, int]): `(cy, cx)` area to reshape into a tile.
+        target_chunk_mb (float, optional): Memory one write task may use, in MB.
+            Defaults to 256.
+
+    Returns:
+        tuple[tuple[int, int], int]: The store's `(cy, cx)` chunk, and the rows
+        per shard.
+    """
+    shard_rows, _ = spatial_chunk_size(
+        n_freq=n_freq,
+        ny=ny,
+        nx=nx,
+        itemsize=itemsize,
+        target_chunk_mb=target_chunk_mb / ZARR_WRITE_MEMORY_FACTOR,
+    )
+    return tile_spatial_chunk(chunk_budget, shard_rows, nx), shard_rows
 
 
 def channel_chunk_size(
@@ -302,6 +349,7 @@ def fits_cube_to_zarr(
     store: str | Path,
     spatial_chunk: tuple[int, int],
     shard_rows: int | None = None,
+    target_chunk_mb: float | None = None,
     overwrite: bool = True,
     compressors: Sequence[Any] = (
         BloscCodec(cname="lz4", clevel=5, shuffle=BloscShuffle.shuffle),
@@ -335,6 +383,10 @@ def fits_cube_to_zarr(
         spatial_chunk (tuple[int, int]): `(cy, cx)` chunk shape.
         shard_rows (int | None, optional): Rows of chunks per shard. Defaults to
             None, one file per chunk.
+        target_chunk_mb (float | None, optional): Memory one write task may use,
+            in MB. Caps `shard_rows` against this cube's own shape and dtype, so
+            a shard sized for another cube cannot overshoot here. Defaults to
+            None, taking `shard_rows` as given.
         overwrite (bool, optional): Overwrite an existing store. Defaults to True.
         compressors (Sequence[Any], optional): Zarr codecs for the store.
             Defaults to blosc lz4 with shuffle, which reads back several times
@@ -345,6 +397,19 @@ def fits_cube_to_zarr(
     """
     (n_freq, ny, nx), dtype, header = _cube_meta(fits_file)
     cy, cx = spatial_chunk
+
+    if shard_rows is not None and target_chunk_mb is not None:
+        # Caller-sized shards come from one cube; this one may have more
+        # channels or a wider dtype, so re-derive against its own shape and
+        # keep whichever band is smaller.
+        own_rows, _ = spatial_chunk_size(
+            n_freq=n_freq,
+            ny=ny,
+            nx=nx,
+            itemsize=dtype.itemsize,
+            target_chunk_mb=target_chunk_mb / ZARR_WRITE_MEMORY_FACTOR,
+        )
+        shard_rows = min(shard_rows, own_rows)
 
     shards = None
     write_rows = cy
