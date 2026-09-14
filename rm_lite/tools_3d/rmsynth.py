@@ -295,48 +295,19 @@ def _shared_rmsf(
     return np.asarray(rmsf_result.rmsf_cube, dtype=dtype)
 
 
-# Peak memory one task reaches, as a multiple of `target_chunk_mb`, measured by
-# `tests/test_tools_3d_memory.py`: the same file that pins them is the only
-# other reader. The worst applicable one wins.
-PEAK_MEMORY_FACTORS = {
-    "base": 2.5,
-    "per_pixel_rmsf": 3.6,
-    "debias": 9.0,
-}
-
-
-def chunk_target_for_budget(
+def target_chunk_mb_for_worker(
     worker_memory_mb: float,
     threads_per_worker: int = 1,
     *,
     per_pixel_rmsf: bool = False,
     debias: bool = False,
 ) -> float:
-    """Largest `target_chunk_mb` that keeps one worker inside its memory.
+    """The `target_chunk_mb` a worker of this size can afford.
 
-    `target_chunk_mb` sizes one chunk; a task costs a multiple of it, and a
-    worker runs `threads_per_worker` of them at once. This inverts that, so a
-    caller who knows what its workers have can ask what to set.
-
-    Args:
-        worker_memory_mb (float): Memory one worker has, in MB.
-        threads_per_worker (int, optional): Tasks a worker runs at once.
-            Defaults to 1.
-        per_pixel_rmsf (bool, optional): Whether every pixel gets its own RMSF,
-            which `rmsynth_3d` turns on itself when pixels weight channels
-            differently. Defaults to False.
-        debias (bool, optional): Whether the debiased FDF is computed, which
-            reads neighbouring pixels and costs the most of anything here.
-            Defaults to False.
-
-    Returns:
-        float: The `target_chunk_mb` to use.
+    One task peaks at a multiple of the target, measured in
+    `tests/test_tools_3d_memory.py`, and a worker runs one task per thread.
     """
-    factor = PEAK_MEMORY_FACTORS["base"]
-    if per_pixel_rmsf:
-        factor = max(factor, PEAK_MEMORY_FACTORS["per_pixel_rmsf"])
-    if debias:
-        factor = max(factor, PEAK_MEMORY_FACTORS["debias"])
+    factor = 9.0 if debias else 3.6 if per_pixel_rmsf else 2.5
     return worker_memory_mb / (threads_per_worker * factor)
 
 
@@ -1061,16 +1032,11 @@ def _convert_cubes_to_zarr(
     cube_files: dict[str, str | Path | None],
     spatial_chunk: tuple[int, int],
     shard_rows: int,
-    target_chunk_mb: float,
 ) -> dict[str, Path | None]:
     """Copy each cube to a zarr store beside it, chunked for the FDF.
 
     `cube.fits` gives `cube.zarr`, so a store is always named after the cube it
     came from and two cubes can never land on the same one.
-
-    `shard_rows` is sized against Stokes Q, so `target_chunk_mb` goes along too:
-    a cube with more channels or a wider dtype would otherwise read a band that
-    much larger than Q's, and the worst cube sets the real peak.
 
     Rewritten every run rather than reused: a store that no longer matches its
     cube would be used without anyone noticing. Convert once with
@@ -1089,7 +1055,6 @@ def _convert_cubes_to_zarr(
             Path(path).with_suffix(".zarr"),
             spatial_chunk=spatial_chunk,
             shard_rows=shard_rows,
-            target_chunk_mb=target_chunk_mb,
         )
     return converted
 
@@ -1235,7 +1200,6 @@ def rmsynth_3d_from_fits(
             },
             store_chunk,
             shard_rows,
-            target_chunk_mb,
         )
         # Only the spatial reads move to the stores. The per-channel noise
         # estimates want whole planes, which a spatially chunked store can only

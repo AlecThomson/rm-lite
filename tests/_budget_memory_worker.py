@@ -1,23 +1,13 @@
-"""Subprocess worker measuring peak memory for one pipeline configuration.
+"""Measures how many times `target_chunk_mb` one pipeline configuration peaks at.
 
-Companion to `_fits_memory_worker.py`, which pins that peak scales with
-`target_chunk_mb` rather than cube size. This one answers the other question:
-*how many times* the target a given set of options costs, so
-`rm_lite.tools_3d.rmsynth.chunk_target_for_budget` can invert it.
+Options are additive: `convert` (inputs to zarr first), `clean`,
+`per_pixel_rmsf`, `maps` (moment and peak maps), `cubes` (write the FDF cube),
+`debias`. With neither `maps` nor `cubes` the FDF cube is written anyway, or the
+lazy graph never runs.
 
-Configurations rather than isolated stages, because a configuration is what a
-caller chooses and what the budget function is asked about. What a worker needs
-to survive is the largest live set the run reaches, wherever that happens.
-
-Options, additive: `convert` converts the inputs to zarr first, `clean` runs
-RM-CLEAN, `per_pixel_rmsf` gives every pixel its own RMSF, `maps` computes the
-Faraday moment and peak maps, `cubes` writes the FDF cube, `debias` computes the
-debiased FDF. With neither `maps` nor `cubes`, the FDF cube is written, since
-something has to be computed or the lazy graph never runs.
-
-Reports the `tracemalloc` peak for the reason `_fits_memory_worker` gives: RSS
-on glibc keeps freed block buffers and climbs with the number of chunks, i.e.
-the opposite of the property under test. Prints the peak in kB.
+Prints the `tracemalloc` peak in kB. RSS is no good here: glibc keeps freed
+buffers, so it climbs with the number of chunks, the opposite of what is under
+test.
 """
 
 from __future__ import annotations
@@ -78,7 +68,7 @@ def main() -> None:
         if "cubes" in options or not targets:
             targets["fdf"] = fdf_cube
 
-        # Written rather than computed: `.compute()` would assemble the whole
+        # `.compute()` would assemble the whole
         # result in this process whatever the chunking, which is not what the
         # pipeline does and would swamp the measurement.
         write_zarr_group(f"{tmpdir}/out.zarr", targets)

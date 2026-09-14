@@ -26,12 +26,11 @@ from rm_lite.tools_3d.rmclean import (
     run_rmclean_from_synth,
 )
 from rm_lite.tools_3d.rmsynth import (
-    PEAK_MEMORY_FACTORS,
     _match_chunks_to_fdf,
-    chunk_target_for_budget,
     fdf_spatial_chunk,
     rmsynth_3d,
     rmsynth_3d_from_fits,
+    target_chunk_mb_for_worker,
 )
 from rm_lite.utils import fitting as fitting_mod
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
@@ -566,31 +565,22 @@ def test_zarr_layout_holds_at_every_cube_size(n_freq, n_phi_double, ny, nx):
 
 @pytest.mark.parametrize(
     ("options", "factor"),
-    [
-        ({}, "base"),
-        ({"per_pixel_rmsf": True}, "per_pixel_rmsf"),
-        ({"debias": True}, "debias"),
-        ({"per_pixel_rmsf": True, "debias": True}, "debias"),
-    ],
+    [({}, 2.5), ({"per_pixel_rmsf": True}, 3.6), ({"debias": True}, 9.0)],
 )
-def test_chunk_target_for_budget_takes_the_worst_factor(options, factor):
-    """Whichever option in play costs the most sets the target."""
-    assert chunk_target_for_budget(8192, **options) == pytest.approx(
-        8192 / PEAK_MEMORY_FACTORS[factor]
+def test_target_chunk_mb_for_worker_divides_by_the_measured_factor(options, factor):
+    assert target_chunk_mb_for_worker(8192, **options) == pytest.approx(8192 / factor)
+
+
+def test_worst_option_in_play_sets_the_target():
+    assert target_chunk_mb_for_worker(
+        8192, per_pixel_rmsf=True, debias=True
+    ) == target_chunk_mb_for_worker(8192, debias=True)
+
+
+def test_a_worker_splits_its_memory_between_its_threads():
+    assert target_chunk_mb_for_worker(8192, 4) == pytest.approx(
+        target_chunk_mb_for_worker(8192) / 4
     )
-
-
-def test_chunk_target_for_budget_shares_a_worker_between_its_threads():
-    """A worker runs a task per thread and they peak together, so each gets a share."""
-    assert chunk_target_for_budget(8192, 4) == pytest.approx(
-        chunk_target_for_budget(8192) / 4
-    )
-
-
-def test_chunk_target_for_budget_inverts_the_measured_factor():
-    """The target it gives back, times the factor it assumed, is the budget."""
-    target = chunk_target_for_budget(8192, per_pixel_rmsf=True)
-    assert target * PEAK_MEMORY_FACTORS["per_pixel_rmsf"] == pytest.approx(8192)
 
 
 def test_channel_chunk_size_respects_target_and_bounds():
