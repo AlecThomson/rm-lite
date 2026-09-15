@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def chunked() -> Callable[..., da.Array]:
     """Chunk a cube over its spatial axes, keeping frequency whole."""
 
@@ -26,7 +26,7 @@ def chunked() -> Callable[..., da.Array]:
     return make
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def fits_cube() -> Callable[..., Path]:
     """Write a cube to FITS as big-endian float32, with a FREQ WCS if given."""
 
