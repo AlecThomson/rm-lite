@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
 import pytest
@@ -32,6 +32,9 @@ from rm_lite.utils.synthesis import (
     rmsynth_nufft,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 NOISE = 0.02
 MASK = 6 * NOISE
 # Pixel makeup of the test cube, in flat (C order) index order.
@@ -48,7 +51,7 @@ class Cube(NamedTuple):
     fwhm: float
 
 
-def _make_cube(*, with_blanks: bool) -> Cube:
+def make_cube(*, with_blanks: bool) -> Cube:
     """A mix of blank, noise-only, faint and bright pixels on one phi axis.
 
     Blank pixels are all-NaN columns, as a mosaic edge gives; the noise pixels
@@ -106,7 +109,19 @@ def _make_cube(*, with_blanks: bool) -> Cube:
     )
 
 
-def _run(cube: Cube, *, adaptive: bool, multiscale: bool) -> RMCleanResults:
+@pytest.fixture
+def cube() -> Cube:
+    """The mixed cube without blank columns."""
+    return make_cube(with_blanks=False)
+
+
+@pytest.fixture
+def blanked_cube() -> Cube:
+    """The same cube with fully blanked columns mixed in, as a mosaic edge gives."""
+    return make_cube(with_blanks=True)
+
+
+def run_clean(cube: Cube, *, adaptive: bool, multiscale: bool) -> RMCleanResults:
     with quiet_logs(logging.ERROR):
         return rmclean(
             RMSynthArrays(
@@ -128,55 +143,72 @@ def _run(cube: Cube, *, adaptive: bool, multiscale: bool) -> RMCleanResults:
         )
 
 
-def _assert_identical(new: RMCleanResults, old: RMCleanResults, label: str) -> None:
+def assert_identical(new: RMCleanResults, old: RMCleanResults) -> None:
     for name, a, b in zip(new._fields, new, old, strict=True):
-        assert np.array_equal(a, b, equal_nan=True), f"{label}: {name}"
+        assert np.array_equal(a, b, equal_nan=True), name
 
 
-ALL_MODES = [
-    ("single-scale, adaptive", False, True),
-    ("single-scale, fixed mask", False, False),
-    ("multiscale, adaptive", True, True),
-    ("multiscale, fixed mask", True, False),
-]
-SINGLE_SCALE_MODES = ALL_MODES[:2]
+def blank_columns_only(cube: Cube) -> Cube:
+    """Just the blank columns of a cube, as a one-row image."""
+    flat = cube.dirty.reshape(cube.dirty.shape[0], -1)[:, :N_BLANK]
+    return cube._replace(
+        dirty=flat[:, np.newaxis, :],
+        rmsf=cube.rmsf.reshape(cube.rmsf.shape[0], -1)[:, :N_BLANK][:, np.newaxis, :],
+    )
 
 
-def _reference(
-    monkeypatch: pytest.MonkeyPatch, cube: Cube, *, adaptive: bool, multiscale: bool
-) -> RMCleanResults:
-    """`rmclean` with the screen forced empty, i.e. the pre-screen function.
+@pytest.fixture
+def reference_clean(monkeypatch: pytest.MonkeyPatch) -> Callable[..., RMCleanResults]:
+    """`rmclean` with the screen forced empty, i.e. the pre-screen function."""
+    # Skipping is the only behaviour the screen changes, so this is an exact
+    # stand-in for the unpatched loop.
 
-    Skipping is the only behaviour the screen changes, so this is an exact
-    stand-in for the unpatched loop.
-    """
-
-    def _screen_nothing(
+    def screen_nothing(
         dirty_fdf_arr_2d: NDArray[np.complex128], *_args: float
     ) -> NDArray[np.bool_]:
         return np.zeros(dirty_fdf_arr_2d.shape[1], dtype=bool)
 
-    monkeypatch.setattr(clean_mod, "_null_clean_pixels", _screen_nothing)
-    monkeypatch.setattr(clean_mod, "_blank_pixels", _screen_nothing)
-    return _run(cube, adaptive=adaptive, multiscale=multiscale)
+    def run(cube: Cube, *, adaptive: bool, multiscale: bool) -> RMCleanResults:
+        monkeypatch.setattr(clean_mod, "_null_clean_pixels", screen_nothing)
+        monkeypatch.setattr(clean_mod, "_blank_pixels", screen_nothing)
+        return run_clean(cube, adaptive=adaptive, multiscale=multiscale)
+
+    return run
 
 
-@pytest.mark.parametrize(("label", "multiscale", "adaptive"), ALL_MODES)
+@pytest.mark.parametrize(
+    ("multiscale", "adaptive"),
+    [
+        pytest.param(False, True, id="single-scale-adaptive"),
+        pytest.param(False, False, id="single-scale-fixed-mask"),
+        pytest.param(True, True, id="multiscale-adaptive"),
+        pytest.param(True, False, id="multiscale-fixed-mask"),
+    ],
+)
 def test_null_pixel_screen_is_bit_identical(
-    monkeypatch: pytest.MonkeyPatch, label: str, multiscale: bool, adaptive: bool
+    cube: Cube,
+    reference_clean: Callable[..., RMCleanResults],
+    multiscale: bool,
+    adaptive: bool,
 ) -> None:
     """Screening null pixels must reproduce the loop bit-for-bit, in every mode."""
-    cube = _make_cube(with_blanks=False)
-    screened = _run(cube, adaptive=adaptive, multiscale=multiscale)
-    every_pixel = _reference(
-        monkeypatch, cube, adaptive=adaptive, multiscale=multiscale
-    )
-    _assert_identical(screened, every_pixel, label)
+    screened = run_clean(cube, adaptive=adaptive, multiscale=multiscale)
+    every_pixel = reference_clean(cube, adaptive=adaptive, multiscale=multiscale)
+    assert_identical(screened, every_pixel)
 
 
-@pytest.mark.parametrize(("label", "multiscale", "adaptive"), SINGLE_SCALE_MODES)
+@pytest.mark.parametrize(
+    ("multiscale", "adaptive"),
+    [
+        pytest.param(False, True, id="single-scale-adaptive"),
+        pytest.param(False, False, id="single-scale-fixed-mask"),
+    ],
+)
 def test_null_pixel_screen_is_bit_identical_with_blanks(
-    monkeypatch: pytest.MonkeyPatch, label: str, multiscale: bool, adaptive: bool
+    blanked_cube: Cube,
+    reference_clean: Callable[..., RMCleanResults],
+    multiscale: bool,
+    adaptive: bool,
 ) -> None:
     """Same, with fully blanked columns mixed in.
 
@@ -184,21 +216,19 @@ def test_null_pixel_screen_is_bit_identical_with_blanks(
     (see `test_multiscale_blank_spectrum_crashes_without_the_screen`), so there
     is nothing to compare it against.
     """
-    cube = _make_cube(with_blanks=True)
-    screened = _run(cube, adaptive=adaptive, multiscale=multiscale)
-    every_pixel = _reference(
-        monkeypatch, cube, adaptive=adaptive, multiscale=multiscale
+    screened = run_clean(blanked_cube, adaptive=adaptive, multiscale=multiscale)
+    every_pixel = reference_clean(
+        blanked_cube, adaptive=adaptive, multiscale=multiscale
     )
-    _assert_identical(screened, every_pixel, label)
+    assert_identical(screened, every_pixel)
     assert np.isnan(
         screened.clean_fdf_arr.reshape(screened.clean_fdf_arr.shape[0], -1)[:, :N_BLANK]
     ).all()
 
 
-def test_null_pixel_screen_actually_skips() -> None:
+def test_null_pixel_screen_actually_skips(blanked_cube: Cube) -> None:
     """The screen has to fire, or the equality tests above prove nothing."""
-    cube = _make_cube(with_blanks=True)
-    dirty_2d = cube.dirty.reshape(cube.dirty.shape[0], -1)
+    dirty_2d = blanked_cube.dirty.reshape(blanked_cube.dirty.shape[0], -1)
 
     skip = _null_clean_pixels(dirty_2d, MASK)
     # Blank and noise-only pixels skipped; faint and bright ones cleaned.
@@ -211,9 +241,17 @@ def test_null_pixel_screen_actually_skips() -> None:
     assert not blanks[N_BLANK:].any()
 
 
-@pytest.mark.parametrize(("label", "multiscale", "adaptive"), ALL_MODES)
+@pytest.mark.parametrize(
+    ("multiscale", "adaptive"),
+    [
+        pytest.param(False, True, id="single-scale-adaptive"),
+        pytest.param(False, False, id="single-scale-fixed-mask"),
+        pytest.param(True, True, id="multiscale-adaptive"),
+        pytest.param(True, False, id="multiscale-fixed-mask"),
+    ],
+)
 def test_blank_spectrum_does_not_crash(
-    label: str, multiscale: bool, adaptive: bool
+    blanked_cube: Cube, multiscale: bool, adaptive: bool
 ) -> None:
     """A fully blanked spectrum used to crash multiscale RM-CLEAN.
 
@@ -221,33 +259,23 @@ def test_blank_spectrum_does_not_crash(
     `ValueError: array must not contain infs or NaNs` on an all-NaN pixel, which
     a mosaic edge has many of. The screen removes those pixels first.
     """
-    cube = _make_cube(with_blanks=True)
-    flat = cube.dirty.reshape(cube.dirty.shape[0], -1)[:, :N_BLANK]
-    blank_only = cube._replace(
-        dirty=flat[:, np.newaxis, :],
-        rmsf=cube.rmsf.reshape(cube.rmsf.shape[0], -1)[:, :N_BLANK][:, np.newaxis, :],
-    )
-    result = _run(blank_only, adaptive=adaptive, multiscale=multiscale)
-    assert np.isnan(result.clean_fdf_arr).all(), label
-    assert not result.clean_iter_arr.any(), label
-    assert not np.asarray(result.model_fdf_arr).any(), label
+    blank_only = blank_columns_only(blanked_cube)
+    result = run_clean(blank_only, adaptive=adaptive, multiscale=multiscale)
+    assert np.isnan(result.clean_fdf_arr).all()
+    assert not result.clean_iter_arr.any()
+    assert not np.asarray(result.model_fdf_arr).any()
 
 
 def test_multiscale_blank_spectrum_crashes_without_the_screen(
-    monkeypatch: pytest.MonkeyPatch,
+    blanked_cube: Cube, reference_clean: Callable[..., RMCleanResults]
 ) -> None:
     """Pins the bug the screen fixes: without it, a blank pixel raises."""
-    cube = _make_cube(with_blanks=True)
-    flat = cube.dirty.reshape(cube.dirty.shape[0], -1)[:, :N_BLANK]
-    blank_only = cube._replace(
-        dirty=flat[:, np.newaxis, :],
-        rmsf=cube.rmsf.reshape(cube.rmsf.shape[0], -1)[:, :N_BLANK][:, np.newaxis, :],
-    )
+    blank_only = blank_columns_only(blanked_cube)
     with (
         pytest.raises(ValueError, match="must not contain infs or NaNs"),
         np.errstate(invalid="ignore"),
     ):
-        _reference(monkeypatch, blank_only, adaptive=True, multiscale=True)
+        reference_clean(blank_only, adaptive=True, multiscale=True)
 
 
 def test_null_pixel_screen_quiet_on_blank_columns(
