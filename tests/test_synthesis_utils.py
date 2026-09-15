@@ -32,42 +32,42 @@ from rm_lite.utils.synthesis import (
     rmsynth_nufft,
 )
 
-RNG: Generator = np.random.default_rng()
-
 
 def test_freq_lsq_freq():
-    freqs = RNG.uniform(1e6, 10e9, 1000)
+    rng = np.random.default_rng(0)
+    freqs = rng.uniform(1e6, 10e9, 1000)
 
     assert np.allclose(lambda2_to_freq(freq_to_lambda2(freqs)), freqs)
 
 
 def test_lsq_freq_lsq():
-    lambda2s = RNG.uniform(1e-6, 1, 1000)
+    rng = np.random.default_rng(0)
+    lambda2s = rng.uniform(1e-6, 1, 1000)
 
     assert np.allclose(freq_to_lambda2(lambda2_to_freq(lambda2s)), lambda2s)
 
 
-def test_phi_arr():
-    for max_val in [100, 1000, 10000]:
-        for step_val in [1, 10, 100]:
-            phi_one = make_phi_arr(max_val, step_val)
-            assert len(phi_one) == max_val // step_val * 2 + 1
-            assert np.isclose(np.max(phi_one), max_val)
-            assert np.isclose(np.min(phi_one), -max_val)
-            # Check that middle pixel is 0
-            assert phi_one[len(phi_one) // 2] == 0
+@pytest.mark.parametrize("max_val", [100, 1000, 10000])
+@pytest.mark.parametrize("step_val", [1, 10, 100])
+def test_phi_arr(max_val: int, step_val: int):
+    phi_one = make_phi_arr(max_val, step_val)
+    assert len(phi_one) == max_val // step_val * 2 + 1
+    assert np.isclose(np.max(phi_one), max_val)
+    assert np.isclose(np.min(phi_one), -max_val)
+    # Check that middle pixel is 0
+    assert phi_one[len(phi_one) // 2] == 0
 
 
-def test_doubel_phi_arr():
-    for max_val in [100, 1000, 10000]:
-        for step_val in [1, 10, 100]:
-            phi_arr = make_phi_arr(max_val, step_val)
-            phi_double_arr = make_double_phi_arr(phi_arr)
-            assert len(phi_double_arr) == len(phi_arr) * 2 + 1
-            assert np.isclose(np.max(phi_double_arr), (max_val * 2) + step_val)
-            assert np.isclose(np.min(phi_double_arr), -(max_val * 2) - step_val)
-            # Check that middle pixel is 0
-            assert phi_double_arr[len(phi_double_arr) // 2] == 0
+@pytest.mark.parametrize("max_val", [100, 1000, 10000])
+@pytest.mark.parametrize("step_val", [1, 10, 100])
+def test_double_phi_arr(max_val: int, step_val: int):
+    phi_arr = make_phi_arr(max_val, step_val)
+    phi_double_arr = make_double_phi_arr(phi_arr)
+    assert len(phi_double_arr) == len(phi_arr) * 2 + 1
+    assert np.isclose(np.max(phi_double_arr), (max_val * 2) + step_val)
+    assert np.isclose(np.min(phi_double_arr), -(max_val * 2) - step_val)
+    # Check that middle pixel is 0
+    assert phi_double_arr[len(phi_double_arr) // 2] == 0
 
 
 def test_moments_unresolved_gaussian():
@@ -653,7 +653,7 @@ def test_moments_min_weight_fraction_signed():
     )
 
 
-def _stokes_data(
+def stokes_data(
     stokes_i: NDArray[np.float64],
     stokes_i_error: NDArray[np.float64],
     freq_arr_hz: NDArray[np.float64],
@@ -673,7 +673,7 @@ def test_fractional_spectra_snr_cut_needs_an_error() -> None:
     """The 1D path rejects the same silent no-op the cube path does."""
     freq = np.linspace(800e6, 1800e6, 64)
     stokes_i = np.full(freq.size, 1.0)
-    data = _stokes_data(stokes_i, np.zeros(freq.size), freq)
+    data = stokes_data(stokes_i, np.zeros(freq.size), freq)
 
     with pytest.raises(ValueError, match="needs a Stokes I error"):
         create_fractional_spectra(data, float(freq.mean()), StokesIFitOptions())
@@ -694,7 +694,7 @@ def test_fractional_spectra_falls_back_rather_than_raising() -> None:
     rng = np.random.default_rng(20260826)
     freq = np.linspace(800e6, 1800e6, 125)
     stokes_i = rng.normal(0, 0.05, freq.size) + 0.01
-    data = _stokes_data(stokes_i, np.full(freq.size, 0.05), freq)
+    data = stokes_data(stokes_i, np.full(freq.size, 0.05), freq)
 
     options = StokesIFitOptions(snr_cut=None, fit_function="linear")
     result = create_fractional_spectra(data, float(freq.mean()), options)
@@ -707,7 +707,7 @@ def test_fractional_spectra_falls_back_rather_than_raising() -> None:
 
     # And it is the gate doing it, not a fit that happened to come out flat:
     # the same fit on data shifted clear of zero keeps its spectral shape.
-    lifted = _stokes_data(stokes_i + 1.0, np.full(freq.size, 0.05), freq)
+    lifted = stokes_data(stokes_i + 1.0, np.full(freq.size, 0.05), freq)
     ungated = create_fractional_spectra(lifted, float(freq.mean()), options)
     assert ungated is not None
     ungated_model = ungated.stokes_data.stokes_i_model_arr

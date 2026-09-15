@@ -24,12 +24,6 @@ from rm_lite.utils.synthesis import (
     rmsynth_nufft,
 )
 
-# Seeded for reproducibility: an unseeded generator draws a fresh random RM
-# each run, which occasionally lands on a near-Nyquist/aliased Faraday depth
-# where the global moment integration legitimately picks up distant structure
-# and the moment assertions below fail intermittently.
-RNG = np.random.default_rng(1234)
-
 
 class MockData(NamedTuple):
     freqs: NDArray[np.float64]
@@ -48,18 +42,23 @@ class MockModel(NamedTuple):
 
 
 @pytest.fixture
-def test_data_path() -> Path:
-    """Fixture to provide the path to the test data directory."""
+def data_path() -> Path:
+    """The packaged test data directory."""
     return Path(resources.files("rm_lite.data.tests"))  # type: ignore[arg-type]
 
 
 @pytest.fixture
 def racs_model() -> MockModel:
+    """A RACS-like source, drawn from a fixed seed."""
+    # An unseeded draw occasionally lands on a near-Nyquist/aliased Faraday
+    # depth where the global moment integration legitimately picks up distant
+    # structure, and the moment assertions below fail intermittently.
+    rng = np.random.default_rng(1234)
     fwhm = 49.57
-    rm = RNG.uniform(-1000, 1000)
-    pa = RNG.uniform(0, 180)
-    frac_pol = RNG.uniform(0.5, 0.7)
-    flux = RNG.uniform(1, 10)
+    rm = rng.uniform(-1000, 1000)
+    pa = rng.uniform(0, 180)
+    frac_pol = rng.uniform(0.5, 0.7)
+    flux = rng.uniform(1, 10)
 
     return MockModel(flux, frac_pol, rm, pa, fwhm)
 
@@ -307,12 +306,12 @@ def test_2d_synth(racs_data: MockData, racs_model: MockModel):
     "ignore: Covariance of the parameters could not be estimated"
 )
 @pytest.mark.filterwarnings("ignore: invalid value encountered in std_dev")
-def test_real_data_bad_fit(test_data_path):
+def test_real_data_bad_fit(data_path):
     # The following data from K. Rose caused the fit to the Stokes I spectrum to fail
-    complex_spectrum = np.load(test_data_path / "complex_spectrum_bad_fit.npy")
-    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
-    stokes_i_arr = np.load(test_data_path / "stokes_i_arr_bad_fit.npy")
-    stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_bad.npy")
+    complex_spectrum = np.load(data_path / "complex_spectrum_bad_fit.npy")
+    complex_noise = np.load(data_path / "complex_noise_bad.npy")
+    stokes_i_arr = np.load(data_path / "stokes_i_arr_bad_fit.npy")
+    stokes_i_error_arr = np.load(data_path / "stokes_i_error_arr_bad.npy")
     freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
     _ = run_rmsynth(
         freq_arr_hz=freq_hz,
@@ -329,10 +328,10 @@ def test_real_data_bad_fit(test_data_path):
     "ignore: Covariance of the parameters could not be estimated"
 )
 @pytest.mark.filterwarnings("ignore: invalid value encountered")
-def test_real_data_bad_peak(test_data_path):
+def test_real_data_bad_peak(data_path):
     # The following data from K. Rose caused the fit to the FDF to fail
-    complex_spectrum = np.load(test_data_path / "complex_spectrum_bad_peak.npy")
-    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
+    complex_spectrum = np.load(data_path / "complex_spectrum_bad_peak.npy")
+    complex_noise = np.load(data_path / "complex_noise_bad.npy")
     freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
     _ = run_rmsynth(
         freq_arr_hz=freq_hz,
@@ -348,12 +347,12 @@ def test_real_data_bad_peak(test_data_path):
 )
 @pytest.mark.filterwarnings("ignore: invalid value encountered")
 @pytest.mark.filterwarnings("ignore: overflow")
-def test_real_data_bad_overflow(test_data_path):
+def test_real_data_bad_overflow(data_path):
     # The following data from K. Rose caused the fit to the FDF to fail
-    complex_spectrum = np.load(test_data_path / "complex_spectrum_overflow.npy")
-    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
-    stokes_i_arr = np.load(test_data_path / "stokes_i_arr_overflow.npy")
-    stokes_i_error_arr = np.load(test_data_path / "stokes_i_error_arr_bad.npy")
+    complex_spectrum = np.load(data_path / "complex_spectrum_overflow.npy")
+    complex_noise = np.load(data_path / "complex_noise_bad.npy")
+    stokes_i_arr = np.load(data_path / "stokes_i_arr_overflow.npy")
+    stokes_i_error_arr = np.load(data_path / "stokes_i_error_arr_bad.npy")
     freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
     _ = run_rmsynth(
         freq_arr_hz=freq_hz,
@@ -373,10 +372,10 @@ def test_real_data_bad_overflow(test_data_path):
 )
 @pytest.mark.filterwarnings("ignore: invalid value encountered")
 @pytest.mark.filterwarnings("ignore: divide by zero")
-def test_real_data_bad_zero(test_data_path):
+def test_real_data_bad_zero(data_path):
     # The following data from K. Rose caused the fit to the FDF to fail
-    complex_spectrum = np.load(test_data_path / "complex_spectrum_zero_div.npy")
-    complex_noise = np.load(test_data_path / "complex_noise_bad.npy")
+    complex_spectrum = np.load(data_path / "complex_spectrum_zero_div.npy")
+    complex_noise = np.load(data_path / "complex_noise_bad.npy")
     freq_hz = np.linspace(1116.0237779633926, 3116.97610232475, len(complex_spectrum))
     _ = run_rmsynth(
         freq_arr_hz=freq_hz,
