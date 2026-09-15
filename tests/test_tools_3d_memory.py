@@ -3,7 +3,7 @@
 Runs the pipeline in a fresh subprocess per configuration, and writes output via
 `write_zarr_group` rather than `.compute()`, since `.compute()` always assembles
 the full result in memory regardless of chunk size. See
-`tests/_dask_memory_worker.py` for the worker itself.
+`tests/scripts/dask_memory_worker.py` for the worker itself.
 
 The array-path test below compares two chunkings of one cube, so it can use peak
 RSS: allocator retention inflates both sides alike. It measures the compute
@@ -12,7 +12,7 @@ process-lifetime peak also carries the setup transient and that swamps the
 small-chunk arm (see the worker's docstring). The FITS-path test compares two
 cube sizes, where retention grows with the number of blocks read and swamps the
 effect being measured, so it uses the `tracemalloc` peak instead. See
-`tests/_fits_memory_worker.py`.
+`tests/scripts/fits_memory_worker.py`.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import pytest
 from astropy.io import fits
 from rm_lite.tools_3d.rmsynth import target_chunk_mb_for_worker
 
-WORKER = pathlib.Path(__file__).parent / "_dask_memory_worker.py"
+WORKER = pathlib.Path(__file__).parent / "scripts" / "dask_memory_worker.py"
 
 CUBE_SIDE = 300
 N_FREQ = 40
@@ -61,7 +61,7 @@ def test_memory_scales_with_chunk_size_not_cube_size():
     )
 
 
-FITS_WORKER = pathlib.Path(__file__).parent / "_fits_memory_worker.py"
+FITS_WORKER = pathlib.Path(__file__).parent / "scripts" / "fits_memory_worker.py"
 
 FITS_N_FREQ = 48
 # 4x the pixels between the two cubes, at one fixed target_chunk_mb.
@@ -89,7 +89,7 @@ def _cube_mb(side: int) -> float:
 
 # --------------------------------------------------------------- budget arm
 
-BUDGET_WORKER = pathlib.Path(__file__).parent / "_budget_memory_worker.py"
+BUDGET_WORKER = pathlib.Path(__file__).parent / "scripts" / "budget_memory_worker.py"
 # Peak is a fixed cost plus a multiple of the target, so only the slope between
 # two targets is the multiple. One target alone measures the interpreter.
 BUDGET_TARGETS_MB = (16.0, 64.0)
@@ -165,7 +165,9 @@ def test_peak_memory_per_target_stays_within_the_budgeted_factor(
     )
 
 
-CONVERT_WORKER = pathlib.Path(__file__).parent / "_zarr_convert_memory_worker.py"
+CONVERT_WORKER = (
+    pathlib.Path(__file__).parent / "scripts" / "zarr_convert_memory_worker.py"
+)
 # Wide enough that the shard is set by the target rather than capped by the cube,
 # which needs more pixels than three times the largest target holds.
 CONVERT_SIDE = 640
@@ -273,7 +275,7 @@ def test_fits_path_memory_scales_with_chunk_size_not_cube_size(qu_fits_cubes):
     touched a block, and the per-channel noise estimator (reached here via
     `weight_type="variance"`) gathered the whole cube into a single task. Both
     made peak memory a function of cube size with `target_chunk_mb` inert, and
-    both are invisible to `_dask_memory_worker`, which never reads a FITS file.
+    both are invisible to `dask_memory_worker`, which never reads a FITS file.
     """
     small_side, large_side = FITS_SIDES
     small = _fits_peak_mb(qu_fits_cubes[small_side])
