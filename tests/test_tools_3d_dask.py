@@ -30,6 +30,7 @@ from rm_lite.tools_3d.rmsynth import (
     fdf_spatial_chunk,
     rmsynth_3d,
     rmsynth_3d_from_fits,
+    target_chunk_mb_for_worker,
 )
 from rm_lite.utils import fitting as fitting_mod
 from rm_lite.utils.clean import RMCleanOptions, RMSynthArrays, rmclean
@@ -46,6 +47,7 @@ from rm_lite.utils.dask_io import (
     spatial_chunk_size,
     tile_spatial_chunk,
     write_zarr_group,
+    zarr_store_layout,
 )
 from rm_lite.utils.synthesis import (
     FDFOptions,
@@ -534,11 +536,15 @@ def test_zarr_layout_holds_at_every_cube_size(n_freq, n_phi_double, ny, nx):
     also stay inside the memory budget it was sized for, and must not pad the
     image edge with columns that are written but never read.
     """
-    band_rows, _ = spatial_chunk_size(
-        n_freq=n_freq, ny=ny, nx=nx, itemsize=4, target_chunk_mb=256
-    )
     budget = fdf_spatial_chunk(n_phi_double, np.dtype("complex64"), 256, ny, nx)
-    cy, cx = tile_spatial_chunk(budget, band_rows, nx)
+    (cy, cx), band_rows = zarr_store_layout(
+        n_freq=n_freq,
+        ny=ny,
+        nx=nx,
+        itemsize=4,
+        chunk_budget=budget,
+        target_chunk_mb=256,
+    )
     shard_rows = min(ny, max(cy, band_rows - band_rows % cy))
     shards = (n_freq, shard_rows, math.ceil(nx / cx) * cx)
 
@@ -554,6 +560,26 @@ def test_zarr_layout_holds_at_every_cube_size(n_freq, n_phi_double, ny, nx):
         chunks=(n_freq, cy, cx),
         shards=shards,
         dtype="float32",
+    )
+
+
+@pytest.mark.parametrize(
+    ("options", "factor"),
+    [({}, 2.5), ({"per_pixel_rmsf": True}, 3.6), ({"debias": True}, 9.0)],
+)
+def test_target_chunk_mb_for_worker_divides_by_the_measured_factor(options, factor):
+    assert target_chunk_mb_for_worker(8192, **options) == pytest.approx(8192 / factor)
+
+
+def test_worst_option_in_play_sets_the_target():
+    assert target_chunk_mb_for_worker(
+        8192, per_pixel_rmsf=True, debias=True
+    ) == target_chunk_mb_for_worker(8192, debias=True)
+
+
+def test_a_worker_splits_its_memory_between_its_threads():
+    assert target_chunk_mb_for_worker(8192, 4) == pytest.approx(
+        target_chunk_mb_for_worker(8192) / 4
     )
 
 

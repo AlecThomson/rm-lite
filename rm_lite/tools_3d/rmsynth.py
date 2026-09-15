@@ -28,8 +28,7 @@ from rm_lite.utils.dask_io import (
     freq_arr_hz_from_header,
     read_cube_channel_chunks,
     read_cube_dask,
-    spatial_chunk_size,
-    tile_spatial_chunk,
+    zarr_store_layout,
 )
 from rm_lite.utils.fitting import (
     RobustLoss,
@@ -294,6 +293,31 @@ def _shared_rmsf(
     # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is complex at
     # runtime (built from a finufft complex output).
     return np.asarray(rmsf_result.rmsf_cube, dtype=dtype)
+
+
+def target_chunk_mb_for_worker(
+    worker_memory_mb: float,
+    threads_per_worker: int = 1,
+    *,
+    per_pixel_rmsf: bool = False,
+    debias: bool = False,
+) -> float:
+    """The `target_chunk_mb` a worker of this size can afford.
+
+    One task peaks at a multiple of the target, and a worker runs one task per
+    thread.
+    """
+    # MB of peak per MB of target, measured by the budget arm of
+    # tests/test_tools_3d_memory.py and rounded up from 1.9 / 3.0 / 7.8.
+    factors = {"base": 2.5, "per_pixel_rmsf": 3.6, "debias": 9.0}
+    factor = (
+        factors["debias"]
+        if debias
+        else factors["per_pixel_rmsf"]
+        if per_pixel_rmsf
+        else factors["base"]
+    )
+    return worker_memory_mb / (threads_per_worker * factor)
 
 
 def fdf_spatial_chunk(
@@ -1161,21 +1185,16 @@ def rmsynth_3d_from_fits(
     spatial_u_file: str | Path = stokes_u_file
     spatial_i_file: str | Path | None = stokes_i_file
     if convert_to_zarr:
-        # One shard per band the FITS reader would have read anyway, so a cube
-        # chunked more finely than that is still a handful of files rather than one
-        # per chunk.
-        shard_rows, _ = spatial_chunk_size(
+        # A zarr chunk is its own object, so the full-width rule `spatial_chunk`
+        # was sized under does not apply to the store. Same area, so the FDF
+        # chunk costs what it did, but a region read costs a tile not a stripe.
+        store_chunk, shard_rows = zarr_store_layout(
             n_freq=int(stokes_q.shape[0]),
             ny=int(stokes_q.shape[1]),
             nx=int(stokes_q.shape[2]),
             itemsize=stokes_q.dtype.itemsize,
+            chunk_budget=spatial_chunk,
             target_chunk_mb=target_chunk_mb,
-        )
-        # A zarr chunk is its own object, so the full-width rule `spatial_chunk`
-        # was sized under does not apply to the store. Same area, so the FDF
-        # chunk costs what it did, but a region read costs a tile not a stripe.
-        store_chunk = tile_spatial_chunk(
-            spatial_chunk, shard_rows, int(stokes_q.shape[2])
         )
 
         converted = _convert_cubes_to_zarr(

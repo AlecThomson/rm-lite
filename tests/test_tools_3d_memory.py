@@ -24,6 +24,7 @@ import sys
 import numpy as np
 import pytest
 from astropy.io import fits
+from rm_lite.tools_3d.rmsynth import target_chunk_mb_for_worker
 
 WORKER = pathlib.Path(__file__).parent / "_dask_memory_worker.py"
 
@@ -84,6 +85,143 @@ MAX_PEAK_PER_TARGET_MB = 20
 
 def _cube_mb(side: int) -> float:
     return FITS_N_FREQ * side**2 * 4 / 1024**2
+
+
+# --------------------------------------------------------------- budget arm
+
+BUDGET_WORKER = pathlib.Path(__file__).parent / "_budget_memory_worker.py"
+# Peak is a fixed cost plus a multiple of the target, so only the slope between
+# two targets is the multiple. One target alone measures the interpreter.
+BUDGET_TARGETS_MB = (16.0, 64.0)
+
+
+@pytest.fixture(scope="module")
+def budget_fits_cubes(tmp_path_factory) -> tuple[pathlib.Path, pathlib.Path]:
+    """A Q/U pair small enough to RM-CLEAN once per target, twice per option."""
+    tmpdir = tmp_path_factory.mktemp("budget_memory")
+    rng = np.random.default_rng(1)
+    header = fits.Header()
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = 8.0e8
+    header["CDELT3"] = 1.0e6
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+    paths = []
+    for stokes in ("q", "u"):
+        path = tmpdir / f"{stokes}.fits"
+        data = rng.normal(0, 1, (1, FITS_N_FREQ, 256, 256))
+        fits.PrimaryHDU(data.astype(">f4"), header=header).writeto(path)
+        paths.append(path)
+    return paths[0], paths[1]
+
+
+def _budget_peak_mb(
+    paths: tuple[pathlib.Path, pathlib.Path], target_chunk_mb: float, options: str
+) -> float:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(BUDGET_WORKER),
+            str(paths[0]),
+            str(paths[1]),
+            str(target_chunk_mb),
+            # Fine and wide, so the Faraday axis dominates the fixed cost.
+            "2.0",
+            "400.0",
+            options,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(result.stdout.strip().splitlines()[-1]) / 1024
+
+
+@pytest.mark.parametrize(
+    "options", ["clean,maps", "clean,maps,per_pixel_rmsf", "clean,maps,debias"]
+)
+def test_peak_memory_per_target_stays_within_the_budgeted_factor(
+    budget_fits_cubes, options
+):
+    """Peak grows by no more than the multiple `target_chunk_mb_for_worker` assumes.
+
+    That function turns a worker's memory into a target, so it is only as good
+    as these numbers: if a configuration starts costing more per MB of target,
+    a budget derived from it sends a run to a cluster that cannot hold it.
+    """
+    budgeted = 1024.0 / target_chunk_mb_for_worker(
+        1024.0,
+        per_pixel_rmsf="per_pixel_rmsf" in options,
+        debias="debias" in options,
+    )
+    small_target, large_target = BUDGET_TARGETS_MB
+    small = _budget_peak_mb(budget_fits_cubes, small_target, options)
+    large = _budget_peak_mb(budget_fits_cubes, large_target, options)
+
+    slope = (large - small) / (large_target - small_target)
+    assert slope <= budgeted, (
+        f"{options} costs {slope:.2f} MB of peak per MB of target, over the "
+        f"{budgeted} budgeted for it"
+    )
+
+
+CONVERT_WORKER = pathlib.Path(__file__).parent / "_zarr_convert_memory_worker.py"
+# Wide enough that the shard is set by the target rather than capped by the cube,
+# which needs more pixels than three times the largest target holds.
+CONVERT_SIDE = 640
+
+
+@pytest.fixture(scope="module")
+def convert_fits_cube(tmp_path_factory) -> pathlib.Path:
+    """One cube big enough for `target_chunk_mb` to bind at both targets."""
+    path: pathlib.Path = tmp_path_factory.mktemp("convert_memory") / "q.fits"
+    rng = np.random.default_rng(2)
+    header = fits.Header()
+    header["CTYPE3"] = "FREQ"
+    header["CRVAL3"] = 8.0e8
+    header["CDELT3"] = 1.0e6
+    header["CRPIX3"] = 1
+    header["CUNIT3"] = "Hz"
+    data = rng.normal(0, 1, (1, FITS_N_FREQ, CONVERT_SIDE, CONVERT_SIDE))
+    fits.PrimaryHDU(data.astype(">f4"), header=header).writeto(path)
+    return path
+
+
+def _convert_peak_mb(path: pathlib.Path, target_chunk_mb: float) -> float:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(CONVERT_WORKER),
+            str(path),
+            str(target_chunk_mb),
+            str(FITS_N_FREQ),
+            str(CONVERT_SIDE),
+            str(CONVERT_SIDE),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return int(result.stdout.strip().splitlines()[-1]) / 1024
+
+
+def test_zarr_conversion_peak_stays_inside_the_target(convert_fits_cube):
+    """A conversion costs about one target, which is what `zarr_store_layout` assumes.
+
+    It sizes the shard at a third of the target because a write task holds its
+    shard three times over: the raw read, zarr's encode buffer, and a copy
+    between them. Let that stop being true and the conversion blows the budget
+    every other stage keeps to, which is the OOM this all started with.
+    """
+    small_target, large_target = BUDGET_TARGETS_MB
+    small = _convert_peak_mb(convert_fits_cube, small_target)
+    large = _convert_peak_mb(convert_fits_cube, large_target)
+
+    slope = (large - small) / (large_target - small_target)
+    assert slope <= 1.2, (
+        f"a conversion costs {slope:.2f} MB of peak per MB of target, over the "
+        "1.2 a third-of-the-target shard budgets for"
+    )
 
 
 @pytest.fixture(scope="module")
