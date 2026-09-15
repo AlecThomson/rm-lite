@@ -314,7 +314,7 @@ def test_divergence_guard_never_fires_on_a_converging_clean(caplog) -> None:
         np.complex128
     )
 
-    with caplog.at_level(logging.WARNING, logger="rm_lite"):
+    with caplog.at_level(logging.WARNING, logger="rm-lite"):
         for case in range(40):
             rng = np.random.default_rng(case)
             noise = 10 ** rng.uniform(-4, -2)
@@ -389,7 +389,7 @@ def test_divergence_guard_stops_and_keeps_the_best_state(caplog) -> None:
     spectrum = rng.normal(0, noise, n_phi) + 1j * rng.normal(0, noise, n_phi)
     spectrum += 0.05 * np.exp(-0.5 * (phi_arr_radm2 / sigma) ** 2)
 
-    with caplog.at_level(logging.WARNING, logger="rm_lite"):
+    with caplog.at_level(logging.WARNING, logger="rm-lite"):
         results = minor_loop(
             MinorLoopArrays(
                 resid_fdf_spectrum_mask=np.ma.array(

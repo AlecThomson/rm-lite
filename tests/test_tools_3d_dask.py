@@ -2020,7 +2020,7 @@ def test_read_cube_dask_says_when_a_store_ignores_the_chunking_asked_for(
         qu_fits_cubes["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4)
     )
 
-    with caplog.at_level(logging.INFO, logger="rm_lite"):
+    with caplog.at_level(logging.INFO, logger="rm-lite"):
         cube, _ = read_cube_dask(store, spatial_chunk=(2, 4))
 
     assert cube.chunksize[1:] == (1, 4)
