@@ -9,7 +9,7 @@ The array-path test below compares two chunkings of one cube, so it can use peak
 RSS: allocator retention inflates both sides alike. It measures the compute
 phase specifically, via the kernel's resettable `VmHWM` watermark, since a
 process-lifetime peak also carries the setup transient and that swamps the
-small-chunk arm (see the worker's docstring). The FITS-path test compares two
+small-chunk run (see the worker's docstring). The FITS-path test compares two
 cube sizes, where retention grows with the number of blocks read and swamps the
 effect being measured, so it uses the `tracemalloc` peak instead. See
 `tests/scripts/fits_memory_worker.py`.
@@ -86,8 +86,6 @@ MAX_PEAK_PER_TARGET_MB = 20
 def _cube_mb(side: int) -> float:
     return FITS_N_FREQ * side**2 * 4 / 1024**2
 
-
-# --------------------------------------------------------------- budget arm
 
 BUDGET_WORKER = pathlib.Path(__file__).parent / "scripts" / "budget_memory_worker.py"
 # Peak is a fixed cost plus a multiple of the target, so only the slope between

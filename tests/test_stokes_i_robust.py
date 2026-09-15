@@ -67,9 +67,6 @@ def _fit_error(
     return float(np.abs(model - truth).max() / truth.max())
 
 
-# --------------------------------------------------------------- flux outliers
-
-
 @pytest.mark.parametrize("amplitude", [5.0, 20.0, 100.0])
 def test_robust_loss_shrugs_off_a_flux_outlier(amplitude: float) -> None:
     """One boosted channel wrecks a plain fit but not a robust one."""
@@ -125,9 +122,6 @@ def test_robust_loss_beats_plain_least_squares() -> None:
     plain = _fit_error(contaminated, stokes_i_error_arr, robust_loss="linear")
     assert robust < 0.02
     assert robust < plain / 10
-
-
-# ---------------------------------------------------------------- bad errors
 
 
 def test_an_over_trusted_channel_does_not_bend_the_fit() -> None:
@@ -190,9 +184,6 @@ def test_errors_that_cannot_weight_a_fit_are_dropped(bad: float) -> None:
     assert float(np.abs(model - truth).max() / truth.max()) < 0.01
 
 
-# ------------------------------------------------------------------ robust AIC
-
-
 def test_aic_still_picks_a_sloped_model_through_an_outlier() -> None:
     """An outlier used to collapse `fit_order < 0` onto a flat model, because the
     unweighted AIC scored every order alike and the fewest params won."""
@@ -229,9 +220,6 @@ def test_aic_without_an_error_is_the_plain_least_squares_one() -> None:
     ssr = float(np.sum((stokes_i_arr - model) ** 2))
     expected = float(akaike_info_criterion_lsq(ssr=ssr, n_params=3, n_samples=N_CHAN))
     assert fit.aic == pytest.approx(expected)
-
-
-# ------------------------------------------------------------------ robust SNR
 
 
 def test_snr_ignores_a_single_over_estimated_error_channel() -> None:
@@ -274,9 +262,6 @@ def test_snr_only_counts_usable_channels() -> None:
     assert stokes_i_snr(stokes_i_arr, holed_error) == pytest.approx(expected)
 
 
-# ------------------------------------------------------------------- options
-
-
 @pytest.mark.parametrize(
     ("kwargs", "match"),
     [
@@ -296,9 +281,6 @@ def test_option_defaults_are_robust() -> None:
     options = StokesIFitOptions()
     assert options.robust_loss == "cauchy"
     assert options.f_scale == 3.0
-
-
-# ------------------------------------------------- the unweighted (no error) path
 
 
 def test_no_error_falls_back_to_plain_least_squares() -> None:
