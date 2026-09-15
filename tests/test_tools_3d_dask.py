@@ -7,7 +7,7 @@ import math
 import time
 import warnings
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import dask.array as da
 import numpy as np
@@ -60,7 +60,8 @@ from rm_lite.utils.synthesis import (
     lambda2_to_freq,
 )
 
-RNG = np.random.default_rng(2025)
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 D_PHI_RADM2 = 1.0
 MASK_THRESHOLD = 0.15
@@ -78,12 +79,13 @@ class SyntheticCube(NamedTuple):
 @pytest.fixture
 def synthetic_cube() -> SyntheticCube:
     """A small Stokes Q/U cube with a different RM/PA/noise draw per pixel."""
+    rng = np.random.default_rng(2025)
     freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
     ny, nx = 7, 9
 
-    rm_map = RNG.uniform(-150, 150, size=(ny, nx))
-    pa_map = RNG.uniform(0, 180, size=(ny, nx))
+    rm_map = rng.uniform(-150, 150, size=(ny, nx))
+    pa_map = rng.uniform(0, 180, size=(ny, nx))
     frac_pol = 0.7
 
     stokes_q = np.zeros((freq_arr_hz.size, ny, nx))
@@ -100,30 +102,28 @@ def synthetic_cube() -> SyntheticCube:
     # and per-channel weight_arr shared across every pixel (matching classic
     # RM-Tools 3D convention). A global flag would make the two legitimately
     # diverge, which isn't what this test is checking.
-    stokes_q += RNG.normal(0, 0.01, stokes_q.shape)
-    stokes_u += RNG.normal(0, 0.01, stokes_u.shape)
+    stokes_q += rng.normal(0, 0.01, stokes_q.shape)
+    stokes_u += rng.normal(0, 0.01, stokes_u.shape)
 
     return SyntheticCube(freq_arr_hz, stokes_q, stokes_u, rm_map, pa_map)
 
 
-def _require_cube(cube: da.Array | None) -> da.Array:
+def require(cube: da.Array | None) -> da.Array:
     """Assert an optional result cube is populated, for the type checker."""
     assert cube is not None
     return cube
 
 
-def _chunked(array: NDArray[np.float64], cy: int, cx: int) -> da.Array:
-    return da.from_array(array, chunks=(-1, cy, cx))
-
-
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_rmsynth_3d_matches_1d_per_pixel(synthetic_cube: SyntheticCube):
+def test_rmsynth_3d_matches_1d_per_pixel(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """Chunked 3D dirty FDF must match rm_lite.tools_1d.rmsynth per pixel."""
     ny, nx = synthetic_cube.rm_map.shape
     # Deliberately uneven chunking (7, 9 not multiples of 3, 4) to force
     # size-1 edge blocks through the pipeline.
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     result = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -147,11 +147,13 @@ def test_rmsynth_3d_matches_1d_per_pixel(synthetic_cube: SyntheticCube):
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
+def test_rmclean_3d_matches_per_pixel_rmclean(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """Chunked 3D RM-CLEAN must match calling utils.clean.rmclean per pixel."""
     ny, nx = synthetic_cube.rm_map.shape
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -204,7 +206,9 @@ def test_rmclean_3d_matches_per_pixel_rmclean(synthetic_cube: SyntheticCube):
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_rmclean_3d_block_runs_once_per_chunk(
-    synthetic_cube: SyntheticCube, monkeypatch
+    synthetic_cube: SyntheticCube,
+    monkeypatch,
+    chunked: Callable[..., da.Array],
 ):
     """The expensive per-pixel Hogbom loop must run once per chunk, not once per output."""
     call_count = 0
@@ -217,8 +221,8 @@ def test_rmclean_3d_block_runs_once_per_chunk(
 
     monkeypatch.setattr(rmclean3d_mod, "_rmclean_on_block", counting_wrapper)
 
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
@@ -245,21 +249,28 @@ def test_rmclean_3d_block_runs_once_per_chunk(
     )
 
 
-def _counting(monkeypatch, mod, name: str) -> dict[str, int]:
+@pytest.fixture
+def counting_patch(monkeypatch: pytest.MonkeyPatch) -> Callable[..., dict[str, int]]:
     """Patch `mod.name` with a wrapper counting real invocations."""
-    counter = {"calls": 0}
-    original = getattr(mod, name)
 
-    def wrapper(*args, **kwargs):
-        counter["calls"] += 1
-        return original(*args, **kwargs)
+    def patch(mod: object, name: str) -> dict[str, int]:
+        counter = {"calls": 0}
+        original = getattr(mod, name)
 
-    monkeypatch.setattr(mod, name, wrapper)
-    return counter
+        def wrapper(*args, **kwargs):
+            counter["calls"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(mod, name, wrapper)
+        return counter
+
+    return patch
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_mixed_batch_shares_upstream_work(monkeypatch):
+def test_mixed_batch_shares_upstream_work(
+    counting_patch: Callable[..., dict[str, int]], chunked: Callable[..., da.Array]
+):
     """A batch mixing clean-derived and synthesis-derived outputs must not refit.
 
     `run_rmclean` takes its input cubes apart with `to_delayed`, whose default
@@ -276,29 +287,30 @@ def test_mixed_batch_shares_upstream_work(monkeypatch):
     # Coarse Faraday depths on purpose: a deep phi axis makes `_match_chunks_to_fdf`
     # rechunk, and the rechunk layer is itself a fusion barrier that would hide
     # what this test is checking.
+    rng = np.random.default_rng(2025)
     phi_max_radm2 = 20.0
     d_phi_radm2 = 2.0
 
     freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
     ny, nx = 6, 8
     ref_freq_hz = float(np.median(freq_arr_hz))
-    stokes_i = RNG.uniform(1.0, 3.0, size=(ny, nx))[None] * (
+    stokes_i = rng.uniform(1.0, 3.0, size=(ny, nx))[None] * (
         (freq_arr_hz / ref_freq_hz)[:, None, None] ** -0.8
     )
-    rm_map = RNG.uniform(-100, 100, size=(ny, nx))
+    rm_map = rng.uniform(-100, 100, size=(ny, nx))
     angle = 2 * rm_map[None] * freq_to_lambda2(freq_arr_hz)[:, None, None]
     stokes_q = 0.6 * stokes_i * np.cos(angle)
     stokes_u = 0.6 * stokes_i * np.sin(angle)
 
-    fit_calls = _counting(monkeypatch, fitting_mod, "_fit_stokes_i_block")
-    nufft_calls = _counting(monkeypatch, rmsynth3d_mod, "rmsynth_nufft")
-    clean_calls = _counting(monkeypatch, rmclean3d_mod, "_rmclean_on_block")
+    fit_calls = counting_patch(fitting_mod, "_fit_stokes_i_block")
+    nufft_calls = counting_patch(rmsynth3d_mod, "rmsynth_nufft")
+    clean_calls = counting_patch(rmclean3d_mod, "_rmclean_on_block")
 
     synth = rmsynth3d_mod.rmsynth_3d(
-        _chunked(stokes_q, 3, 4),
-        _chunked(stokes_u, 3, 4),
+        chunked(stokes_q, 3, 4),
+        chunked(stokes_u, 3, 4),
         freq_arr_hz,
-        stokes_i=_chunked(stokes_i, 3, 4),
+        stokes_i=chunked(stokes_i, 3, 4),
         stokes_i_error=np.full(freq_arr_hz.size, 1e-3),
         phi_max_radm2=phi_max_radm2,
         d_phi_radm2=d_phi_radm2,
@@ -325,11 +337,11 @@ def test_mixed_batch_shares_upstream_work(monkeypatch):
         clean.mom1_map,
         clean.mom2_map,
         synth.fdf_dirty_cube,
-        _require_cube(synth.stokes_i_alpha_map),
-        _require_cube(synth.stokes_i_ref_flux_map),
-        _require_cube(synth.stokes_i_model_order_map),
-        _require_cube(synth.stokes_i_coeff_cube),
-        _require_cube(synth.stokes_i_coeff_error_cube),
+        require(synth.stokes_i_alpha_map),
+        require(synth.stokes_i_ref_flux_map),
+        require(synth.stokes_i_model_order_map),
+        require(synth.stokes_i_coeff_cube),
+        require(synth.stokes_i_coeff_error_cube),
         scheduler="synchronous",
     )
 
@@ -340,7 +352,10 @@ def test_mixed_batch_shares_upstream_work(monkeypatch):
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_write_zarr_group_shares_computation_across_arrays(
-    synthetic_cube: SyntheticCube, monkeypatch, tmp_path
+    synthetic_cube: SyntheticCube,
+    monkeypatch,
+    tmp_path,
+    chunked: Callable[..., da.Array],
 ):
     """write_zarr_group must not recompute a shared upstream graph once per array.
 
@@ -359,8 +374,8 @@ def test_write_zarr_group_shares_computation_across_arrays(
 
     monkeypatch.setattr(rmclean3d_mod, "_rmclean_on_block", counting_wrapper)
 
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
     )
@@ -389,10 +404,12 @@ def test_write_zarr_group_shares_computation_across_arrays(
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
+def test_zarr_round_trip(
+    synthetic_cube: SyntheticCube, tmp_path, chunked: Callable[..., da.Array]
+):
     """All six output cubes write and read back correctly via zarr."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
         q_dask,
         u_dask,
@@ -431,10 +448,12 @@ def test_zarr_round_trip(synthetic_cube: SyntheticCube, tmp_path):
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_rmclean_3d_multiscale_smoke(synthetic_cube: SyntheticCube):
+def test_rmclean_3d_multiscale_smoke(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """Multiscale RM-CLEAN threads through the delayed/dask 3D path unbroken."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -596,15 +615,17 @@ def test_channel_chunk_size_respects_target_and_bounds():
     )
 
 
-def test_estimate_channel_noise_mad_recovers_true_noise():
+def test_estimate_channel_noise_mad_recovers_true_noise(
+    chunked: Callable[..., da.Array],
+):
     rng = np.random.default_rng(99)
     n_freq, ny, nx = 20, 64, 64
     true_noise = np.linspace(0.05, 0.5, n_freq)
     stokes_q = rng.normal(0, 1, (n_freq, ny, nx)) * true_noise[:, None, None]
     stokes_u = rng.normal(0, 1, (n_freq, ny, nx)) * true_noise[:, None, None]
 
-    q_dask = _chunked(stokes_q, 16, 16)
-    u_dask = _chunked(stokes_u, 16, 16)
+    q_dask = chunked(stokes_q, 16, 16)
+    u_dask = chunked(stokes_u, 16, 16)
 
     noise = estimate_channel_noise_mad(q_dask, u_dask)
 
@@ -613,33 +634,37 @@ def test_estimate_channel_noise_mad_recovers_true_noise():
     np.testing.assert_allclose(noise, true_noise, rtol=0.1)
 
 
-def test_estimate_channel_noise_mad_is_spatial_chunk_invariant():
+def test_estimate_channel_noise_mad_is_spatial_chunk_invariant(
+    chunked: Callable[..., da.Array],
+):
     rng = np.random.default_rng(7)
     n_freq, ny, nx = 12, 32, 32
     stokes_q = rng.normal(0, 1, (n_freq, ny, nx))
     stokes_u = rng.normal(0, 1, (n_freq, ny, nx))
 
-    fine = estimate_channel_noise_mad(
-        _chunked(stokes_q, 8, 8), _chunked(stokes_u, 8, 8)
-    )
+    fine = estimate_channel_noise_mad(chunked(stokes_q, 8, 8), chunked(stokes_u, 8, 8))
     coarse = estimate_channel_noise_mad(
-        _chunked(stokes_q, -1, -1), _chunked(stokes_u, -1, -1)
+        chunked(stokes_q, -1, -1), chunked(stokes_u, -1, -1)
     )
     np.testing.assert_array_equal(fine, coarse)
 
 
-def test_estimate_channel_noise_mad_shape_mismatch_raises():
-    stokes_q = _chunked(np.zeros((5, 4, 4)), 2, 2)
-    stokes_u = _chunked(np.zeros((5, 3, 3)), 2, 2)
+def test_estimate_channel_noise_mad_shape_mismatch_raises(
+    chunked: Callable[..., da.Array],
+):
+    stokes_q = chunked(np.zeros((5, 4, 4)), 2, 2)
+    stokes_u = chunked(np.zeros((5, 3, 3)), 2, 2)
     with pytest.raises(ValueError, match="same shape"):
         estimate_channel_noise_mad(stokes_q, stokes_u)
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_rmclean_3d_moment_maps(synthetic_cube: SyntheticCube):
+def test_rmclean_3d_moment_maps(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """3D RM-CLEAN exposes Faraday moment maps matching a direct call."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -674,10 +699,12 @@ def test_rmclean_3d_moment_maps(synthetic_cube: SyntheticCube):
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
+def test_rmclean_3d_from_synth_moment_maps(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """The from_synth convenience wrapper scales the moment threshold from SNR."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -694,10 +721,12 @@ def test_rmclean_3d_from_synth_moment_maps(synthetic_cube: SyntheticCube):
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_rmclean_3d_peak_maps(synthetic_cube: SyntheticCube):
+def test_rmclean_3d_peak_maps(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """The peak maps come off the clean result, and match `calc_faraday_peaks`."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -742,10 +771,12 @@ def test_rmclean_3d_peak_maps(synthetic_cube: SyntheticCube):
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_rmclean_3d_from_synth_peak_maps(synthetic_cube: SyntheticCube):
+def test_rmclean_3d_from_synth_peak_maps(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """Every pixel holds a bright source, so the peak maps must recover it."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     synth = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -773,7 +804,9 @@ def test_rmclean_3d_from_synth_peak_maps(synthetic_cube: SyntheticCube):
 @pytest.mark.filterwarnings("ignore: All channels masked")
 @pytest.mark.parametrize("weight_type", ["variance", "uniform"])
 def test_per_pixel_weight_matches_the_shared_one(
-    synthetic_cube: SyntheticCube, weight_type: WeightType
+    synthetic_cube: SyntheticCube,
+    weight_type: WeightType,
+    chunked: Callable[..., da.Array],
 ):
     """A per-pixel weight cube that is uniform must reduce to the per-channel one.
 
@@ -785,8 +818,8 @@ def test_per_pixel_weight_matches_the_shared_one(
     `run_rmclean_from_synth` cannot format or compare. And the shared RMSF took a
     spatial mean of the whole cube where one pixel is what it documents.
     """
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     n_freq = synthetic_cube.freq_arr_hz.size
     ny, nx = synthetic_cube.rm_map.shape
     weight_1d = 1.0 / np.linspace(1e-3, 3e-3, n_freq) ** 2
@@ -833,24 +866,25 @@ def test_per_pixel_weight_matches_the_shared_one(
     np.testing.assert_array_equal(pixel_iters, shared_iters)
 
 
-def _varying_noise_cube(ny: int = 6, nx: int = 6, span: float = 100.0):
+def varying_noise_cube(ny: int = 6, nx: int = 6, span: float = 100.0):
     """Q/U with the noise rising across the field, as a mosaic edge does."""
+    rng = np.random.default_rng(2025)
     n_freq = 32
     freq_arr_hz = np.linspace(0.9e9, 1.4e9, n_freq)
     lambda_sq = freq_to_lambda2(freq_arr_hz)
     angle = 2 * (
-        RNG.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
-        + RNG.uniform(0, np.pi, (ny, nx))[None]
+        rng.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
+        + rng.uniform(0, np.pi, (ny, nx))[None]
     )
     sigma_map = np.geomspace(1e-4, 1e-4 * span, ny * nx).reshape(ny, nx)
     sigma = np.broadcast_to(sigma_map[None], (n_freq, ny, nx)).copy()
-    stokes_q = 0.6 * np.cos(angle) + RNG.normal(0, 1, sigma.shape) * sigma
-    stokes_u = 0.6 * np.sin(angle) + RNG.normal(0, 1, sigma.shape) * sigma
+    stokes_q = 0.6 * np.cos(angle) + rng.normal(0, 1, sigma.shape) * sigma
+    stokes_u = 0.6 * np.sin(angle) + rng.normal(0, 1, sigma.shape) * sigma
     return freq_arr_hz, stokes_q, stokes_u, sigma
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_noise_map_is_right_pixel_by_pixel():
+def test_noise_map_is_right_pixel_by_pixel(chunked: Callable[..., da.Array]):
     """Spatially varying noise must give each pixel its own theoretical noise.
 
     `compute_theoretical_noise` used to sum over the spatial axes too, so one
@@ -858,12 +892,12 @@ def test_noise_map_is_right_pixel_by_pixel():
     quietest pixel. CLEAN scales its mask and threshold from this, so the number
     has to be each pixel's own.
     """
-    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube()
+    freq_arr_hz, stokes_q, stokes_u, sigma = varying_noise_cube()
     weight_arr = 1.0 / sigma**2
 
     synth = rmsynth_3d(
-        _chunked(stokes_q, 3, 3),
-        _chunked(stokes_u, 3, 3),
+        chunked(stokes_q, 3, 3),
+        chunked(stokes_u, 3, 3),
         freq_arr_hz,
         weight_arr=weight_arr,
         d_phi_radm2=D_PHI_RADM2,
@@ -886,16 +920,16 @@ def test_noise_map_is_right_pixel_by_pixel():
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_clean_thresholds_follow_the_noise_map():
+def test_clean_thresholds_follow_the_noise_map(chunked: Callable[..., da.Array]):
     """A noisy pixel must not be cleaned to a quiet pixel's threshold.
 
     With one scalar threshold for the image, the noisiest pixels get a cut far
     below their own noise and CLEAN grinds into it.
     """
-    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube()
+    freq_arr_hz, stokes_q, stokes_u, sigma = varying_noise_cube()
     synth = rmsynth_3d(
-        _chunked(stokes_q, 3, 3),
-        _chunked(stokes_u, 3, 3),
+        chunked(stokes_q, 3, 3),
+        chunked(stokes_u, 3, 3),
         freq_arr_hz,
         weight_arr=1.0 / sigma**2,
         d_phi_radm2=D_PHI_RADM2,
@@ -922,17 +956,19 @@ def test_clean_thresholds_follow_the_noise_map():
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_shared_rmsf_kept_when_pixels_only_differ_in_scale():
+def test_shared_rmsf_kept_when_pixels_only_differ_in_scale(
+    chunked: Callable[..., da.Array],
+):
     """Noise varying across the image but not with frequency still shares an RMSF.
 
     The RMSF is normalised by the weight sum, so pixels whose weights are scalar
     multiples of each other have the same one. Keeping the shared spectrum there
     is what stops per-pixel noise costing a whole extra cube.
     """
-    freq_arr_hz, stokes_q, stokes_u, sigma = _varying_noise_cube(ny=4, nx=4)
+    freq_arr_hz, stokes_q, stokes_u, sigma = varying_noise_cube(ny=4, nx=4)
     synth = rmsynth_3d(
-        _chunked(stokes_q, 2, 2),
-        _chunked(stokes_u, 2, 2),
+        chunked(stokes_q, 2, 2),
+        chunked(stokes_u, 2, 2),
         freq_arr_hz,
         weight_arr=1.0 / sigma**2,
         d_phi_radm2=D_PHI_RADM2,
@@ -940,14 +976,14 @@ def test_shared_rmsf_kept_when_pixels_only_differ_in_scale():
     assert synth.rmsf_cube is None
 
     per_pixel = rmsynth_3d(
-        _chunked(stokes_q, 2, 2),
-        _chunked(stokes_u, 2, 2),
+        chunked(stokes_q, 2, 2),
+        chunked(stokes_u, 2, 2),
         freq_arr_hz,
         weight_arr=1.0 / sigma**2,
         d_phi_radm2=D_PHI_RADM2,
         per_pixel_rmsf=True,
     )
-    cube = _require_cube(per_pixel.rmsf_cube).compute()
+    cube = require(per_pixel.rmsf_cube).compute()
     for pixel in ((0, 0), (3, 3)):
         np.testing.assert_allclose(
             cube[(slice(None), *pixel)], synth.rmsf_arr, rtol=1e-10, atol=1e-12
@@ -955,13 +991,15 @@ def test_shared_rmsf_kept_when_pixels_only_differ_in_scale():
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_per_pixel_rmsf_forced_when_spectra_differ(caplog):
+def test_per_pixel_rmsf_forced_when_spectra_differ(
+    caplog, chunked: Callable[..., da.Array]
+):
     """When the noise spectrum itself varies per pixel, no one RMSF fits.
 
     Nothing asked for the cube here; it is switched on because a shared spectrum
     would silently be wrong for most of the image.
     """
-    freq_arr_hz, stokes_q, stokes_u, _ = _varying_noise_cube(ny=4, nx=4)
+    freq_arr_hz, stokes_q, stokes_u, _ = varying_noise_cube(ny=4, nx=4)
     ny, nx = 4, 4
     # Each pixel's band tilts differently, so no rescaling maps one onto another.
     tilt = np.linspace(-1.0, 1.0, ny * nx).reshape(ny, nx)
@@ -969,8 +1007,8 @@ def test_per_pixel_rmsf_forced_when_spectra_differ(caplog):
 
     with caplog.at_level(logging.INFO, logger="rm-lite"):
         synth = rmsynth_3d(
-            _chunked(stokes_q, 2, 2),
-            _chunked(stokes_u, 2, 2),
+            chunked(stokes_q, 2, 2),
+            chunked(stokes_u, 2, 2),
             freq_arr_hz,
             weight_arr=1.0 / sigma**2,
             d_phi_radm2=D_PHI_RADM2,
@@ -978,17 +1016,18 @@ def test_per_pixel_rmsf_forced_when_spectra_differ(caplog):
 
     assert synth.rmsf_cube is not None
     assert "do not share one" in caplog.text
-    cube = _require_cube(synth.rmsf_cube).compute()
+    cube = require(synth.rmsf_cube).compute()
     corner_to_corner = np.max(np.abs(cube[:, 0, 0] - cube[:, -1, -1])) / np.max(
         np.abs(cube[:, 0, 0])
     )
     assert corner_to_corner > 0.1
 
 
-def _mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
+def mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
     """A linmos-like cube: the primary beam shrinks with frequency, so pixels
     near the field edge lose the top of the band and the number of contributing
     channels varies across the image."""
+    rng = np.random.default_rng(2025)
     n_freq = 96
     freq_arr_hz = np.linspace(744e6, 1032e6, n_freq)
     lambda_sq = freq_to_lambda2(freq_arr_hz)
@@ -998,8 +1037,8 @@ def _mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
     # Primary beam radius goes as 1/nu.
     inside = radius[None] <= (freq_arr_hz[0] / freq_arr_hz)[:, None, None]
     angle = 2 * (
-        RNG.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
-        + RNG.uniform(0, np.pi, (ny, nx))[None]
+        rng.uniform(-60, 60, (ny, nx))[None] * lambda_sq[:, None, None]
+        + rng.uniform(0, np.pi, (ny, nx))[None]
     )
     stokes_q = np.where(inside, 0.6 * np.cos(angle), np.nan)
     stokes_u = np.where(inside, 0.6 * np.sin(angle), np.nan)
@@ -1009,7 +1048,7 @@ def _mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_mosaic_edge_channels_are_handled():
+def test_mosaic_edge_channels_are_handled(chunked: Callable[..., da.Array]):
     """A frequency-dependent primary beam blanks the band per pixel.
 
     The blanks arrive as NaN in both the data and the mosaicked noise cube.
@@ -1017,14 +1056,14 @@ def test_mosaic_edge_channels_are_handled():
     channel weight drops that channel from `lam_sq_0_m2` altogether -- silently
     reweighting the cube onto whichever channels happen to be complete.
     """
-    freq_arr_hz, stokes_q, stokes_u, weight_arr, inside = _mosaic_cube()
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, inside = mosaic_cube()
     n_freq = freq_arr_hz.size
     n_chan = inside.sum(axis=0)
     assert n_chan.min() < n_chan.max() == n_freq, "premise: the edge loses channels"
 
     synth = rmsynth_3d(
-        _chunked(stokes_q, 4, 4),
-        _chunked(stokes_u, 4, 4),
+        chunked(stokes_q, 4, 4),
+        chunked(stokes_u, 4, 4),
         freq_arr_hz,
         weight_arr=weight_arr,
         phi_max_radm2=200.0,
@@ -1039,7 +1078,7 @@ def test_mosaic_edge_channels_are_handled():
 
     # Pixels no longer weight the channels alike, so they cannot share an RMSF:
     # the per-pixel cube is switched on without being asked for.
-    cube = _require_cube(synth.rmsf_cube).compute()
+    cube = require(synth.rmsf_cube).compute()
     ny, nx = n_chan.shape
     centre = cube[:, ny // 2, nx // 2]
     corner = cube[:, 0, 0]
@@ -1058,14 +1097,14 @@ def test_mosaic_edge_channels_are_handled():
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
 @pytest.mark.parametrize("mode", ["auto", "per_pixel", 0.1])
-def test_lam_sq_0_modes_keep_one_reference(mode):
+def test_lam_sq_0_modes_keep_one_reference(mode, chunked: Callable[..., da.Array]):
     """Whatever picks the reference, the phase and flux references are the same.
 
     `stokes_i_ref_freq_hz` is derived from the reference lambda^2 in one place,
     so a caller cannot end up with an FDF derotated to one frequency and Stokes
     I terms defined at another.
     """
-    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = _mosaic_cube(ny=4, nx=4)
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = mosaic_cube(ny=4, nx=4)
     ref = float(np.median(freq_arr_hz))
     stokes_i = np.where(
         np.isfinite(stokes_q),
@@ -1073,12 +1112,12 @@ def test_lam_sq_0_modes_keep_one_reference(mode):
         np.nan,
     )
     synth = rmsynth_3d(
-        _chunked(stokes_q, 2, 2),
-        _chunked(stokes_u, 2, 2),
+        chunked(stokes_q, 2, 2),
+        chunked(stokes_u, 2, 2),
         freq_arr_hz,
         weight_arr=weight_arr,
         lam_sq_0_m2=mode,
-        stokes_i=_chunked(stokes_i, 2, 2),
+        stokes_i=chunked(stokes_i, 2, 2),
         stokes_i_error=np.full(freq_arr_hz.size, 1e-3),
         phi_max_radm2=200.0,
         d_phi_radm2=2.0,
@@ -1113,14 +1152,14 @@ def test_lam_sq_0_modes_keep_one_reference(mode):
 
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
-def test_per_pixel_reference_is_an_exact_derotation():
+def test_per_pixel_reference_is_an_exact_derotation(chunked: Callable[..., da.Array]):
     """Choosing a reference only ever moves phase, never amplitude.
 
     B&dB eq. 25 is a shift theorem, so the per-pixel FDF is the shared-reference
     FDF moved to the map, exactly. Checked without a Stokes I model, since a
     per-pixel reference frequency also moves the flux the FDF is scaled by.
     """
-    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = _mosaic_cube(ny=4, nx=4)
+    freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = mosaic_cube(ny=4, nx=4)
     common: dict[str, Any] = {
         "freq_arr_hz": freq_arr_hz,
         "weight_arr": weight_arr,
@@ -1128,11 +1167,11 @@ def test_per_pixel_reference_is_an_exact_derotation():
         "d_phi_radm2": 2.0,
     }
     shared = rmsynth_3d(
-        _chunked(stokes_q, 2, 2), _chunked(stokes_u, 2, 2), lam_sq_0_m2="auto", **common
+        chunked(stokes_q, 2, 2), chunked(stokes_u, 2, 2), lam_sq_0_m2="auto", **common
     )
     per_pixel = rmsynth_3d(
-        _chunked(stokes_q, 2, 2),
-        _chunked(stokes_u, 2, 2),
+        chunked(stokes_q, 2, 2),
+        chunked(stokes_u, 2, 2),
         lam_sq_0_m2="per_pixel",
         **common,
     )
@@ -1165,12 +1204,12 @@ def test_lam_sq_0_option_is_validated():
             FDFOptions(lam_sq_0_m2=bad)
 
 
-def _write_cube(path, data: NDArray[np.float64]) -> None:
+def write_cube(path, data: NDArray[np.float64]) -> None:
     """Write a cube to FITS in FITS-native big-endian float32."""
     fits.PrimaryHDU(data.astype(">f4")).writeto(path, overwrite=True)
 
 
-def _memmap_read(path, y0: int, y1: int) -> NDArray[np.float32]:
+def memmap_read(path, y0: int, y1: int) -> NDArray[np.float32]:
     """The pre-fix reader: squeeze a memmap and slice out a spatial block."""
     with fits.open(path, memmap=True) as hdul:
         return np.array(np.squeeze(hdul[0].data)[:, y0:y1, :])
@@ -1179,29 +1218,31 @@ def _memmap_read(path, y0: int, y1: int) -> NDArray[np.float32]:
 @pytest.mark.parametrize("degenerate_axis", [False, True])
 def test_read_fits_cube_dask_matches_memmap_read(tmp_path, degenerate_axis: bool):
     """New section-based reader is bit-identical to the old memmap path."""
+    rng = np.random.default_rng(2025)
     n_freq, ny, nx = 6, 13, 5
-    cube = RNG.normal(0, 1, (n_freq, ny, nx))
+    cube = rng.normal(0, 1, (n_freq, ny, nx))
     path = tmp_path / "cube.fits"
-    _write_cube(path, cube[np.newaxis] if degenerate_axis else cube)
+    write_cube(path, cube[np.newaxis] if degenerate_axis else cube)
 
     # A band height of 4 leaves a short final band (13 % 4 == 1).
     target_chunk_mb = n_freq * 4 * nx * 4 / 1024**2
     arr, _ = read_fits_cube_dask(path, target_chunk_mb=target_chunk_mb)
 
     assert arr.chunks[1] == (4, 4, 4, 1)
-    np.testing.assert_array_equal(arr.compute(), _memmap_read(path, 0, ny))
+    np.testing.assert_array_equal(arr.compute(), memmap_read(path, 0, ny))
 
 
 def test_read_fits_cube_dask_single_row_bands(tmp_path):
     """A one-row band (cy == 1) survives rather than being squeezed away."""
-    cube = RNG.normal(0, 1, (4, 3, 5))
+    rng = np.random.default_rng(2025)
+    cube = rng.normal(0, 1, (4, 3, 5))
     path = tmp_path / "cube.fits"
-    _write_cube(path, cube[np.newaxis])
+    write_cube(path, cube[np.newaxis])
 
     arr, _ = read_fits_cube_dask(path, target_chunk_mb=1e-9)
 
     assert arr.chunks == ((4,), (1, 1, 1), (5,))
-    np.testing.assert_array_equal(arr.compute(), _memmap_read(path, 0, 3))
+    np.testing.assert_array_equal(arr.compute(), memmap_read(path, 0, 3))
 
 
 def test_read_fits_cube_dask_has_no_astype_layer(tmp_path):
@@ -1211,8 +1252,9 @@ def test_read_fits_cube_dask_has_no_astype_layer(tmp_path):
     graft an `astype` onto every block, which then absorbed the whole cost of
     materialising the read and showed up as the culprit in worker kills.
     """
+    rng = np.random.default_rng(2025)
     path = tmp_path / "cube.fits"
-    _write_cube(path, RNG.normal(0, 1, (4, 8, 5)))
+    write_cube(path, rng.normal(0, 1, (4, 8, 5)))
 
     arr, _ = read_fits_cube_dask(path, target_chunk_mb=1e-9)
 
@@ -1225,8 +1267,9 @@ def test_read_fits_cube_dask_has_no_astype_layer(tmp_path):
 @pytest.mark.parametrize("reader", [read_fits_cube_dask, read_fits_cube_channel_chunks])
 def test_readers_emit_one_graph_layer_whatever_the_block_count(tmp_path, reader):
     """The whole block grid is one layer, not a layer per block plus a concatenate."""
+    rng = np.random.default_rng(2025)
     path = tmp_path / "cube.fits"
-    _write_cube(path, RNG.normal(0, 1, (8, 64, 4)))
+    write_cube(path, rng.normal(0, 1, (8, 64, 4)))
 
     one_block, _ = reader(path, target_chunk_mb=1e3)
     many_blocks, _ = reader(path, target_chunk_mb=1e-9)
@@ -1236,7 +1279,7 @@ def test_readers_emit_one_graph_layer_whatever_the_block_count(tmp_path, reader)
     assert len(many_blocks.dask.layers) == 1
 
 
-def _rmclean_graph(
+def rmclean_graph(
     path, rows: int, n_freq: int, nx: int
 ) -> tuple[float, RMClean3DResults]:
     """Build the RM-CLEAN graph over a cube read in `rows`-tall bands, and time it.
@@ -1278,18 +1321,18 @@ def test_rmclean_graph_build_stays_linear_in_chunk_count(tmp_path):
     """
     n_freq, ny, nx = 4, 8192, 8
     path = tmp_path / "cube.fits"
-    _write_cube(path, np.zeros((n_freq, ny, nx)))
+    write_cube(path, np.zeros((n_freq, ny, nx)))
 
     def best_of(rows: int) -> float:
         # Min over repeats: a loaded runner inflates individual builds, but
         # nothing makes one spuriously fast.
-        return min(_rmclean_graph(path, rows, n_freq, nx)[0] for _ in range(5))
+        return min(rmclean_graph(path, rows, n_freq, nx)[0] for _ in range(5))
 
     coarse_time = best_of(16)
     fine_time = best_of(4)
 
-    _, coarse = _rmclean_graph(path, 16, n_freq, nx)
-    _, fine = _rmclean_graph(path, 4, n_freq, nx)
+    _, coarse = rmclean_graph(path, 16, n_freq, nx)
+    _, fine = rmclean_graph(path, 4, n_freq, nx)
     assert fine.clean_fdf_cube.npartitions == 4 * coarse.clean_fdf_cube.npartitions
     # Layers stay flat; only the number of tasks in them grows.
     assert len(fine.clean_fdf_cube.dask.layers) == len(
@@ -1302,9 +1345,10 @@ def test_rmclean_graph_build_stays_linear_in_chunk_count(tmp_path):
 
 def test_read_fits_cube_channel_chunks_matches_spatial_read(tmp_path):
     """Channel-chunked reader returns the same cube, chunked along frequency."""
+    rng = np.random.default_rng(2025)
     n_freq, ny, nx = 7, 6, 5
     path = tmp_path / "cube.fits"
-    _write_cube(path, RNG.normal(0, 1, (n_freq, ny, nx))[np.newaxis])
+    write_cube(path, rng.normal(0, 1, (n_freq, ny, nx))[np.newaxis])
 
     spatial, _ = read_fits_cube_dask(path)
     channels, _ = read_fits_cube_channel_chunks(
@@ -1380,38 +1424,35 @@ def test_readers_agree_byte_for_byte_across_dtypes(tmp_path, dtype: str):
     np.testing.assert_array_equal(channels.compute(), spatial.compute())
 
 
-def _qu_fits_cubes(tmp_path: Path, synthetic_cube: SyntheticCube) -> dict[str, Path]:
+@pytest.fixture
+def qu_fits_cubes(
+    tmp_path: Path, synthetic_cube: SyntheticCube, fits_cube: Callable[..., Path]
+) -> dict[str, Path]:
     """Stokes Q/U/I FITS cubes with a usable spectral WCS."""
-    freq_arr_hz = synthetic_cube.freq_arr_hz
-    header = Header()
-    header["CTYPE3"] = "FREQ"
-    header["CRVAL3"] = freq_arr_hz[0]
-    header["CDELT3"] = freq_arr_hz[1] - freq_arr_hz[0]
-    header["CRPIX3"] = 1
-    header["CUNIT3"] = "Hz"
-    paths = {}
-    for name, data in (
-        ("q", synthetic_cube.stokes_q),
-        ("u", synthetic_cube.stokes_u),
-        ("i", np.ones_like(synthetic_cube.stokes_q)),
-    ):
-        paths[name] = tmp_path / f"{name}.fits"
-        fits.PrimaryHDU(data.astype(">f4"), header=header).writeto(paths[name])
-    return paths
+    return {
+        name: fits_cube(tmp_path / f"{name}.fits", data, synthetic_cube.freq_arr_hz)
+        for name, data in (
+            ("q", synthetic_cube.stokes_q),
+            ("u", synthetic_cube.stokes_u),
+            ("i", np.ones_like(synthetic_cube.stokes_q)),
+        )
+    }
 
 
 @pytest.mark.parametrize("shard_rows", [None, 4])
-def test_fits_cube_to_zarr_round_trips(tmp_path, synthetic_cube, shard_rows):
+def test_fits_cube_to_zarr_round_trips(qu_fits_cubes, tmp_path, shard_rows):
     """A store must hold the cube it was written from, sharded or not.
 
     A shard is one file, so a write task has to own a whole one: two tasks
     writing different chunks of the same shard lose one another's data.
     """
-    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
     store = fits_cube_to_zarr(
-        paths["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4), shard_rows=shard_rows
+        qu_fits_cubes["q"],
+        tmp_path / "q.zarr",
+        spatial_chunk=(1, 4),
+        shard_rows=shard_rows,
     )
-    from_fits, header = read_fits_cube_dask(paths["q"], spatial_chunk=(1, 4))
+    from_fits, header = read_fits_cube_dask(qu_fits_cubes["q"], spatial_chunk=(1, 4))
     from_zarr, zarr_header = read_cube_dask(store)
 
     np.testing.assert_array_equal(from_zarr.compute(), from_fits.compute())
@@ -1420,15 +1461,14 @@ def test_fits_cube_to_zarr_round_trips(tmp_path, synthetic_cube, shard_rows):
 
 
 def test_fits_cube_to_zarr_tiles_are_readable_a_region_at_a_time(
-    tmp_path, synthetic_cube
+    qu_fits_cubes, tmp_path
 ):
     """A tiled store must read a sub-region without gathering whole rows."""
-    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
     store = fits_cube_to_zarr(
-        paths["q"], tmp_path / "q.zarr", spatial_chunk=(2, 2), shard_rows=4
+        qu_fits_cubes["q"], tmp_path / "q.zarr", spatial_chunk=(2, 2), shard_rows=4
     )
     cube, _ = read_cube_dask(store)
-    reference, _ = read_fits_cube_dask(paths["q"])
+    reference, _ = read_fits_cube_dask(qu_fits_cubes["q"])
 
     assert cube.chunksize[1:] == (2, 2)
     np.testing.assert_array_equal(
@@ -1436,21 +1476,20 @@ def test_fits_cube_to_zarr_tiles_are_readable_a_region_at_a_time(
     )
 
 
-def test_rmsynth_3d_from_fits_converts_to_zarr_on_request(tmp_path, synthetic_cube):
+def test_rmsynth_3d_from_fits_converts_to_zarr_on_request(qu_fits_cubes):
     """Converting first must not change the answer, only where it is read from."""
-    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
     plain = rmsynth_3d_from_fits(
-        paths["q"],
-        paths["u"],
-        stokes_i_file=paths["i"],
+        qu_fits_cubes["q"],
+        qu_fits_cubes["u"],
+        stokes_i_file=qu_fits_cubes["i"],
         stokes_i_snr_cut=None,
         d_phi_radm2=D_PHI_RADM2,
         phi_max_radm2=150.0,
     )
     converted = rmsynth_3d_from_fits(
-        paths["q"],
-        paths["u"],
-        stokes_i_file=paths["i"],
+        qu_fits_cubes["q"],
+        qu_fits_cubes["u"],
+        stokes_i_file=qu_fits_cubes["i"],
         stokes_i_snr_cut=None,
         d_phi_radm2=D_PHI_RADM2,
         phi_max_radm2=150.0,
@@ -1458,8 +1497,8 @@ def test_rmsynth_3d_from_fits_converts_to_zarr_on_request(tmp_path, synthetic_cu
     )
 
     # Named after the cube it came from, so two cubes cannot collide.
-    assert paths["q"].with_suffix(".zarr").is_dir()
-    assert paths["u"].with_suffix(".zarr").is_dir()
+    assert qu_fits_cubes["q"].with_suffix(".zarr").is_dir()
+    assert qu_fits_cubes["u"].with_suffix(".zarr").is_dir()
     assert converted.fdf_dirty_cube.chunksize == plain.fdf_dirty_cube.chunksize
     np.testing.assert_array_equal(
         converted.fdf_dirty_cube.compute(), plain.fdf_dirty_cube.compute()
@@ -1553,6 +1592,7 @@ def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
     thing to check is that numpy stays quiet about the division while the
     pixels inside the cutoff still recover their spectral index.
     """
+    rng = np.random.default_rng(2025)
     freq_arr_hz = (np.arange(744, 1032, 6) * 1e6).astype(np.float64)
     ny = nx = 12
     alpha = -0.9
@@ -1567,7 +1607,7 @@ def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
 
     spectrum = (freq_arr_hz / ref_freq_hz)[:, np.newaxis, np.newaxis] ** alpha
     stokes_i = np.broadcast_to(2.0 * spectrum, weight.shape).copy()
-    rm_map = RNG.uniform(-100, 100, (ny, nx))
+    rm_map = rng.uniform(-100, 100, (ny, nx))
     angle = 2 * rm_map[np.newaxis] * freq_to_lambda2(freq_arr_hz)[:, None, None]
     stokes_q = 0.5 * np.cos(angle) * stokes_i
     stokes_u = 0.5 * np.sin(angle) * stokes_i
@@ -1599,7 +1639,7 @@ def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
         fit_order=1,
         stokes_i_snr_cut=None,
     )
-    alpha_map = _require_cube(synth.stokes_i_alpha_map)
+    alpha_map = require(synth.stokes_i_alpha_map)
 
     # Both blanked divisions are on this path: inverting the zero weight, and
     # dividing Q+iU by the NaN model the fit leaves outside the cutoff.
@@ -1624,14 +1664,17 @@ def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
     assert np.all(np.isfinite(fdf_cube[:, inside]))
 
 
-def test_channel_noise_from_channel_chunks_matches_whole_cube(tmp_path):
+def test_channel_noise_from_channel_chunks_matches_whole_cube(
+    tmp_path, chunked: Callable[..., da.Array]
+):
     """Per-channel noise off a channel-chunked read matches a whole-cube reduction."""
+    rng = np.random.default_rng(2025)
     n_freq, ny, nx = 8, 16, 16
-    stokes_q = RNG.normal(0, 1, (n_freq, ny, nx))
-    stokes_u = RNG.normal(0, 1, (n_freq, ny, nx))
+    stokes_q = rng.normal(0, 1, (n_freq, ny, nx))
+    stokes_u = rng.normal(0, 1, (n_freq, ny, nx))
     q_path, u_path = tmp_path / "q.fits", tmp_path / "u.fits"
-    _write_cube(q_path, stokes_q)
-    _write_cube(u_path, stokes_u)
+    write_cube(q_path, stokes_q)
+    write_cube(u_path, stokes_u)
 
     q_chunked, _ = read_fits_cube_channel_chunks(
         q_path, target_chunk_mb=2 * ny * nx * 4 / 1024**2
@@ -1642,39 +1685,45 @@ def test_channel_noise_from_channel_chunks_matches_whole_cube(tmp_path):
     chunked_noise = estimate_channel_noise_mad(q_chunked, u_chunked)
 
     whole_cube_noise = estimate_channel_noise_mad(
-        _chunked(stokes_q, -1, -1),
-        _chunked(stokes_u, -1, -1),
+        chunked(stokes_q, -1, -1),
+        chunked(stokes_u, -1, -1),
     )
     np.testing.assert_allclose(chunked_noise, whole_cube_noise, rtol=1e-6)
 
 
-def test_channel_noise_warns_on_spatially_chunked_input(caplog):
+def test_channel_noise_warns_on_spatially_chunked_input(
+    caplog, chunked: Callable[..., da.Array]
+):
     """Spatially chunked input still works, but says it is gathering the cube."""
-    stokes_q = RNG.normal(0, 1, (4, 8, 8))
-    stokes_u = RNG.normal(0, 1, (4, 8, 8))
+    rng = np.random.default_rng(2025)
+    stokes_q = rng.normal(0, 1, (4, 8, 8))
+    stokes_u = rng.normal(0, 1, (4, 8, 8))
 
     with caplog.at_level("WARNING"):
-        estimate_channel_noise_mad(_chunked(stokes_q, 4, 4), _chunked(stokes_u, 4, 4))
+        estimate_channel_noise_mad(chunked(stokes_q, 4, 4), chunked(stokes_u, 4, 4))
 
     assert "read_fits_cube_channel_chunks" in caplog.text
 
 
-def test_rmsynth_3d_output_chunks_meet_the_target_chunk_size():
+def test_rmsynth_3d_output_chunks_meet_the_target_chunk_size(
+    chunked: Callable[..., da.Array],
+):
     """Spatial chunks shrink until an FDF chunk fits `target_chunk_mb`.
 
     The Faraday-depth axis is longer than the frequency axis and complex rather
     than real, so keeping the caller's spatial chunking would make every output
     chunk a large multiple of the target they asked for.
     """
+    rng = np.random.default_rng(2025)
     n_freq, ny, nx = 128, 64, 32
     freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
-    stokes_q = RNG.normal(0, 1, (n_freq, ny, nx))
-    stokes_u = RNG.normal(0, 1, (n_freq, ny, nx))
+    stokes_q = rng.normal(0, 1, (n_freq, ny, nx))
+    stokes_u = rng.normal(0, 1, (n_freq, ny, nx))
     target_chunk_mb = 0.25
 
     synth = rmsynth_3d(
-        _chunked(stokes_q, 32, nx),
-        _chunked(stokes_u, 32, nx),
+        chunked(stokes_q, 32, nx),
+        chunked(stokes_u, 32, nx),
         freq_arr_hz,
         phi_max_radm2=100.0,
         d_phi_radm2=2.0,
@@ -1692,8 +1741,8 @@ def test_rmsynth_3d_output_chunks_meet_the_target_chunk_size():
     np.testing.assert_allclose(
         synth.fdf_dirty_cube.compute(),
         rmsynth_3d(
-            _chunked(stokes_q, 1, nx),
-            _chunked(stokes_u, 1, nx),
+            chunked(stokes_q, 1, nx),
+            chunked(stokes_u, 1, nx),
             freq_arr_hz,
             phi_max_radm2=100.0,
             d_phi_radm2=2.0,
@@ -1705,16 +1754,19 @@ def test_rmsynth_3d_output_chunks_meet_the_target_chunk_size():
     ("in_dtype", "out_dtype"),
     [(np.float32, np.complex64), (np.float64, np.complex128)],
 )
-def test_rmsynth_3d_follows_the_input_precision(in_dtype, out_dtype):
+def test_rmsynth_3d_follows_the_input_precision(
+    in_dtype, out_dtype, chunked: Callable[..., da.Array]
+):
     """Single-precision cubes give a single-precision FDF, RMSF and CLEAN."""
+    rng = np.random.default_rng(2025)
     n_freq, ny, nx = 64, 8, 8
     freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
-    stokes_q = RNG.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
-    stokes_u = RNG.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
+    stokes_q = rng.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
+    stokes_u = rng.normal(0, 1, (n_freq, ny, nx)).astype(in_dtype)
 
     synth = rmsynth_3d(
-        _chunked(stokes_q, 4, nx),
-        _chunked(stokes_u, 4, nx),
+        chunked(stokes_q, 4, nx),
+        chunked(stokes_u, 4, nx),
         freq_arr_hz,
         phi_max_radm2=100.0,
         d_phi_radm2=2.0,
@@ -1730,15 +1782,17 @@ def test_rmsynth_3d_follows_the_input_precision(in_dtype, out_dtype):
     assert synth.rmsf_arr.dtype == out_dtype
 
 
-def test_rmclean_3d_builds_the_rmsf_in_its_own_task(synthetic_cube: SyntheticCube):
+def test_rmclean_3d_builds_the_rmsf_in_its_own_task(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """Building the RMSF inside CLEAN must match reading it from a cube.
 
     The per-pixel RMSF is the biggest array here and CLEAN is its only reader,
     so it is built in the CLEAN task; the cube is still offered for anyone who
     wants it. Both must clean to the same answer.
     """
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     noise = np.linspace(1e-3, 3e-3, synthetic_cube.freq_arr_hz.size)
     weight = np.broadcast_to(noise[:, None, None], synthetic_cube.stokes_q.shape).copy()
 
@@ -1796,12 +1850,15 @@ def test_rmsynth_3d_narrows_a_cube_too_wide_for_one_row():
     assert 1000 * np.prod(split.chunksize[1:]) * dtype.itemsize <= 1024**2
 
 
-def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger():
+def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger(
+    chunked: Callable[..., da.Array],
+):
     """Coarse chunks survive when the output is no larger than the input."""
+    rng = np.random.default_rng(2025)
     n_freq, ny, nx = 400, 8, 8
     freq_arr_hz = np.linspace(8.0e8, 1.4e9, n_freq)
-    q_dask = _chunked(RNG.normal(0, 1, (n_freq, ny, nx)), 4, nx)
-    u_dask = _chunked(RNG.normal(0, 1, (n_freq, ny, nx)), 4, nx)
+    q_dask = chunked(rng.normal(0, 1, (n_freq, ny, nx)), 4, nx)
+    u_dask = chunked(rng.normal(0, 1, (n_freq, ny, nx)), 4, nx)
 
     synth = rmsynth_3d(q_dask, u_dask, freq_arr_hz, d_phi_radm2=200.0)
 
@@ -1829,11 +1886,13 @@ def test_write_zarr_group_rechunks_irregular_arrays(tmp_path, caplog):
     assert np.array_equal(np.asarray(zarr.open_array(store, path="even")), data)
 
 
-def test_shared_rmsf_is_what_the_per_pixel_cube_holds(synthetic_cube: SyntheticCube):
+def test_shared_rmsf_is_what_the_per_pixel_cube_holds(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """Every pixel of the per-pixel cube is the shared RMSF, which is the whole
     reason the cube is not returned by default."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
     default = rmsynth_3d(
         q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
@@ -1848,7 +1907,7 @@ def test_shared_rmsf_is_what_the_per_pixel_cube_holds(synthetic_cube: SyntheticC
         d_phi_radm2=D_PHI_RADM2,
         per_pixel_rmsf=True,
     )
-    cube = _require_cube(per_pixel.rmsf_cube).compute()
+    cube = require(per_pixel.rmsf_cube).compute()
     ny, nx = synthetic_cube.rm_map.shape
     assert cube.shape == (default.phi_double_arr_radm2.size, ny, nx)
     # atol, not exact: finufft splits a batched multithreaded type-3 differently
@@ -1861,11 +1920,12 @@ def test_shared_rmsf_is_what_the_per_pixel_cube_holds(synthetic_cube: SyntheticC
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
     synthetic_cube: SyntheticCube,
+    chunked: Callable[..., da.Array],
 ):
     """Handing RM-CLEAN the one shared spectrum must clean exactly as handing it a
     cube of copies of that spectrum."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
         q_dask,
         u_dask,
@@ -1887,7 +1947,7 @@ def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
     )
     per_pixel = run_rmclean(
         synth.fdf_dirty_cube,
-        _require_cube(synth.rmsf_cube),
+        require(synth.rmsf_cube),
         *common,
         mask=MASK_THRESHOLD,
         threshold=CLEAN_THRESHOLD,
@@ -1896,11 +1956,13 @@ def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
     np.testing.assert_allclose(shared_fdf, per_pixel_fdf, atol=1e-10)
 
 
-def test_rmclean_rejects_an_rmsf_it_cannot_use(synthetic_cube: SyntheticCube):
+def test_rmclean_rejects_an_rmsf_it_cannot_use(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
     """Only a shared spectrum or a matching per-pixel cube make sense. The rest are
     caught before the graph is built, not part-way through a CLEAN run."""
-    q_dask = _chunked(synthetic_cube.stokes_q, 3, 4)
-    u_dask = _chunked(synthetic_cube.stokes_u, 3, 4)
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
         q_dask,
         u_dask,
@@ -1908,7 +1970,7 @@ def test_rmclean_rejects_an_rmsf_it_cannot_use(synthetic_cube: SyntheticCube):
         d_phi_radm2=D_PHI_RADM2,
         per_pixel_rmsf=True,
     )
-    rmsf_cube = _require_cube(synth.rmsf_cube)
+    rmsf_cube = require(synth.rmsf_cube)
 
     def clean_with(rmsf):
         return run_rmclean(
@@ -1951,11 +2013,12 @@ def test_read_zarr_cube_dask_rejects_a_store_without_a_header(tmp_path):
 
 
 def test_read_cube_dask_says_when_a_store_ignores_the_chunking_asked_for(
-    tmp_path, synthetic_cube, caplog
+    qu_fits_cubes, tmp_path, caplog
 ):
     """A store's chunking is fixed at write time, so a mismatch is worth saying."""
-    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
-    store = fits_cube_to_zarr(paths["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4))
+    store = fits_cube_to_zarr(
+        qu_fits_cubes["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4)
+    )
 
     with caplog.at_level(logging.INFO, logger="rm_lite"):
         cube, _ = read_cube_dask(store, spatial_chunk=(2, 4))
@@ -1964,32 +2027,32 @@ def test_read_cube_dask_says_when_a_store_ignores_the_chunking_asked_for(
     assert "not the (2, 4) asked for" in caplog.text
 
 
-def test_read_cube_channel_chunks_reads_a_store_as_written(tmp_path, synthetic_cube):
+def test_read_cube_channel_chunks_reads_a_store_as_written(qu_fits_cubes, tmp_path):
     """A store has one chunking, so a channel-chunked read gets what is there."""
-    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
-    store = fits_cube_to_zarr(paths["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4))
+    store = fits_cube_to_zarr(
+        qu_fits_cubes["q"], tmp_path / "q.zarr", spatial_chunk=(1, 4)
+    )
 
     from_store, header = read_cube_channel_chunks(store)
-    from_fits, _ = read_fits_cube_dask(paths["q"])
+    from_fits, _ = read_fits_cube_dask(qu_fits_cubes["q"])
 
     np.testing.assert_array_equal(from_store.compute(), from_fits.compute())
     assert header["CTYPE3"] == "FREQ"
 
 
 def test_rmsynth_3d_from_fits_takes_the_noise_from_error_cubes(
-    tmp_path, synthetic_cube
+    qu_fits_cubes, tmp_path, synthetic_cube
 ):
     """Q/U error cubes give the per-pixel noise, instead of estimating it."""
-    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
-    header = fits.getheader(paths["q"])
+    header = fits.getheader(qu_fits_cubes["q"])
     for name in ("q_error", "u_error"):
         fits.PrimaryHDU(
             np.full_like(synthetic_cube.stokes_q, 0.5).astype(">f4"), header=header
         ).writeto(tmp_path / f"{name}.fits")
 
     results = rmsynth_3d_from_fits(
-        paths["q"],
-        paths["u"],
+        qu_fits_cubes["q"],
+        qu_fits_cubes["u"],
         stokes_q_error_file=tmp_path / "q_error.fits",
         stokes_u_error_file=tmp_path / "u_error.fits",
         d_phi_radm2=D_PHI_RADM2,
@@ -1999,14 +2062,13 @@ def test_rmsynth_3d_from_fits_takes_the_noise_from_error_cubes(
     assert np.isfinite(results.fdf_dirty_cube.compute()).any()
 
 
-def test_rmsynth_3d_from_fits_estimates_the_stokes_i_noise(tmp_path, synthetic_cube):
+def test_rmsynth_3d_from_fits_estimates_the_stokes_i_noise(qu_fits_cubes):
     """With no Stokes I error cube, the noise comes from the cube itself."""
-    paths = _qu_fits_cubes(tmp_path, synthetic_cube)
 
     results = rmsynth_3d_from_fits(
-        paths["q"],
-        paths["u"],
-        stokes_i_file=paths["i"],
+        qu_fits_cubes["q"],
+        qu_fits_cubes["u"],
+        stokes_i_file=qu_fits_cubes["i"],
         estimate_stokes_i_noise=True,
         stokes_i_snr_cut=None,
         d_phi_radm2=D_PHI_RADM2,
