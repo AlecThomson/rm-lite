@@ -1,11 +1,4 @@
-"""Guard that public-tool keyword defaults stay in sync with the shared Options
-dataclass field defaults they are packed into.
-
-The public 1D/3D entry points keep flat keyword arguments for a friendly call
-signature, then pack them into `FDFOptions`/`StokesIFitOptions`/`RMCleanOptions`
-on the first line. That duplicates each default in two places; these tests fail
-if the two ever drift apart.
-"""
+"""Guard that public keyword defaults match the Options fields they pack into."""
 
 from __future__ import annotations
 
@@ -22,7 +15,7 @@ from rm_lite.utils.fitting import StokesIFitOptions
 from rm_lite.utils.synthesis import FDFOptions
 
 
-def _field_defaults(cls: Any) -> dict[str, Any]:
+def field_defaults(cls: Any) -> dict[str, Any]:
     return {
         f.name: f.default
         for f in dataclasses.fields(cls)
@@ -30,7 +23,7 @@ def _field_defaults(cls: Any) -> dict[str, Any]:
     }
 
 
-def _param_defaults(func: Any) -> dict[str, Any]:
+def param_defaults(func: Any) -> dict[str, Any]:
     return {
         name: p.default
         for name, p in inspect.signature(func).parameters.items()
@@ -38,57 +31,64 @@ def _param_defaults(func: Any) -> dict[str, Any]:
     }
 
 
-# (public function, options class, {param_name: field_name} for params that map).
-# fit_function->fit_function, stokes_i_snr_cut->snr_cut, etc.
-CASES = [
-    (
-        run_rmsynth,
-        FDFOptions,
-        {
-            "phi_max_radm2": "phi_max_radm2",
-            "d_phi_radm2": "d_phi_radm2",
-            "n_samples": "n_samples",
-            "weight_type": "weight_type",
-            "do_fit_rmsf": "do_fit_rmsf",
-            "do_fit_rmsf_real": "do_fit_rmsf_real",
-        },
-    ),
-    (
-        run_rmsynth,
-        StokesIFitOptions,
-        {"fit_order": "fit_order", "fit_function": "fit_function"},
-    ),
-    (
-        rmsynth_3d,
-        FDFOptions,
-        {
-            "phi_max_radm2": "phi_max_radm2",
-            "d_phi_radm2": "d_phi_radm2",
-            "n_samples": "n_samples",
-            "weight_type": "weight_type",
-        },
-    ),
-    (
-        rmsynth_3d,
-        StokesIFitOptions,
-        {
-            "fit_order": "fit_order",
-            "fit_function": "fit_function",
-            "stokes_i_snr_cut": "snr_cut",
-            "compute_model_error": "compute_model_error",
-            "n_error_samples": "n_error_samples",
-        },
-    ),
-    (run_rmclean, RMCleanOptions, {"max_iter": "max_iter", "gain": "gain"}),
-]
-
-
-@pytest.mark.parametrize(("func", "options_cls", "mapping"), CASES)
+@pytest.mark.parametrize(
+    ("func", "options_cls", "mapping"),
+    [
+        pytest.param(
+            run_rmsynth,
+            FDFOptions,
+            {
+                "phi_max_radm2": "phi_max_radm2",
+                "d_phi_radm2": "d_phi_radm2",
+                "n_samples": "n_samples",
+                "weight_type": "weight_type",
+                "do_fit_rmsf": "do_fit_rmsf",
+                "do_fit_rmsf_real": "do_fit_rmsf_real",
+            },
+            id="run_rmsynth-FDFOptions",
+        ),
+        pytest.param(
+            run_rmsynth,
+            StokesIFitOptions,
+            {"fit_order": "fit_order", "fit_function": "fit_function"},
+            id="run_rmsynth-StokesIFitOptions",
+        ),
+        pytest.param(
+            rmsynth_3d,
+            FDFOptions,
+            {
+                "phi_max_radm2": "phi_max_radm2",
+                "d_phi_radm2": "d_phi_radm2",
+                "n_samples": "n_samples",
+                "weight_type": "weight_type",
+            },
+            id="rmsynth_3d-FDFOptions",
+        ),
+        pytest.param(
+            rmsynth_3d,
+            StokesIFitOptions,
+            {
+                "fit_order": "fit_order",
+                "fit_function": "fit_function",
+                "stokes_i_snr_cut": "snr_cut",
+                "compute_model_error": "compute_model_error",
+                "n_error_samples": "n_error_samples",
+            },
+            id="rmsynth_3d-StokesIFitOptions",
+        ),
+        pytest.param(
+            run_rmclean,
+            RMCleanOptions,
+            {"max_iter": "max_iter", "gain": "gain"},
+            id="run_rmclean-RMCleanOptions",
+        ),
+    ],
+)
 def test_public_defaults_match_options(
     func: Any, options_cls: Any, mapping: dict[str, str]
 ) -> None:
-    params = _param_defaults(func)
-    fields = _field_defaults(options_cls)
+    params = param_defaults(func)
+    fields = field_defaults(options_cls)
     for param_name, field_name in mapping.items():
         assert params[param_name] == fields[field_name], (
             f"{func.__name__}.{param_name} default {params[param_name]!r} != "

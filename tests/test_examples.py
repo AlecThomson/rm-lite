@@ -14,24 +14,21 @@ import nbconvert
 import nbformat
 import pytest
 
-# Define the directory containing your example scripts
-EXAMPLES_DIR = Path("docs/examples").resolve()
+# Anchored to this file, not the working directory: a run started elsewhere
+# would otherwise collect nothing at all.
+EXAMPLES_DIR = Path(__file__).parent.parent / "docs" / "examples"
 
-
-# Discover all Python files in the examples directory
-example_scripts = list(EXAMPLES_DIR.glob("*.py"))
-
-# Discover all Jupyter notebooks in the examples directory
-example_notebooks = list(EXAMPLES_DIR.glob("*.ipynb"))
+example_scripts = sorted(EXAMPLES_DIR.glob("*.py"))
+example_notebooks = sorted(EXAMPLES_DIR.glob("*.ipynb"))
 
 
 @pytest.mark.filterwarnings("ignore:'datfix' made the change")
 @pytest.mark.parametrize("notebook", example_notebooks, ids=lambda nb: nb.name)
-def test_example_notebook(notebook: Path, tmpdir):
+def test_example_notebook(notebook: Path, tmp_path: Path):
     """Run Jupyter notebook and ensure it executes without errors."""
 
     # Convert notebook to a temporary Python script
-    tmp_script_path = tmpdir / notebook.with_suffix(".py").name
+    tmp_script_path = tmp_path / notebook.with_suffix(".py").name
     exporter = nbconvert.ScriptExporter()
     with notebook.open("r", encoding="utf-8") as f:
         notebook_node = nbformat.read(f, as_version=4)
