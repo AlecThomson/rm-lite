@@ -149,6 +149,7 @@ module = [
     "rm_lite.tools_3d.rmclean",
     "test_tools_3d_dask",
     "dask_memory_worker",
+    "conftest",
 ]
 disallow_untyped_calls = false
 warn_return_any = false
