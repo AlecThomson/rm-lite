@@ -50,9 +50,8 @@ def data_path() -> Path:
 @pytest.fixture
 def racs_model() -> MockModel:
     """A RACS-like source, drawn from a fixed seed."""
-    # An unseeded draw occasionally lands on a near-Nyquist/aliased Faraday
-    # depth where the global moment integration legitimately picks up distant
-    # structure, and the moment assertions below fail intermittently.
+    # An unseeded draw sometimes lands on an aliased Faraday depth, where the moment
+    # assertions legitimately fail.
     rng = np.random.default_rng(1234)
     fwhm = 49.57
     rm = rng.uniform(-1000, 1000)
@@ -185,11 +184,8 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
 
     assert fdf_parameters["moment_threshold_snr"][0] == 5.0
 
-    # The synthetic data are noiseless, so the default 5-sigma moment cut sits
-    # far below the RMSF sidelobes and the moments pick them up. Cut at half
-    # the fitted peak instead so only the main lobe survives: mom1 recovers
-    # the RM, mom0 is of order the peak polarised flux, and mom2 is below the
-    # RMSF width.
+    # Noiseless data, so the default 5-sigma cut sits below the RMSF sidelobes and
+    # picks them up. Cut at half the fitted peak so only the main lobe survives.
     half_peak_snr = float(
         0.5 * fdf_parameters["peak_pi_fit"][0] / fdf_parameters["fdf_error_noise"][0]
     )
@@ -213,13 +209,7 @@ def test_run_rmsynth(racs_data: MockData, racs_model: MockModel):
 
 
 def test_peak_finders_agree(racs_data: MockData, racs_model: MockModel):
-    """The cube peak finder must land on the same peak as the 1D Gaussian fit.
-
-    `get_fdf_parameters` fits a Gaussian to the main lobe, `calc_faraday_peaks`
-    interpolates a parabola through the brightest three samples; both then share
-    `calc_peak_stats` for the angles and errors, so on a well-sampled RMSF the
-    two must agree.
-    """
+    """The cube peak finder must land on the same peak as the 1D Gaussian fit."""
     complex_data = racs_data.stokes_q + 1j * racs_data.stokes_u
     complex_error = np.full_like(racs_data.stokes_q, 1e-3 + 1e-3j, dtype=np.complex128)
 
@@ -387,8 +377,7 @@ def test_real_data_bad_zero(data_path):
 
 
 def test_stokes_i_terms_describe_the_fitted_model():
-    """The 1D `stokes_i_terms` frame is the whole Stokes I model: evaluating it at
-    the frequencies reproduces the model array the fit used."""
+    """Evaluating `stokes_i_terms` reproduces the model array the fit used."""
     freq_arr_hz = (np.arange(744, 1032, 1) * 1e6).astype(np.float64)
     lsq = freq_to_lambda2(freq_arr_hz)
     ref_freq_hz = float(lambda2_to_freq(float(np.mean(lsq))))

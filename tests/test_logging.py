@@ -28,16 +28,7 @@ def test_quiet_logs_nested_uses_most_restrictive_level() -> None:
 
 
 def test_quiet_logs_concurrent_callers_do_not_under_suppress(caplog) -> None:
-    """A concurrent, less-restrictive request must not leak a stricter one's messages.
-
-    Regression test: dask's threaded scheduler runs one block-worker call per
-    chunk concurrently, and rmsynth_3d's blocks (log_level=WARNING) and
-    rmclean_3d's blocks (log_level=ERROR) can be in flight at the same time.
-    A plain reentrant depth counter (set level on the first quiet_logs entry,
-    restore on the last exit) would let whichever caller entered first "win"
-    the level for the whole overlap, silently under-suppressing a
-    concurrently-running stricter request.
-    """
+    """A looser concurrent request must not leak a stricter one's messages."""
     entered_warning = threading.Event()
     release_warning = threading.Event()
     strict_saw_level = []

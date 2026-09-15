@@ -52,12 +52,7 @@ class Cube(NamedTuple):
 
 
 def make_cube(*, with_blanks: bool) -> Cube:
-    """A mix of blank, noise-only, faint and bright pixels on one phi axis.
-
-    Blank pixels are all-NaN columns, as a mosaic edge gives; the noise pixels
-    are what the screen is for; faint sits just above the CLEAN mask and bright
-    well above it, so both take the loop.
-    """
+    """A mix of blank, noise-only, faint and bright pixels on one phi axis."""
     rng = np.random.default_rng(20260823)
     freq_hz = np.linspace(0.8e9, 1.8e9, 125)
     lsq = freq_to_lambda2(freq_hz)
@@ -210,12 +205,7 @@ def test_null_pixel_screen_is_bit_identical_with_blanks(
     multiscale: bool,
     adaptive: bool,
 ) -> None:
-    """Same, with fully blanked columns mixed in.
-
-    Single-scale only: the unpatched multiscale loop cannot run this cube at all
-    (see `test_multiscale_blank_spectrum_crashes_without_the_screen`), so there
-    is nothing to compare it against.
-    """
+    """Same, with fully blanked columns mixed in."""
     screened = run_clean(blanked_cube, adaptive=adaptive, multiscale=multiscale)
     every_pixel = reference_clean(
         blanked_cube, adaptive=adaptive, multiscale=multiscale
@@ -253,12 +243,7 @@ def test_null_pixel_screen_actually_skips(blanked_cube: Cube) -> None:
 def test_blank_spectrum_does_not_crash(
     blanked_cube: Cube, multiscale: bool, adaptive: bool
 ) -> None:
-    """A fully blanked spectrum used to crash multiscale RM-CLEAN.
-
-    `compute_scale_kernels` -> `fit_rmsf` -> `curve_fit` raised
-    `ValueError: array must not contain infs or NaNs` on an all-NaN pixel, which
-    a mosaic edge has many of. The screen removes those pixels first.
-    """
+    """A fully blanked spectrum used to crash multiscale RM-CLEAN."""
     blank_only = blank_columns_only(blanked_cube)
     result = run_clean(blank_only, adaptive=adaptive, multiscale=multiscale)
     assert np.isnan(result.clean_fdf_arr).all()
@@ -302,11 +287,7 @@ def test_null_pixel_screen_strips_match_whole_array() -> None:
 
 
 def test_divergence_guard_never_fires_on_a_converging_clean(caplog) -> None:
-    """The backstop must not change a clean that was already working.
-
-    Sweeps narrow, broad, noise-only and blank spectra over four decades of
-    noise, masked and unmasked. None of them should trip the guard.
-    """
+    """The backstop must not change a clean that was already working."""
     n_phi, fwhm = 401, 40.0
     phi_arr_radm2 = np.linspace(-2000, 2000, n_phi)
     phi_double_arr_radm2 = np.linspace(-4000, 4000, 2 * n_phi - 1)

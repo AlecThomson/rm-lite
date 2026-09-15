@@ -1,5 +1,4 @@
-"""Interferometric weighting: natural/uniform_lsq/briggs from per-cell occupancy
-on a virtual lambda^2 grid (inverse local density, no smoothing)."""
+"""Interferometric weighting from per-cell occupancy on a virtual lambda^2 grid."""
 
 from __future__ import annotations
 
@@ -46,11 +45,7 @@ def flat_weight(band: Band) -> NDArray[np.float64]:
 
 @pytest.fixture
 def varying_error(band: Band) -> NDArray[np.float64]:
-    """Per-channel RMS rising toward the low-frequency end, as real data does.
-
-    Constant noise weights lambda^2 evenly, which makes the weighted and
-    unweighted means equal, so the lambda^2_0 tests would pass without the fix.
-    """
+    """Per-channel RMS rising toward the low-frequency end, as real data does."""
     return np.linspace(2e-3, 0.8e-3, band.freq_hz.size)
 
 
@@ -102,9 +97,8 @@ def test_natural_weight_keeps_lam_sq_0_weighted(
 
     lam_sq_0 = weighted_lam_sq_0(natural_weight(error), band.lambda_sq)
 
-    # An infinite weight makes weighted_lam_sq_0 NaN (nansum keeps infinities),
-    # and compute_rmsynth_params then falls back to the unweighted mean. That
-    # moves the FDF's phase reference and rotates the polarisation angle.
+    # An infinite weight makes weighted_lam_sq_0 NaN and the caller falls back to the
+    # unweighted mean, moving the phase reference and rotating the angle.
     assert np.isfinite(lam_sq_0)
     unweighted = float(np.nanmean(band.lambda_sq))
     assert not np.isclose(lam_sq_0, unweighted), (
@@ -177,9 +171,8 @@ def test_briggs_interpolates_natural_and_uniform_lsq(
 
 
 def test_uniform_lsq_noise_independent() -> None:
-    # uniform_lsq weights each channel by the lambda^2 interval it samples, with
-    # the noise cancelling: two equally-sampled clusters contribute the same total
-    # weight even with a 10x noise difference.
+    # uniform_lsq weights by the lambda^2 interval sampled, with the noise
+    # cancelling.
     lam2 = np.concatenate(
         [np.linspace(0.010, 0.0119, 20), np.linspace(0.050, 0.0519, 20)]
     )
@@ -189,9 +182,8 @@ def test_uniform_lsq_noise_independent() -> None:
 
 
 def test_uniform_lsq_uniform_within_cell(band: Band) -> None:
-    # Core grid guarantee: channels sharing a virtual cell get identical weight
-    # (for equal natural weight), so no single channel jumps within a cell. Jumps
-    # only happen between cells; that is genuine sampling density, not aliasing.
+    # Channels sharing a cell get identical weight, so nothing jumps within a cell.
+    # Jumps between cells are genuine sampling density, not aliasing.
     lam2 = np.sort(freq_to_lambda2(np.linspace(700e6, 1800e6, 100)))
     weight = uniform_lsq_weight(lam2, np.ones_like(lam2), band.cell_m2)
     cell_idx = np.floor((lam2 - lam2.min()) / band.cell_m2).astype(int)
@@ -211,9 +203,8 @@ def test_uniform_lsq_equal_per_cell(band: Band) -> None:
 
 
 def test_uniform_lsq_gap_bounded_and_local(band: Band) -> None:
-    # Punching an interior gap only affects the cells at the gap edges (occupancy
-    # is per cell): a lone-channel cell is the weight ceiling (cell_m2 for flat
-    # noise), and channels far from the gap keep their cell weight unchanged.
+    # An interior gap only affects the cells at its edges: a lone-channel cell is the
+    # weight ceiling, and channels far from the gap are unchanged.
     freq = np.linspace(700e6, 1800e6, 300)
     keep = ~((freq > 1000e6) & (freq < 1300e6))  # punch a wide interior gap
     lam2 = freq_to_lambda2(freq)
@@ -240,9 +231,8 @@ def test_uniform_lsq_robust_to_gaps(band: Band) -> None:
 
 
 def test_flagged_channels_zeroed_neighbours_not_spiked(band: Band) -> None:
-    # NaN-flagged channels get zero natural weight and drop out of the occupancy,
-    # so a channel bordering the flagged block is up-weighted only modestly
-    # (its cell just has fewer channels), never a runaway spike.
+    # Flagged channels drop out of the occupancy, so a neighbour is up-weighted only
+    # modestly, never a runaway spike.
     pol = np.ones_like(band.freq_hz, dtype=np.complex128)
     pol[100:200] = np.nan
     pol_error = (0.1 + 0.1j) * np.ones_like(band.freq_hz, dtype=np.complex128)
@@ -271,9 +261,8 @@ def test_lambda_sq_density_is_per_pixel(
     band: Band, flat_weight: NDArray[np.float64]
 ) -> None:
     """Each pixel gets its own lambda^2 occupancy, from its own flagging."""
-    # A per-pixel weight array comes with lambda^2 broadcast to (n_freq, 1, 1);
-    # indexing that with a 3D boolean selection used to raise IndexError, so
-    # uniform_lsq and briggs could not be used with per-pixel weights at all.
+    # Indexing lambda^2 broadcast to (n_freq, 1, 1) with a 3D boolean selection used
+    # to raise IndexError, so per-pixel weights did not work at all.
     ny, nx = 3, 4
     n_freq = flat_weight.size
     weight_3d = np.broadcast_to(flat_weight[:, None, None], (n_freq, ny, nx)).copy()

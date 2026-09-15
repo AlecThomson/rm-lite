@@ -96,12 +96,8 @@ def synthetic_cube() -> SyntheticCube:
             stokes_q[:, j, i] = frac_pol * np.cos(angle)
             stokes_u[:, j, i] = frac_pol * np.sin(angle)
 
-    # Small per-pixel noise draw. No flagged channels here deliberately: 1D
-    # per-pixel processing derives lam_sq_0_m2/weight_arr from that pixel's
-    # own flagging, while the 3D orchestration uses one global lam_sq_0_m2
-    # and per-channel weight_arr shared across every pixel (matching classic
-    # RM-Tools 3D convention). A global flag would make the two legitimately
-    # diverge, which isn't what this test is checking.
+    # No flagged channels deliberately: 1D derives lam_sq_0/weights per pixel, while
+    # 3D shares one global set, so a flag would make the two legitimately diverge.
     stokes_q += rng.normal(0, 0.01, stokes_q.shape)
     stokes_u += rng.normal(0, 0.01, stokes_u.shape)
 
@@ -271,22 +267,9 @@ def counting_patch(monkeypatch: pytest.MonkeyPatch) -> Callable[..., dict[str, i
 def test_mixed_batch_shares_upstream_work(
     counting_patch: Callable[..., dict[str, int]], chunked: Callable[..., da.Array]
 ):
-    """A batch mixing clean-derived and synthesis-derived outputs must not refit.
-
-    `run_rmclean` takes its input cubes apart with `to_delayed`, whose default
-    `optimize_graph=True` can fuse an upstream per-block task into the block task
-    RM-CLEAN consumes and drop its key. Anything else in the same `dask.compute`
-    built on the same `RMSynth3DResults` then no longer shares that task: the
-    Stokes I fit and the NUFFT run a second time per chunk. Both are more
-    expensive than the CLEAN loop they feed.
-
-    Whether the fusion happens depends on the dask version -- dask 2025.1.0 fuses
-    here, 2026.6.0 does not -- so this pins the sharing rather than any one
-    dask's optimiser.
-    """
-    # Coarse Faraday depths on purpose: a deep phi axis makes `_match_chunks_to_fdf`
-    # rechunk, and the rechunk layer is itself a fusion barrier that would hide
-    # what this test is checking.
+    """A batch mixing clean-derived and synthesis-derived outputs must not refit."""
+    # Coarse Faraday depths on purpose: a deep phi axis makes _match_chunks_to_fdf
+    # rechunk, and that layer is a fusion barrier that would hide what is tested.
     rng = np.random.default_rng(2025)
     phi_max_radm2 = 20.0
     d_phi_radm2 = 2.0
@@ -357,13 +340,7 @@ def test_write_zarr_group_shares_computation_across_arrays(
     tmp_path,
     chunked: Callable[..., da.Array],
 ):
-    """write_zarr_group must not recompute a shared upstream graph once per array.
-
-    rmclean_3d's four outputs all come from one per-chunk dask.delayed call;
-    writing them with a naive per-array `to_zarr()` loop (call to_zarr, which
-    defaults to compute=True, once per array) would rerun that delayed call
-    once per array instead of once per chunk.
-    """
+    """write_zarr_group must not recompute a shared upstream graph once per array."""
     call_count = 0
     original = rmclean3d_mod._rmclean_on_block
 
@@ -440,10 +417,8 @@ def test_zarr_round_trip(
 
     group = zarr.open(store)
     for name, array in arrays.items():
-        # atol accounts for finufft's non-bit-reproducible threaded summation:
-        # the lazy graph is genuinely recomputed for this comparison (once by
-        # to_zarr, once by .compute() here), and repeat NUFFT calls can differ
-        # at the ~1e-15 level.
+        # atol for finufft's non-reproducible threaded summation: the graph really is
+        # recomputed here, and repeat calls differ at ~1e-15.
         np.testing.assert_allclose(group[name][:], array.compute(), atol=1e-10)
 
 
@@ -548,13 +523,7 @@ def test_tile_spatial_chunk_spreads_the_width_evenly():
 @pytest.mark.parametrize("ny", [64, 512, 2048, 20000])
 @pytest.mark.parametrize("nx", [64, 200, 1000, 20000, 40000])
 def test_zarr_layout_holds_at_every_cube_size(n_freq, n_phi_double, ny, nx):
-    """The layout has to stay legal and frugal across the whole size range.
-
-    A shard is one file that one write task owns, so it must hold a whole
-    number of chunks on every axis; zarr is the arbiter of that. The chunk must
-    also stay inside the memory budget it was sized for, and must not pad the
-    image edge with columns that are written but never read.
-    """
+    """The layout has to stay legal and frugal across the whole size range."""
     budget = fdf_spatial_chunk(n_phi_double, np.dtype("complex64"), 256, ny, nx)
     (cy, cx), band_rows = zarr_store_layout(
         n_freq=n_freq,
@@ -808,16 +777,7 @@ def test_per_pixel_weight_matches_the_shared_one(
     weight_type: WeightType,
     chunked: Callable[..., da.Array],
 ):
-    """A per-pixel weight cube that is uniform must reduce to the per-channel one.
-
-    Three ways it did not. `compute_theoretical_noise` sums over every element it
-    is handed, so a 3D weight ran the sums over ny*nx times as many terms and
-    reported a noise sqrt(ny*nx) too small -- which `run_rmclean_from_synth`
-    scales its CLEAN mask and threshold from, so CLEAN saw a threshold orders of
-    magnitude too low. It also came back as a lazy dask scalar, which
-    `run_rmclean_from_synth` cannot format or compare. And the shared RMSF took a
-    spatial mean of the whole cube where one pixel is what it documents.
-    """
+    """A per-pixel weight cube that is uniform must reduce to the per-channel one."""
     q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     n_freq = synthetic_cube.freq_arr_hz.size
@@ -885,13 +845,7 @@ def varying_noise_cube(ny: int = 6, nx: int = 6, span: float = 100.0):
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_noise_map_is_right_pixel_by_pixel(chunked: Callable[..., da.Array]):
-    """Spatially varying noise must give each pixel its own theoretical noise.
-
-    `compute_theoretical_noise` used to sum over the spatial axes too, so one
-    scalar stood for the whole image and it was sqrt(ny*nx) below even the
-    quietest pixel. CLEAN scales its mask and threshold from this, so the number
-    has to be each pixel's own.
-    """
+    """Spatially varying noise must give each pixel its own theoretical noise."""
     freq_arr_hz, stokes_q, stokes_u, sigma = varying_noise_cube()
     weight_arr = 1.0 / sigma**2
 
@@ -921,11 +875,7 @@ def test_noise_map_is_right_pixel_by_pixel(chunked: Callable[..., da.Array]):
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_clean_thresholds_follow_the_noise_map(chunked: Callable[..., da.Array]):
-    """A noisy pixel must not be cleaned to a quiet pixel's threshold.
-
-    With one scalar threshold for the image, the noisiest pixels get a cut far
-    below their own noise and CLEAN grinds into it.
-    """
+    """A noisy pixel must not be cleaned to a quiet pixel's threshold."""
     freq_arr_hz, stokes_q, stokes_u, sigma = varying_noise_cube()
     synth = rmsynth_3d(
         chunked(stokes_q, 3, 3),
@@ -959,12 +909,7 @@ def test_clean_thresholds_follow_the_noise_map(chunked: Callable[..., da.Array])
 def test_shared_rmsf_kept_when_pixels_only_differ_in_scale(
     chunked: Callable[..., da.Array],
 ):
-    """Noise varying across the image but not with frequency still shares an RMSF.
-
-    The RMSF is normalised by the weight sum, so pixels whose weights are scalar
-    multiples of each other have the same one. Keeping the shared spectrum there
-    is what stops per-pixel noise costing a whole extra cube.
-    """
+    """Noise varying across the image but not with frequency still shares an RMSF."""
     freq_arr_hz, stokes_q, stokes_u, sigma = varying_noise_cube(ny=4, nx=4)
     synth = rmsynth_3d(
         chunked(stokes_q, 2, 2),
@@ -994,11 +939,7 @@ def test_shared_rmsf_kept_when_pixels_only_differ_in_scale(
 def test_per_pixel_rmsf_forced_when_spectra_differ(
     caplog, chunked: Callable[..., da.Array]
 ):
-    """When the noise spectrum itself varies per pixel, no one RMSF fits.
-
-    Nothing asked for the cube here; it is switched on because a shared spectrum
-    would silently be wrong for most of the image.
-    """
+    """When the noise spectrum itself varies per pixel, no one RMSF fits."""
     freq_arr_hz, stokes_q, stokes_u, _ = varying_noise_cube(ny=4, nx=4)
     ny, nx = 4, 4
     # Each pixel's band tilts differently, so no rescaling maps one onto another.
@@ -1024,9 +965,7 @@ def test_per_pixel_rmsf_forced_when_spectra_differ(
 
 
 def mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
-    """A linmos-like cube: the primary beam shrinks with frequency, so pixels
-    near the field edge lose the top of the band and the number of contributing
-    channels varies across the image."""
+    """A linmos-like cube whose contributing channel count varies across the image."""
     rng = np.random.default_rng(2025)
     n_freq = 96
     freq_arr_hz = np.linspace(744e6, 1032e6, n_freq)
@@ -1049,13 +988,7 @@ def mosaic_cube(ny: int = 8, nx: int = 8, edge: float = 0.78):
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_mosaic_edge_channels_are_handled(chunked: Callable[..., da.Array]):
-    """A frequency-dependent primary beam blanks the band per pixel.
-
-    The blanks arrive as NaN in both the data and the mosaicked noise cube.
-    Summing those through made every partially blanked channel NaN, and a NaN
-    channel weight drops that channel from `lam_sq_0_m2` altogether -- silently
-    reweighting the cube onto whichever channels happen to be complete.
-    """
+    """A frequency-dependent primary beam blanks the band per pixel."""
     freq_arr_hz, stokes_q, stokes_u, weight_arr, inside = mosaic_cube()
     n_freq = freq_arr_hz.size
     n_chan = inside.sum(axis=0)
@@ -1098,12 +1031,7 @@ def test_mosaic_edge_channels_are_handled(chunked: Callable[..., da.Array]):
 @pytest.mark.filterwarnings("ignore: All channels masked")
 @pytest.mark.parametrize("mode", ["auto", "per_pixel", 0.1])
 def test_lam_sq_0_modes_keep_one_reference(mode, chunked: Callable[..., da.Array]):
-    """Whatever picks the reference, the phase and flux references are the same.
-
-    `stokes_i_ref_freq_hz` is derived from the reference lambda^2 in one place,
-    so a caller cannot end up with an FDF derotated to one frequency and Stokes
-    I terms defined at another.
-    """
+    """Whatever picks the reference, the phase and flux references are the same."""
     freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = mosaic_cube(ny=4, nx=4)
     ref = float(np.median(freq_arr_hz))
     stokes_i = np.where(
@@ -1153,12 +1081,7 @@ def test_lam_sq_0_modes_keep_one_reference(mode, chunked: Callable[..., da.Array
 
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_per_pixel_reference_is_an_exact_derotation(chunked: Callable[..., da.Array]):
-    """Choosing a reference only ever moves phase, never amplitude.
-
-    B&dB eq. 25 is a shift theorem, so the per-pixel FDF is the shared-reference
-    FDF moved to the map, exactly. Checked without a Stokes I model, since a
-    per-pixel reference frequency also moves the flux the FDF is scaled by.
-    """
+    """Choosing a reference only ever moves phase, never amplitude."""
     freq_arr_hz, stokes_q, stokes_u, weight_arr, _ = mosaic_cube(ny=4, nx=4)
     common: dict[str, Any] = {
         "freq_arr_hz": freq_arr_hz,
@@ -1246,12 +1169,7 @@ def test_read_fits_cube_dask_single_row_bands(tmp_path):
 
 
 def test_read_fits_cube_dask_has_no_astype_layer(tmp_path):
-    """Blocks come back native-endian, so dask inserts no astype layer.
-
-    FITS is big-endian on disk; declaring that dtype made `da.concatenate`
-    graft an `astype` onto every block, which then absorbed the whole cost of
-    materialising the read and showed up as the culprit in worker kills.
-    """
+    """Blocks come back native-endian, so dask inserts no astype layer."""
     rng = np.random.default_rng(2025)
     path = tmp_path / "cube.fits"
     write_cube(path, rng.normal(0, 1, (4, 8, 5)))
@@ -1282,12 +1200,7 @@ def test_readers_emit_one_graph_layer_whatever_the_block_count(tmp_path, reader)
 def rmclean_graph(
     path, rows: int, n_freq: int, nx: int
 ) -> tuple[float, RMClean3DResults]:
-    """Build the RM-CLEAN graph over a cube read in `rows`-tall bands, and time it.
-
-    A single `map_blocks` stands in for RM-synthesis, so the layer count above
-    the reader is what `rmsynth_3d` contributes and the chunk count is exactly
-    the reader's.
-    """
+    """Build the RM-CLEAN graph over a cube read in `rows`-tall bands, and time it."""
     n_phi = 5
     target_chunk_mb = rows * n_freq * nx * 4 / 1024**2
     cube, _ = read_fits_cube_dask(path, target_chunk_mb=target_chunk_mb)
@@ -1311,14 +1224,7 @@ def rmclean_graph(
 
 
 def test_rmclean_graph_build_stays_linear_in_chunk_count(tmp_path):
-    """Quadrupling the chunk count must not blow up graph building.
-
-    Both `read_fits_cube_dask` and `run_rmclean` used to work a layer at a
-    time, so every `HighLevelGraph.from_collections` walked an upstream layer
-    count that itself grew with the chunk count. Graph building alone then went
-    quadratic in `target_chunk_mb`, and on a real cube it took minutes and
-    several GB before a single block had been read.
-    """
+    """Quadrupling the chunk count must not blow up graph building."""
     n_freq, ny, nx = 4, 8192, 8
     path = tmp_path / "cube.fits"
     write_cube(path, np.zeros((n_freq, ny, nx)))
@@ -1384,12 +1290,7 @@ DEGENERATE_SHAPES = {
     "disk_shape", list(DEGENERATE_SHAPES.values()), ids=list(DEGENERATE_SHAPES)
 )
 def test_readers_drop_degenerate_axes(tmp_path, reader, target_chunk_mb, disk_shape):
-    """Both readers return the squeezed cube whatever the degenerate-axis layout.
-
-    A single chunk covering the whole array is the case that regressed: an
-    `int` index only squeezes its axis when the request doesn't span the full
-    array, so a whole-array read came back un-squeezed.
-    """
+    """Both readers return the squeezed cube whatever the degenerate-axis layout."""
     expected = np.arange(DEGEN_NF * DEGEN_NY * DEGEN_NX, dtype=">f4").reshape(
         DEGEN_NF, DEGEN_NY, DEGEN_NX
     )
@@ -1441,11 +1342,7 @@ def qu_fits_cubes(
 
 @pytest.mark.parametrize("shard_rows", [None, 4])
 def test_fits_cube_to_zarr_round_trips(qu_fits_cubes, tmp_path, shard_rows):
-    """A store must hold the cube it was written from, sharded or not.
-
-    A shard is one file, so a write task has to own a whole one: two tasks
-    writing different chunks of the same shard lose one another's data.
-    """
+    """A store must hold the cube it was written from, sharded or not."""
     store = fits_cube_to_zarr(
         qu_fits_cubes["q"],
         tmp_path / "q.zarr",
@@ -1508,11 +1405,7 @@ def test_rmsynth_3d_from_fits_converts_to_zarr_on_request(qu_fits_cubes):
 def test_rmsynth_3d_from_fits_reads_at_the_final_chunking(
     tmp_path, synthetic_cube: SyntheticCube
 ):
-    """Reading straight into the FDF's chunking leaves nothing to rechunk.
-
-    The Faraday depth grid follows from the frequencies alone, so how big an FDF
-    chunk will be is known before any cube is read.
-    """
+    """Reading straight into the FDF's chunking leaves nothing to rechunk."""
     freq_arr_hz = synthetic_cube.freq_arr_hz
     header = Header()
     header["CTYPE3"] = "FREQ"
@@ -1550,12 +1443,7 @@ def test_rmsynth_3d_from_fits_reads_at_the_final_chunking(
 def test_rmsynth_3d_from_fits_on_a_dummy_stokes_axis(
     tmp_path, synthetic_cube: SyntheticCube
 ):
-    """End-to-end on the ASKAP (n_freq, 1, ny, nx) layout with noise weighting.
-
-    The composition is where the degenerate-axis bug actually surfaced: the
-    default `weight_type="variance"` pulls in the channel-chunked reader too,
-    which asks for full y and full x on every block.
-    """
+    """End-to-end on the ASKAP (n_freq, 1, ny, nx) layout with noise weighting."""
     freq_arr_hz = synthetic_cube.freq_arr_hz
     header = Header()
     header["CTYPE3"] = "FREQ"
@@ -1584,14 +1472,7 @@ def test_rmsynth_3d_from_fits_on_a_dummy_stokes_axis(
 
 
 def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
-    """A zeroed linmos weight must blank pixels silently, not warn per chunk.
-
-    `noise_files_are_weight` inverts the weight cube, and a primary-beam weight
-    is 0 over most of the field. Infinite error there is intended -- the pixel
-    drops out of the Stokes I fit and its maps come back NaN -- so the only
-    thing to check is that numpy stays quiet about the division while the
-    pixels inside the cutoff still recover their spectral index.
-    """
+    """A zeroed linmos weight must blank pixels silently, not warn per chunk."""
     rng = np.random.default_rng(2025)
     freq_arr_hz = (np.arange(744, 1032, 6) * 1e6).astype(np.float64)
     ny = nx = 12
@@ -1708,12 +1589,7 @@ def test_channel_noise_warns_on_spatially_chunked_input(
 def test_rmsynth_3d_output_chunks_meet_the_target_chunk_size(
     chunked: Callable[..., da.Array],
 ):
-    """Spatial chunks shrink until an FDF chunk fits `target_chunk_mb`.
-
-    The Faraday-depth axis is longer than the frequency axis and complex rather
-    than real, so keeping the caller's spatial chunking would make every output
-    chunk a large multiple of the target they asked for.
-    """
+    """Spatial chunks shrink until an FDF chunk fits `target_chunk_mb`."""
     rng = np.random.default_rng(2025)
     n_freq, ny, nx = 128, 64, 32
     freq_arr_hz = np.linspace(8.0e8, 1.0e9, n_freq)
@@ -1785,12 +1661,7 @@ def test_rmsynth_3d_follows_the_input_precision(
 def test_rmclean_3d_builds_the_rmsf_in_its_own_task(
     synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
 ):
-    """Building the RMSF inside CLEAN must match reading it from a cube.
-
-    The per-pixel RMSF is the biggest array here and CLEAN is its only reader,
-    so it is built in the CLEAN task; the cube is still offered for anyone who
-    wants it. Both must clean to the same answer.
-    """
+    """Building the RMSF inside CLEAN must match reading it from a cube."""
     q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     noise = np.linspace(1e-3, 3e-3, synthetic_cube.freq_arr_hz.size)
@@ -1866,13 +1737,7 @@ def test_rmsynth_3d_keeps_chunks_when_the_fdf_is_no_bigger(
 
 
 def test_write_zarr_group_rechunks_irregular_arrays(tmp_path, caplog):
-    """Irregular dask chunks must be rechunked, not silently written wrong.
-
-    A zarr array has one chunk size per axis, so writing an array whose chunks
-    differ mid-axis against `chunks[0]` would misplace every later chunk.
-    `dask.array.Array.to_zarr` guards against this; so must we, since we build
-    the zarr arrays ourselves.
-    """
+    """Irregular dask chunks must be rechunked, not silently written wrong."""
     data = np.arange(60.0).reshape(10, 6)
     irregular = da.from_array(data, chunks=(10, 6)).rechunk(((3, 5, 2), (6,)))
     regular = da.from_array(data, chunks=(4, 6))
@@ -1889,8 +1754,7 @@ def test_write_zarr_group_rechunks_irregular_arrays(tmp_path, caplog):
 def test_shared_rmsf_is_what_the_per_pixel_cube_holds(
     synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
 ):
-    """Every pixel of the per-pixel cube is the shared RMSF, which is the whole
-    reason the cube is not returned by default."""
+    """Every pixel of the per-pixel cube is the shared RMSF."""
     q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
 
@@ -1922,8 +1786,7 @@ def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
     synthetic_cube: SyntheticCube,
     chunked: Callable[..., da.Array],
 ):
-    """Handing RM-CLEAN the one shared spectrum must clean exactly as handing it a
-    cube of copies of that spectrum."""
+    """One shared spectrum cleans exactly as a cube of copies of it."""
     q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
@@ -1959,8 +1822,7 @@ def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
 def test_rmclean_rejects_an_rmsf_it_cannot_use(
     synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
 ):
-    """Only a shared spectrum or a matching per-pixel cube make sense. The rest are
-    caught before the graph is built, not part-way through a CLEAN run."""
+    """Only a shared spectrum or a matching per-pixel cube make sense."""
     q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
     u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
     synth = rmsynth_3d(
@@ -1996,9 +1858,8 @@ def test_rmclean_rejects_an_rmsf_it_cannot_use(
     with pytest.raises(ValueError, match="identical .*spatial chunking"):
         clean_with(rmsf_cube.rechunk({1: 1, 2: 1}))
 
-    # Split along Faraday depth. The CLEAN tasks index the RMSF by the FDF's
-    # block index, so this would silently hand each block the first depth chunk
-    # of the RMSF rather than the whole spectrum.
+    # Split along Faraday depth: CLEAN indexes the RMSF by the FDF's block index, so
+    # each block would silently get the first depth chunk rather than the spectrum.
     with pytest.raises(ValueError, match="per-pixel rmsf must be chunked spatially"):
         clean_with(rmsf_cube.rechunk({0: 1}))
 

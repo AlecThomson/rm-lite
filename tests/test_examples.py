@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 # Must be set before importing nbconvert/nbformat, which pull in jupyter_core
-# and emit a DeprecationWarning about path migration at import time otherwise.
+# and warn about path migration at import time otherwise.
 os.environ["JUPYTER_PLATFORM_DIRS"] = "1"
 
 import runpy
@@ -14,37 +14,33 @@ import nbconvert
 import nbformat
 import pytest
 
-# Anchored to this file, not the working directory: a run started elsewhere
-# would otherwise collect nothing at all.
-EXAMPLES_DIR = Path(__file__).parent.parent / "docs" / "examples"
 
-example_scripts = sorted(EXAMPLES_DIR.glob("*.py"))
-example_notebooks = sorted(EXAMPLES_DIR.glob("*.ipynb"))
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    """Collect the examples from the rootdir, so the cwd does not decide."""
+    examples = metafunc.config.rootpath / "docs" / "examples"
+    for name, suffix in (("notebook", "*.ipynb"), ("script", "*.py")):
+        if name in metafunc.fixturenames:
+            found = sorted(examples.glob(suffix))
+            metafunc.parametrize(name, found, ids=[p.name for p in found])
 
 
 @pytest.mark.filterwarnings("ignore:'datfix' made the change")
-@pytest.mark.parametrize("notebook", example_notebooks, ids=lambda nb: nb.name)
 def test_example_notebook(notebook: Path, tmp_path: Path):
-    """Run Jupyter notebook and ensure it executes without errors."""
-
-    # Convert notebook to a temporary Python script
-    tmp_script_path = tmp_path / notebook.with_suffix(".py").name
+    """Run an example notebook and ensure it executes without errors."""
+    script_path = tmp_path / notebook.with_suffix(".py").name
     exporter = nbconvert.ScriptExporter()
     with notebook.open("r", encoding="utf-8") as f:
         notebook_node = nbformat.read(f, as_version=4)
     script_content, _ = exporter.from_notebook_node(notebook_node)
-
-    with tmp_script_path.open("w", encoding="utf-8") as f:
-        f.write(script_content)
+    script_path.write_text(script_content, encoding="utf-8")
 
     try:
-        runpy.run_path(str(tmp_script_path))
+        runpy.run_path(str(script_path))
     finally:
         plt.close("all")
 
 
 @pytest.mark.filterwarnings("ignore:'datfix' made the change")
-@pytest.mark.parametrize("script", example_scripts, ids=lambda s: s.name)
-def test_example_script(script):
-    """Run example script using runpy and ensure it executes without errors."""
+def test_example_script(script: Path):
+    """Run an example script and ensure it executes without errors."""
     runpy.run_path(str(script))

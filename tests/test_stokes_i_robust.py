@@ -1,9 +1,4 @@
-"""Tests for bad-channel robustness in the Stokes I fit.
-
-`robust_loss` covers a channel bad in flux or in error, since either way it ends
-up far from the model in sigma. Errors that cannot weight a fit at all (zero,
-negative, non-finite) are dropped before it.
-"""
+"""Tests for bad-channel robustness in the Stokes I fit."""
 
 from __future__ import annotations
 
@@ -169,9 +164,8 @@ def test_an_over_trusted_channel_does_not_bend_the_fit(
 
 def test_one_zero_error_channel_keeps_the_rest_weighted(spectrum: Spectrum) -> None:
     """A single zero error drops that channel, not the whole spectrum."""
-    # It used to unweight everything: curve_fit raised on it and the retry
-    # dropped every weight.
-    # A band whose noise varies, so dropping the weights is measurable.
+    # It used to unweight everything: curve_fit raised and the retry dropped every
+    # weight. The noise varies so that is measurable.
     varying_error = spectrum.noise * (1 + 3 * np.linspace(0, 1, spectrum.n_chan) ** 2)
     with_zero = varying_error.copy()
     with_zero[spectrum.bad_chan] = 0.0

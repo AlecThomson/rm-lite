@@ -1,15 +1,4 @@
-"""Peak-memory scaling tests for the dask-chunked 3D RM-synthesis pipeline.
-
-Each configuration runs in a fresh subprocess (see `tests/scripts/`) and writes
-output via `write_zarr_group` rather than `.compute()`, since `.compute()`
-always assembles the full result in memory regardless of chunk size.
-
-The array-path test compares two chunkings of one cube, so it can use peak RSS:
-allocator retention inflates both sides alike. It measures the compute phase
-via the kernel's resettable `VmHWM`, since a process-lifetime peak also carries
-the setup transient. The FITS-path test compares two cube sizes, where
-retention grows with the number of blocks read, so it uses `tracemalloc`.
-"""
+"""Peak-memory scaling tests for the dask-chunked 3D RM-synthesis pipeline."""
 
 from __future__ import annotations
 
@@ -33,11 +22,12 @@ N_FREQ = 48
 
 
 @pytest.fixture(scope="module")
-def peak_kb() -> Callable[..., int]:
+def peak_kb(pytestconfig: pytest.Config) -> Callable[..., int]:
     """Run a worker script in a fresh process and read its reported peak, in kB."""
+    scripts = pytestconfig.rootpath / "tests" / "scripts"
 
     def run(script: str, *args: object) -> int:
-        worker = Path(__file__).parent / "scripts" / f"{script}.py"
+        worker = scripts / f"{script}.py"
         result = subprocess.run(
             [sys.executable, str(worker), *(str(a) for a in args)],
             capture_output=True,
@@ -96,12 +86,7 @@ def test_memory_scales_with_chunk_size_not_cube_size(
 def test_peak_memory_per_target_stays_within_the_budgeted_factor(
     peak_kb: Callable[..., int], fits_cubes: Callable[..., list[Path]], options: str
 ) -> None:
-    """Peak grows by no more than the multiple `target_chunk_mb_for_worker` assumes.
-
-    That function turns a worker's memory into a target, so it is only as good
-    as these numbers: if a configuration starts costing more per MB of target,
-    a budget derived from it sends a run to a cluster that cannot hold it.
-    """
+    """Peak grows by no more than the multiple `target_chunk_mb_for_worker` assumes."""
     budgeted = 1024.0 / target_chunk_mb_for_worker(
         1024.0,
         per_pixel_rmsf="per_pixel_rmsf" in options,
@@ -136,13 +121,7 @@ def test_peak_memory_per_target_stays_within_the_budgeted_factor(
 def test_zarr_conversion_peak_stays_inside_the_target(
     peak_kb: Callable[..., int], fits_cubes: Callable[..., list[Path]]
 ) -> None:
-    """A conversion costs about one target, which is what `zarr_store_layout` assumes.
-
-    It sizes the shard at a third of the target because a write task holds its
-    shard three times over: the raw read, zarr's encode buffer, and a copy
-    between them. Let that stop being true and the conversion blows the budget
-    every other stage keeps to, which is the OOM this all started with.
-    """
+    """A conversion costs about one target, as `zarr_store_layout` assumes."""
     # Wide enough that the shard is set by the target rather than capped by the
     # cube, which needs more pixels than three times the largest target holds.
     side = 640
@@ -163,15 +142,7 @@ def test_zarr_conversion_peak_stays_inside_the_target(
 def test_fits_path_memory_scales_with_chunk_size_not_cube_size(
     peak_kb: Callable[..., int], fits_cubes: Callable[..., list[Path]]
 ) -> None:
-    """`rmsynth_3d_from_fits` peak memory is near-flat in cube size at a fixed target.
-
-    Guards both FITS-path blowups at once. The reader used to hand dask lazy
-    memmap views, so the whole cube faulted in when something downstream
-    touched a block, and the per-channel noise estimator (reached here via
-    `weight_type="variance"`) gathered the whole cube into a single task. Both
-    made peak memory a function of cube size with `target_chunk_mb` inert, and
-    both are invisible to `dask_memory_worker`, which never reads a FITS file.
-    """
+    """Peak memory is near-flat in cube size at a fixed target."""
     # 4x the pixels between the two cubes, at one fixed target_chunk_mb.
     small_side, large_side = 512, 1024
     target_chunk_mb = 4.0
@@ -194,21 +165,16 @@ def test_fits_path_memory_scales_with_chunk_size_not_cube_size(
         return N_FREQ * side**2 * 4 / 1024**2
 
     cube_growth = cube_mb(large_side) / cube_mb(small_side)
-    # Peak live data does grow a little with cube size at a fixed target: 4x the
-    # pixels is 4x the blocks, so the graph and the zarr metadata grow with it.
-    # Measured 34 MB at side 512 and 39 MB at side 1024, so 1.15x for a 4x cube.
-    # The bar is half the cube's own growth, between that and the 3.03x a
-    # whole-cube read per block measures.
+    # Peak does grow a little with cube size: 4x the blocks means a bigger graph.
+    # Measured 1.15x for a 4x cube, so half the cube's own growth is a fair bar.
     assert large < 0.5 * cube_growth * small, (
         f"peak live data should grow far slower than cube size: {small:.0f} MB "
         f"on a {cube_mb(small_side):.0f} MB cube vs {large:.0f} MB on a "
         f"{cube_mb(large_side):.0f} MB cube, {large / small:.2g}x for a "
         f"{cube_growth:.0f}x cube, at the same {target_chunk_mb} MB chunk target"
     )
-    # And an absolute bound, since a ratio alone would pass if both sizes blew
-    # up together: peak live data is set by target_chunk_mb, not by the cube.
-    # The measurements above are 8.5x and 9.75x the target (a per-task multiple,
-    # plus the graph); a whole-cube read per block measures 18x and 56x.
+    # An absolute bound too, since a ratio alone passes if both sizes blow up.
+    # Measured 8.5x and 9.75x the target; a whole-cube read per block gives 18x.
     assert large < 20 * target_chunk_mb, (
         f"peak live data ({large:.0f} MB) should be set by the "
         f"{target_chunk_mb} MB chunk target, not the "

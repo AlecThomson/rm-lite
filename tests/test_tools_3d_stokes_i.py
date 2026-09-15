@@ -1,9 +1,4 @@
-"""Tests for optional Stokes I fractional-polarization correction in 3D RM-synthesis.
-
-Mirrors the per-pixel-vs-1D convention of `test_tools_3d_dask.py`: uniform
-weighting and no flagged channels, so the global (per-cube) lam_sq_0/weight_arr
-used by the 3D orchestration matches what the 1D tools derive per pixel.
-"""
+"""Tests for optional Stokes I fractional-polarization correction in 3D RM-synthesis."""
 
 from __future__ import annotations
 
@@ -171,8 +166,7 @@ def test_stokes_i_fit_recovers_model_and_rm(
 def single_pixel_fdf_and_rmsf_fwhm(
     alpha: float, corrected: bool
 ) -> tuple[float, float]:
-    """Return (FDF main-lobe FWHM, reported RMSF FWHM) for a single-RM pixel
-    with a power-law Stokes I of index `alpha`."""
+    """FDF main-lobe and reported RMSF FWHM for a single-RM pixel of index `alpha`."""
     freq_arr_hz = (np.linspace(700, 1800, 300) * 1e6).astype(np.float64)
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
     ref_freq_hz = float(np.median(freq_arr_hz))
@@ -201,17 +195,7 @@ def single_pixel_fdf_and_rmsf_fwhm(
 
 
 def test_stokes_i_correction_keeps_fdf_consistent_with_rmsf():
-    """A Stokes I spectral index is equivalent to reweighting the data by
-    ``I(lambda^2)``, so the uncorrected FDF's *effective* RMSF is not the
-    reported ``rmsf_arr`` (which is built from the per-channel weights alone).
-    RM-CLEAN and the moments deconvolve against ``rmsf_arr``, so that mismatch
-    biases them.
-
-    Dividing by the Stokes I model removes the reweighting, so the corrected FDF
-    matches the reported RMSF for any spectral index, exactly as a flat-spectrum
-    source does. (The FDF is never narrower than its own RMSF; the effective RMSF
-    of the uncorrected, reweighted data simply differs from the reported one.)
-    """
+    """An uncorrected spectral index reweights the data, so the effective RMSF is not the reported one."""
     fdf_flat, rmsf_flat = single_pixel_fdf_and_rmsf_fwhm(alpha=0.0, corrected=True)
     fdf_corr, rmsf_corr = single_pixel_fdf_and_rmsf_fwhm(alpha=-3.0, corrected=True)
     fdf_raw, rmsf_raw = single_pixel_fdf_and_rmsf_fwhm(alpha=-3.0, corrected=False)
@@ -337,8 +321,7 @@ def test_estimate_stokes_i_noise_runs(chunked: Callable[..., da.Array]):
 
 
 def test_stokes_i_model_error_cube_opt_in(chunked: Callable[..., da.Array]):
-    """compute_model_error yields a finite, non-negative model-error cube and
-    alpha-error map from the same MC pass; both off (None) by default."""
+    """compute_model_error yields a finite error cube and alpha map, off by default."""
     cube = make_stokes_i_cube(alpha=-1.0)
     i_err = np.full_like(cube.stokes_i, 1e-3)
 
@@ -377,11 +360,7 @@ def test_stokes_i_model_error_cube_opt_in(chunked: Callable[..., da.Array]):
 
 
 def cube_with_faint_pixels(faint: list[tuple[int, int]], noise: float = 1e-3):
-    """A uniformly bright cube with a few deliberately faint (low-SNR) pixels.
-
-    Self-contained with a fixed local RNG (not the module RNG) and low noise, so
-    every bright pixel fits reliably and the result is deterministic.
-    """
+    """A uniformly bright cube with a few deliberately faint (low-SNR) pixels."""
     rng = np.random.default_rng(11)
     freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
@@ -413,9 +392,7 @@ def cube_with_faint_pixels(faint: list[tuple[int, int]], noise: float = 1e-3):
 
 
 def test_stokes_i_snr_cut_falls_back_to_flat_model(chunked: Callable[..., da.Array]):
-    """Pixels below the SNR cut fall back to a flat model (no spectral
-    correction): their model is a finite constant, their alpha is NaN (masked),
-    and their FDF equals the uncorrected Q/U FDF. Bright pixels are fitted."""
+    """Pixels below the SNR cut fall back to a flat model, with alpha masked."""
     faint = [(0, 0), (2, 3)]
     q, u, i_obs, err, freq = cube_with_faint_pixels(faint)
     common: dict[str, Any] = {
@@ -464,8 +441,7 @@ def test_stokes_i_snr_cut_falls_back_to_flat_model(chunked: Callable[..., da.Arr
 
 
 def test_stokes_i_snr_cut_zero_fits_all_pixels(chunked: Callable[..., da.Array]):
-    """A cut of 0 disables the SNR gate: even faint pixels are fitted (their
-    model is not forced flat)."""
+    """A cut of 0 disables the SNR gate, so even faint pixels are fitted."""
     faint = [(0, 0)]
     q, u, i_obs, err, freq = cube_with_faint_pixels(faint)
     result = rmsynth_3d(
@@ -482,8 +458,7 @@ def test_stokes_i_snr_cut_zero_fits_all_pixels(chunked: Callable[..., da.Array])
 
 
 def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
-    """When curve_fit cannot converge, the fitter returns a flat (mean) model
-    instead of raising; the graceful handling lives in the fitting code."""
+    """A fit that cannot converge returns a flat model instead of raising."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
 
     freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
@@ -508,8 +483,7 @@ def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
 def test_stokes_i_fit_failure_is_graceful(
     monkeypatch, chunked: Callable[..., da.Array]
 ):
-    """If every per-pixel fit fails to converge, the cube still completes and
-    each pixel falls back to a finite flat model (via the fitter), no crash."""
+    """If every fit fails, the cube still completes on flat models."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
 
     cube = make_stokes_i_cube(alpha=-1.0)
@@ -533,9 +507,7 @@ def test_stokes_i_fit_failure_is_graceful(
 def test_stokes_i_descending_frequency_matches_ascending(
     chunked: Callable[..., da.Array],
 ):
-    """A descending frequency axis (negative CDELT3) must give the same ref-flux
-    and alpha as the ascending storage of the same physical data. Guards the
-    np.interp/np.gradient ascending-axis assumption in ref_flux / alpha."""
+    """A descending frequency axis gives the same ref-flux and alpha as an ascending one."""
     # Curved (order-2) model so a bad interp can't be hidden by a constant slope.
     cube = make_stokes_i_cube(alpha=-1.0)
     ref_freq_hz = float(np.median(cube.freq_arr_hz))
@@ -578,8 +550,7 @@ def test_stokes_i_descending_frequency_matches_ascending(
 
 
 def test_stokes_i_error_numpy_3d_cube(chunked: Callable[..., da.Array]):
-    """A per-pixel error passed as a plain NumPy 3D array (not dask) is accepted
-    and fits a finite model. Guards the ndim==3 -> .rechunk() crash path."""
+    """A plain NumPy per-pixel error is accepted and fits a finite model."""
     cube = make_stokes_i_cube(alpha=-1.0)
     err = np.full_like(cube.stokes_i, 1e-3)  # numpy, not dask
     result = rmsynth_3d(
@@ -595,8 +566,7 @@ def test_stokes_i_error_numpy_3d_cube(chunked: Callable[..., da.Array]):
 
 
 def test_stokes_i_model_error_fit_order_zero(chunked: Callable[..., da.Array]):
-    """compute_model_error with fit_order=0 (length-1 popt) yields a finite,
-    non-negative error cube. Guards the multivariate_normal.rvs orientation."""
+    """compute_model_error at fit_order=0 yields a finite error cube."""
     cube = make_stokes_i_cube(alpha=-1.0)
     i_err = np.full_like(cube.stokes_i, 1e-3)
     result = rmsynth_3d(
@@ -649,9 +619,7 @@ def at_snr(
 
 
 def test_noise_floor_accepts_a_barely_detected_real_spectrum() -> None:
-    """A real spectrum at the SNR cut passes despite sitting under the
-    per-channel noise. At snr_cut=5 its median flux is only 5/sqrt(n) of a
-    channel's noise, so a per-channel floor would reject it."""
+    """A real spectrum at the SNR cut passes, under the per-channel noise."""
     error_arr = np.full(RACS_FREQ.size, 1.0)
     model = at_snr((RACS_FREQ / RACS_FREQ.mean()) ** -3.0, error_arr, 5.0)
     assert model.min() < error_arr.min(), "not the faint regime this is testing"
@@ -675,11 +643,7 @@ def test_noise_floor_accepts_a_barely_detected_real_spectrum() -> None:
 def test_noise_floor_spares_real_spectra_on_any_band(
     nu_min: float, nu_max: float, alpha: float
 ) -> None:
-    """The default floor rejects no real power law on any band, at the SNR cut.
-
-    Steeper than anything real, at the faintest a pixel is fitted. These bottom
-    out near a sigma; a runaway fit lands five orders of magnitude lower.
-    """
+    """The default floor rejects no real power law on any band, at the SNR cut."""
     freq = np.linspace(nu_min, nu_max, 288)
     error_arr = np.full(freq.size, 1.0)
     model = at_snr((freq / np.median(freq)) ** alpha, error_arr, 5.0)
@@ -723,12 +687,7 @@ def test_model_is_usable_rejects_models_that_cannot_divide(
 
 
 def test_unusable_model_takes_the_flat_fallback() -> None:
-    """A rejected pixel gets a flat model at its mean I, so no correction.
-
-    Fitting near-noise with no SNR cut is what produces these: a polynomial
-    through noise dips below zero at a band edge, which would flip the sign of
-    the fractional polarisation there rather than correct it.
-    """
+    """A rejected pixel gets a flat model at its mean I, so no correction."""
     rng = np.random.default_rng(20260823)
     n_freq, ny, nx = 125, 4, 6
     freq = np.arange(800e6, 1800e6, 8e6)[:n_freq]
@@ -765,12 +724,7 @@ def artefact_cube(
 ) -> tuple[
     NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]
 ]:
-    """A bright Stokes I feature peaked mid-band and near zero at both edges,
-    with a plain 2.5 mJy polarised signal on top.
-
-    An artefact as the fitter sees it: past the SNR cut, but shaped so the
-    curvature term runs to -inf and the model to zero at the edges.
-    """
+    """A bright mid-band Stokes I feature with a faint polarised signal on top."""
     rng = np.random.default_rng(2026)
     freq = np.linspace(744e6, 1032e6, n_freq)
     log_x = np.log10(freq / freq[n_freq // 2])
@@ -799,10 +753,7 @@ def artefact_synth(feature_width: float, **kwargs: Any) -> RMSynth3DResults:
 
 
 def test_artefact_spectrum_does_not_blow_up_the_fdf() -> None:
-    """The bug this floor is for: a runaway fit took a 2.5 mJy signal to 1e30.
-
-    The model reaches ~1e-37 Jy at the band edges and Q/U are divided by it.
-    """
+    """The bug this floor is for: a runaway fit took a 2.5 mJy signal to 1e30."""
     synth = artefact_synth(0.006)
     fdf = np.asarray(synth.fdf_dirty_cube.compute())
     model = np.asarray(require(synth.stokes_i_model_cube).compute())
@@ -812,11 +763,7 @@ def test_artefact_spectrum_does_not_blow_up_the_fdf() -> None:
 
 
 def test_unfloored_artefact_fit_carries_its_amplification_into_the_noise() -> None:
-    """A model kept above the floor still amplifies Q/U, and the noise says so.
-
-    The floor caps the amplification rather than removing it, so the error has
-    to rise with the peak.
-    """
+    """A model kept above the floor still amplifies Q/U, and the noise says so."""
     synth = artefact_synth(0.006, stokes_i_model_floor_sigma=0.0)
     peak = np.abs(np.asarray(synth.fdf_dirty_cube.compute())).max()
     noise = np.asarray(synth.theoretical_noise.fdf_error_noise).item()
@@ -830,8 +777,7 @@ def test_unfloored_artefact_fit_carries_its_amplification_into_the_noise() -> No
 
 
 def test_flat_stokes_i_leaves_the_theoretical_noise_alone() -> None:
-    """A flat model divides and rescales by the same number, so the noise is
-    unchanged: the one case the old estimate got right."""
+    """A flat model divides and rescales by the same number, so the noise is unchanged."""
     freq, stokes_q, stokes_u, _ = artefact_cube(0.05)
     chunks = stokes_q.shape
     common: dict[str, Any] = {
@@ -860,11 +806,7 @@ def test_flat_stokes_i_leaves_the_theoretical_noise_alone() -> None:
 
 
 def test_pixel_with_no_finite_channels_stays_nan() -> None:
-    """A fully blanked Stokes I pixel gets no model at all, not a flat one.
-
-    There is no mean to fall back to, so the model column and the alpha and
-    order maps stay NaN there while its neighbours fit normally.
-    """
+    """A fully blanked Stokes I pixel gets no model at all, not a flat one."""
     rng = np.random.default_rng(20260824)
     n_freq, ny, nx = 64, 2, 3
     freq = np.linspace(800e6, 1800e6, n_freq)
@@ -897,12 +839,7 @@ def test_pixel_with_no_finite_channels_stays_nan() -> None:
 
 
 def test_snr_cut_without_an_error_is_rejected_up_front() -> None:
-    """An SNR cut with nothing to measure SNR against is a silent no-op.
-
-    `stokes_i_snr` returns inf without an error, so every spectrum passes the
-    cut and pure noise gets fitted as signal. Caught while the graph is built,
-    not per pixel, so a cube fails in seconds.
-    """
+    """An SNR cut with nothing to measure SNR against is a silent no-op."""
     n_freq, ny, nx = 32, 2, 2
     freq = np.linspace(800e6, 1800e6, n_freq)
     shape = (n_freq, ny, nx)
@@ -936,8 +873,7 @@ def test_snr_cut_without_an_error_is_rejected_up_front() -> None:
 def test_stokes_i_coeff_cube_recovers_the_input_power_law(
     chunked: Callable[..., da.Array],
 ):
-    """The fitted terms are the power law that made the cube: plane 0 is the flux
-    at the reference frequency and plane 1 is the spectral index."""
+    """The fitted terms are the power law that made the cube."""
     alpha = -1.4
     cube = make_stokes_i_cube(alpha=alpha)
     result = rmsynth_3d(
@@ -979,8 +915,7 @@ def test_stokes_i_coeff_cube_recovers_the_input_power_law(
 def test_stokes_i_coeff_cube_reconstructs_the_model_cube(
     chunked: Callable[..., da.Array],
 ):
-    """The terms plus the reference frequency are the whole model: evaluating them
-    gives back the model cube, so the cube need never be written out."""
+    """The terms and the reference frequency evaluate back to the model cube."""
     cube = make_stokes_i_cube(alpha=-0.7, noise=0.01)
     result = rmsynth_3d(
         chunked(cube.stokes_q),
@@ -1009,8 +944,7 @@ def test_stokes_i_coeff_cube_reconstructs_the_model_cube(
 def test_stokes_i_coeff_cube_pads_orders_the_aic_dropped(
     chunked: Callable[..., da.Array],
 ):
-    """A negative `fit_order` picks each pixel's order, so the cube is always
-    `abs(fit_order) + 1` planes deep and dropped terms are zero, not gaps."""
+    """A negative `fit_order` keeps a fixed depth, with dropped terms zero, not gaps."""
     cube = make_stokes_i_cube(alpha=-1.0, noise=0.02)
     result = rmsynth_3d(
         chunked(cube.stokes_q),
@@ -1064,8 +998,7 @@ def test_stokes_i_coeff_cube_is_nan_where_no_fit_happened(
 
 
 def test_supplied_stokes_i_model_reports_no_terms(chunked: Callable[..., da.Array]):
-    """A model handed in was not fitted, so there is nothing to report but the
-    reference frequency it is now tied to."""
+    """A model handed in was not fitted, so only its reference frequency is reported."""
     cube = make_stokes_i_cube()
     result = rmsynth_3d(
         chunked(cube.stokes_q),
@@ -1084,8 +1017,7 @@ def test_supplied_stokes_i_model_reports_no_terms(chunked: Callable[..., da.Arra
 def test_linear_fit_terms_are_named_as_polynomial_coefficients(
     chunked: Callable[..., da.Array],
 ):
-    """A polynomial's terms are not spectral indices, so they are not named as if
-    they were."""
+    """A polynomial's terms are not named as if they were spectral indices."""
     cube = make_stokes_i_cube(alpha=-0.5)
     result = rmsynth_3d(
         chunked(cube.stokes_q),
@@ -1118,8 +1050,7 @@ def test_linear_fit_terms_are_named_as_polynomial_coefficients(
     ],
 )
 def test_coefficient_names(n_coeff, fit_function, expected):
-    """Power-law terms get the radio names as far as they go, then p3 up;
-    polynomial coefficients get neutral ones."""
+    """Power-law terms get the radio names, then p3 up; polynomials get neutral ones."""
     assert coefficient_names(n_coeff, fit_function) == expected
 
 
@@ -1140,12 +1071,7 @@ def test_coefficient_errors_are_the_covariance_diagonal():
 
 @pytest.mark.parametrize("fit_order", [0, 1, 2, 3])
 def test_shortest_fittable_spectrum_does_not_divide_by_zero(fit_order: int) -> None:
-    """The shortest spectrum the fitter accepts still fits, with an infinite AIC.
-
-    `fit_stokes_i_model` fits down to `abs(fit_order) + 2` channels, which is
-    exactly where astropy's small-sample AIC correction divides by zero. The fit
-    itself is fine, so it must come back usable rather than raise.
-    """
+    """The shortest spectrum the fitter accepts still fits, with an infinite AIC."""
     n_chan = fit_order + 2
     freq_arr_hz = np.linspace(800e6, 1800e6, n_chan)
     ref_freq_hz = float(np.median(freq_arr_hz))
@@ -1167,14 +1093,7 @@ def test_shortest_fittable_spectrum_does_not_divide_by_zero(fit_order: int) -> N
 
 
 def test_all_unscoreable_orders_pick_the_fewest_parameters() -> None:
-    """Every order unscoreable must not warn its way out of the comparison.
-
-    `aic_lsq` returns inf where the AICc correction diverges, so `aics` can be
-    all-inf; `best_aic_func` then took `aics - best_aic`, and `inf - inf` raises
-    `RuntimeWarning: invalid value encountered in subtract`. Whether a spectrum
-    reaches that state depends on the astropy version, which is why CI saw it on
-    three interpreters and not the fourth.
-    """
+    """Every order unscoreable must not warn its way out of the comparison."""
     n_param = np.array([1, 2, 3])
     best_aic, best_n, best_idx = best_aic_func(np.full(3, np.inf), n_param)
     assert best_n == 1
@@ -1188,8 +1107,7 @@ def test_all_unscoreable_orders_pick_the_fewest_parameters() -> None:
 
 
 def test_shortest_fittable_spectrum_picks_a_lower_order() -> None:
-    """With the top order's AIC undefined, the dynamic fit takes an order whose
-    AIC is real instead of crashing or preferring the degenerate fit."""
+    """An undefined top-order AIC makes the dynamic fit take a real one instead."""
     freq_arr_hz = np.linspace(800e6, 1800e6, 4)
     ref_freq_hz = float(np.median(freq_arr_hz))
     stokes_i = 2.0 * (freq_arr_hz / ref_freq_hz) ** -0.8
@@ -1207,8 +1125,7 @@ def test_shortest_fittable_spectrum_picks_a_lower_order() -> None:
 
 
 def test_pixel_with_barely_enough_channels_fits() -> None:
-    """A pixel left with exactly `fit_order + 2` finite channels must not take
-    the whole chunk down. Regression for the ZeroDivisionError out of the AIC."""
+    """A pixel at exactly `fit_order + 2` finite channels must not take the chunk down."""
     rng = np.random.default_rng(20260831)
     n_freq, ny, nx = 32, 2, 2
     freq = np.linspace(800e6, 1800e6, n_freq)
@@ -1241,13 +1158,7 @@ def test_pixel_with_barely_enough_channels_fits() -> None:
 def test_bad_channel_does_not_corrupt_the_3d_alpha_map(
     chunked: Callable[..., da.Array],
 ) -> None:
-    """One bad channel in the cube must not bend every pixel's fitted model.
-
-    The failure this guards against is silent: with plain least squares every
-    pixel still reports as fitted, with a finite model and a finite alpha, and
-    only the values are wrong. So the assertion is on accuracy, not on any
-    blanking or warning.
-    """
+    """One bad channel in the cube must not bend every pixel's fitted model."""
     cube = make_stokes_i_cube(ny=3, nx=4, alpha=-0.8, noise=0.005)
     stokes_i = cube.stokes_i.copy()
     stokes_i[30] *= 5.0  # a whole bad channel plane, as RFI arrives
@@ -1285,8 +1196,7 @@ def test_bad_channel_does_not_corrupt_the_3d_alpha_map(
 def test_stokes_i_robust_options_reach_the_fit(
     chunked: Callable[..., da.Array],
 ) -> None:
-    """The 3D keywords are plumbed through to `StokesIFitOptions`, so a channel
-    with an error 1000x too small does not bend every pixel's model."""
+    """The 3D keywords reach `StokesIFitOptions`, so one over-trusted channel cannot bend the fit."""
     cube = make_stokes_i_cube(ny=2, nx=2, alpha=-0.8, noise=0.005)
     stokes_i = cube.stokes_i.copy()
     stokes_i[30] += 5 * 0.005
@@ -1336,8 +1246,7 @@ def test_flat_model_value(mean_flux: float, expected: float) -> None:
 def test_unfitted_pixels_report_no_reference_flux(
     chunked: Callable[..., da.Array],
 ) -> None:
-    """A pixel below the SNR cut gets no flux, so fractional polarisation cannot
-    be computed against a mean of noise. Its FDF is still the uncorrected one."""
+    """A pixel below the SNR cut gets no flux to divide by."""
     faint = [(0, 0), (2, 3)]
     q, u, i_obs, err, freq = cube_with_faint_pixels(faint)
     common: dict[str, Any] = {
@@ -1374,8 +1283,7 @@ def test_unfitted_pixels_report_no_reference_flux(
 def test_negative_stokes_i_reports_no_flux_and_a_finite_fdf(
     chunked: Callable[..., da.Array],
 ) -> None:
-    """A negative pixel (a CLEAN sidelobe, say) used to export its negative mean
-    as a flux, flipping the sign of any fractional polarisation."""
+    """A negative pixel must not export its mean as a flux."""
     cube = make_stokes_i_cube(ny=2, nx=2, alpha=-0.8, noise=0.01)
     stokes_i = cube.stokes_i.copy()
     stokes_i[:, 0, 0] = -stokes_i[:, 0, 0]  # a strong, negative pixel
