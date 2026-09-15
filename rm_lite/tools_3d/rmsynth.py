@@ -307,7 +307,7 @@ def target_chunk_mb_for_worker(
     One task peaks at a multiple of the target, and a worker runs one task per
     thread.
     """
-    # MB of peak per MB of target, measured by the budget arm of
+    # MB of peak per MB of target, measured by the budget test in
     # tests/test_tools_3d_memory.py and rounded up from 1.9 / 3.0 / 7.8.
     factors = {"base": 2.5, "per_pixel_rmsf": 3.6, "debias": 9.0}
     factor = (

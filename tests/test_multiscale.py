@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from typing import cast
 
 import numpy as np
@@ -37,37 +38,24 @@ from rm_lite.utils.synthesis import (
     make_phi_arr,
 )
 
-RNG = np.random.default_rng(1234)
 
-
-def _coverage_grid(
+def coverage_grid(
     freq_lo_hz: float,
     freq_hi_hz: float,
     phi_max_radm2: float = 250.0,
     quiet: bool = True,
 ) -> NDArray[np.float64]:
-    """Auto multiscale grid for a contiguous band, from the band's own RMSF.
-
-    Mirrors how rmclean derives the grid: phi axis at fwhm/10 sampling, phi
-    window >= 2*phi_max_scale so the window never caps the wideband bands, and
-    phi_max_scale_radm2 = pi / lambda_sq_min. `quiet=False` lets the degeneration
-    warning through for caplog.
-    """
+    """Auto multiscale grid for a contiguous band, from the band's own RMSF."""
     freq = np.linspace(freq_lo_hz, freq_hi_hz, 200)
     lsq = freq_to_lambda2(freq)
     fwhm = float(get_fwhm_rmsf(lsq).fwhm_rmsf_radm2)
     phi = make_phi_arr(phi_max_radm2=phi_max_radm2, d_phi_radm2=fwhm / 10)
     phi_max_scale = float(np.pi / lsq.min())
 
-    def _call() -> NDArray[np.float64]:
+    with quiet_logs(logging.ERROR) if quiet else nullcontext():
         return default_scales(
             phi, fwhm, MultiscaleOptions(), phi_max_scale_radm2=phi_max_scale
         )
-
-    if quiet:
-        with quiet_logs(logging.ERROR):
-            return _call()
-    return _call()
 
 
 def burn_slab(
@@ -88,7 +76,7 @@ def burn_slab(
     )
 
 
-def _run_synth(complex_pol: NDArray[np.complexfloating], freq_hz: NDArray[np.float64]):
+def run_synth(complex_pol: NDArray[np.complexfloating], freq_hz: NDArray[np.float64]):
     rms = 0.02
     err = np.ones_like(complex_pol) * (rms + 1j * rms)
     with quiet_logs(logging.ERROR):
@@ -96,8 +84,7 @@ def _run_synth(complex_pol: NDArray[np.complexfloating], freq_hz: NDArray[np.flo
 
 
 def test_default_scales_capped_to_phi_window() -> None:
-    """A huge phi_max_scale must not inflate scales past the FDF phi window:
-    a scale kernel wider than the window is meaningless (Bug A)."""
+    """A scale kernel wider than the phi window is meaningless, so the grid is capped."""
     fwhm = 6.0
     phi = make_phi_arr(120.0, fwhm / 10)  # window = 240 rad/m^2
     window = float(phi.max() - phi.min())
@@ -109,18 +96,17 @@ def test_default_scales_capped_to_phi_window() -> None:
 
 
 def test_multiscale_oversized_scales_do_not_diverge() -> None:
-    """Explicit scales far larger than the phi window must not produce a runaway
-    clean FDF: the whole-array divergence guard reverts to the best state so the
-    result stays finite and bounded by the dirty peak (Bug B)."""
+    """Oversized explicit scales stay finite: the divergence guard reverts to the best state."""
+    rng = np.random.default_rng(1234)
     freq_hz = np.linspace(0.8e9, 2.2e9, 400)
     lsq = freq_to_lambda2(freq_hz)
     model = burn_slab(lsq, 0.5, 20, 30, 12.0)
     noisy = (
         model
-        + RNG.normal(0, 0.02, freq_hz.size)
-        + 1j * RNG.normal(0, 0.02, freq_hz.size)
+        + rng.normal(0, 0.02, freq_hz.size)
+        + 1j * rng.normal(0, 0.02, freq_hz.size)
     ).astype(np.complex128)
-    synth = _run_synth(noisy, freq_hz)
+    synth = run_synth(noisy, freq_hz)
     phi = synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float)
     fwhm = float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
     phi2 = synth.rmsf_arrs["phi2_arr_radm2"].to_numpy().astype(float)
@@ -156,17 +142,17 @@ def test_multiscale_oversized_scales_do_not_diverge() -> None:
 
 
 def test_multiscale_stall_terminates() -> None:
-    """An unreachable threshold must not run the major loop to max_iter: the
-    stall guard stops once the residual peak stops improving (issue C)."""
+    """The stall guard stops once the residual peak stops improving."""
+    rng = np.random.default_rng(1234)
     freq_hz = np.linspace(0.8e9, 2.2e9, 400)
     lsq = freq_to_lambda2(freq_hz)
     model = burn_slab(lsq, 0.5, 30, 20, 8.0)
     noisy = (
         model
-        + RNG.normal(0, 0.02, freq_hz.size)
-        + 1j * RNG.normal(0, 0.02, freq_hz.size)
+        + rng.normal(0, 0.02, freq_hz.size)
+        + 1j * rng.normal(0, 0.02, freq_hz.size)
     ).astype(np.complex128)
-    synth = _run_synth(noisy, freq_hz)
+    synth = run_synth(noisy, freq_hz)
     phi = synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float)
     fwhm = float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
     phi2 = synth.rmsf_arrs["phi2_arr_radm2"].to_numpy().astype(float)
@@ -199,19 +185,17 @@ def test_multiscale_stall_terminates() -> None:
 
 
 def test_iteration_counts_reported_fairly() -> None:
-    """The 1D tool reports both the minor-cycle count (`n_iter`) and the total
-    component-placement count (`n_sub_minor_iter`). Single-scale: the two are
-    equal (one component per minor iteration). Multiscale: the sub-minor total is
-    at least the minor-cycle count, and is the number comparable to single-scale."""
+    """The 1D tool reports both `n_iter` and `n_sub_minor_iter`."""
+    rng = np.random.default_rng(1234)
     freq_hz = np.linspace(0.8e9, 2.2e9, 400)
     lsq = freq_to_lambda2(freq_hz)
     model = burn_slab(lsq, 0.5, 20, 30, 12.0)
     noisy = (
         model
-        + RNG.normal(0, 0.02, freq_hz.size)
-        + 1j * RNG.normal(0, 0.02, freq_hz.size)
+        + rng.normal(0, 0.02, freq_hz.size)
+        + 1j * rng.normal(0, 0.02, freq_hz.size)
     ).astype(np.complex128)
-    synth = _run_synth(noisy, freq_hz)
+    synth = run_synth(noisy, freq_hz)
     with quiet_logs(logging.ERROR):
         single = run_rmclean_from_synth(synth, auto_mask=8, auto_threshold=1)
         multi = run_rmclean_from_synth(
@@ -269,15 +253,16 @@ def test_coupling_identity() -> None:
 
 def test_multiscale_recovers_thick_flux() -> None:
     """Multiscale recovers a thin+thick source; converges without diverging."""
+    rng = np.random.default_rng(1234)
     freq_hz = np.linspace(0.8e9, 2.2e9, 400)
     lsq = freq_to_lambda2(freq_hz)
     model = burn_slab(lsq, 0.4, 10, -40, 0.0) + burn_slab(lsq, 0.5, 50, 30, 15.0)
     noisy = (
         model
-        + RNG.normal(0, 0.02, freq_hz.size)
-        + 1j * RNG.normal(0, 0.02, freq_hz.size)
+        + rng.normal(0, 0.02, freq_hz.size)
+        + 1j * rng.normal(0, 0.02, freq_hz.size)
     ).astype(np.complex128)
-    synth = _run_synth(noisy, freq_hz)
+    synth = run_synth(noisy, freq_hz)
 
     params = synth.fdf_parameters
     noise = float(params["fdf_error_noise"][0])
@@ -309,15 +294,16 @@ def test_multiscale_recovers_thick_flux() -> None:
 
 def test_multiscale_thin_matches_single_scale() -> None:
     """On a Faraday-thin source multiscale agrees with single-scale RM-CLEAN."""
+    rng = np.random.default_rng(1234)
     freq_hz = np.linspace(0.8e9, 2.2e9, 400)
     lsq = freq_to_lambda2(freq_hz)
     model = burn_slab(lsq, 0.6, 30, 45, 0.0)
     noisy = (
         model
-        + RNG.normal(0, 0.02, freq_hz.size)
-        + 1j * RNG.normal(0, 0.02, freq_hz.size)
+        + rng.normal(0, 0.02, freq_hz.size)
+        + 1j * rng.normal(0, 0.02, freq_hz.size)
     ).astype(np.complex128)
-    synth = _run_synth(noisy, freq_hz)
+    synth = run_synth(noisy, freq_hz)
     phi = synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float)
     fwhm = float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
 
@@ -339,81 +325,60 @@ def test_multiscale_thin_matches_single_scale() -> None:
     assert np.isclose(m0_single, m0_multi, rtol=0.3)
 
 
-# Contiguous survey bands (MHz -> Hz) and their auto-grid outcome. The four
-# narrowband bands have RMSF FWHM so wide that no extended scale (>= 4*FWHM)
-# fits the recoverable Faraday range, so the grid degenerates to single-scale
-# [0.0]. Only genuinely wide fractional bandwidth (racs_all, gmims) yields an
-# extended grid. Values verified against the package synthesis utils.
-_DEGENERATE = "degenerate"
-_RACS_ALL = "racs_all"
-_GMIMS = "gmims"
-COVERAGES: list[tuple[str, float, float, str]] = [
-    ("racs_low", 744e6, 1032e6, _DEGENERATE),
-    ("possum_b1", 800e6, 1088e6, _DEGENERATE),
-    ("meerkat_l", 886e6, 1682e6, _DEGENERATE),
-    ("lofar", 120e6, 168e6, _DEGENERATE),
-    ("racs_all", 744e6, 1800e6, _RACS_ALL),
-    ("gmims_wide", 300e6, 1800e6, _GMIMS),
-]
+# Survey bands and their auto-grid outcome, checked against the synthesis utils.
 
 
 @pytest.mark.parametrize(
-    ("lo", "hi", "kind"),
-    [(lo, hi, kind) for _, lo, hi, kind in COVERAGES],
-    ids=[name for name, *_ in COVERAGES],
+    ("lo", "hi"),
+    [
+        pytest.param(744e6, 1032e6, id="racs_low"),
+        pytest.param(800e6, 1088e6, id="possum_b1"),
+        pytest.param(886e6, 1682e6, id="meerkat_l"),
+        pytest.param(120e6, 168e6, id="lofar"),
+    ],
 )
-def test_default_scales_coverage_matrix(lo: float, hi: float, kind: str) -> None:
-    """Auto grid per survey band: narrowband degenerates, wideband extends.
+def test_default_scales_degenerate_on_narrowband(lo: float, hi: float) -> None:
+    """Narrowband RMSF is so wide no extended scale fits the recoverable range."""
+    assert coverage_grid(lo, hi).tolist() == [0.0]
 
-    Locks the scale grid (root cause 3), not the scale selection: a single
-    narrow band must be seen to collapse to single-scale so it is never again
-    mistaken for a working multiscale run.
-    """
-    scales = _coverage_grid(lo, hi)
-    if kind == _DEGENERATE:
-        assert scales.tolist() == [0.0]
-    elif kind == _RACS_ALL:
-        # Just enough fractional bandwidth for extended scales; fine grid
-        # anchors at 3 (make_fine_scales).
-        assert len(scales) > 1
-        assert scales[0] == 0.0
-        assert scales[1] == 3.0
-    elif kind == _GMIMS:
-        # Wide band: delta plus >= 3 extended scales; fine grid anchors at 3
-        # then doubles geometrically from 6.
-        assert scales[0] == 0.0
-        extended = scales[1:]
-        assert len(extended) >= 3
-        assert extended[0] == 3.0
-        assert np.allclose(extended[1:], 6.0 * 2.0 ** np.arange(len(extended) - 1))
+
+def test_default_scales_extend_on_racs_all() -> None:
+    """Just enough fractional bandwidth for extended scales."""
+    scales = coverage_grid(744e6, 1800e6)
+    assert len(scales) > 1
+    assert scales[0] == 0.0
+    # Fine grid anchors at 3 (make_fine_scales).
+    assert scales[1] == 3.0
+
+
+def test_default_scales_extend_on_gmims_wide() -> None:
+    """A wide band gives the delta plus at least three extended scales."""
+    scales = coverage_grid(300e6, 1800e6)
+    assert scales[0] == 0.0
+    extended = scales[1:]
+    assert len(extended) >= 3
+    # Fine grid anchors at 3, then doubles geometrically from 6.
+    assert extended[0] == 3.0
+    assert np.allclose(extended[1:], 6.0 * 2.0 ** np.arange(len(extended) - 1))
 
 
 def test_default_scales_degeneration_warning(caplog: pytest.LogCaptureFixture) -> None:
-    """The degenerate grid warns loudly; a wideband grid does not.
-
-    The silent collapse to single-scale was the original wheel-spin; the warning
-    is the shippable signal, so guard that it fires exactly when it should.
-    """
+    """The degenerate grid warns loudly; a wideband grid does not."""
     with caplog.at_level(logging.WARNING, logger="rm-lite"):
-        degenerate = _coverage_grid(744e6, 1032e6, quiet=False)  # racs_low
+        degenerate = coverage_grid(744e6, 1032e6, quiet=False)  # racs_low
     assert degenerate.tolist() == [0.0]
     assert "degenerated to [0.0]" in caplog.text
     assert "multiscale_scales" in caplog.text  # names the escape hatch
 
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="rm-lite"):
-        wideband = _coverage_grid(300e6, 1800e6, quiet=False)  # gmims
+        wideband = coverage_grid(300e6, 1800e6, quiet=False)  # gmims
     assert len(wideband) > 1
     assert "degenerated" not in caplog.text
 
 
 def test_multiscale_wideband_preserves_point_flux() -> None:
-    """On a wideband band, multiscale on a thin source keeps single-scale flux.
-
-    racs_all's grid starts [0, 3, ...]: a true delta must stay on scale 0, so mom0 must
-    match single-scale CLEAN. This is the shippable guarantee (point flux is not
-    destroyed), distinct from the known thin-stealing on deeper grids.
-    """
+    """On a wideband band, multiscale on a thin source keeps single-scale flux."""
     rng = np.random.default_rng(20240717)
     freq_hz = np.linspace(744e6, 1800e6, 400)  # racs_all
     lsq = freq_to_lambda2(freq_hz)
@@ -423,7 +388,7 @@ def test_multiscale_wideband_preserves_point_flux() -> None:
         + rng.normal(0, 0.02, freq_hz.size)
         + 1j * rng.normal(0, 0.02, freq_hz.size)
     ).astype(np.complex128)
-    synth = _run_synth(noisy, freq_hz)
+    synth = run_synth(noisy, freq_hz)
     phi = synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float)
     fwhm = float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
     phi2 = synth.rmsf_arrs["phi2_arr_radm2"].to_numpy().astype(float)
@@ -457,11 +422,7 @@ def test_multiscale_wideband_preserves_point_flux() -> None:
 
 
 def test_multiscale_wideband_does_not_diverge() -> None:
-    """The deep gmims grid [0, 3, 6, 12, 24] stays finite and bounded by the dirty peak.
-
-    Exercises the full extended grid: even when scale selection is imperfect
-    (known thin-stealing), the clean must not run away.
-    """
+    """The deep gmims grid stays finite and bounded by the dirty peak."""
     rng = np.random.default_rng(20240718)
     freq_hz = np.linspace(300e6, 1800e6, 400)  # gmims
     lsq = freq_to_lambda2(freq_hz)
@@ -471,7 +432,7 @@ def test_multiscale_wideband_does_not_diverge() -> None:
         + rng.normal(0, 0.02, freq_hz.size)
         + 1j * rng.normal(0, 0.02, freq_hz.size)
     ).astype(np.complex128)
-    synth = _run_synth(noisy, freq_hz)
+    synth = run_synth(noisy, freq_hz)
     phi = synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float)
     fwhm = float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
     phi2 = synth.rmsf_arrs["phi2_arr_radm2"].to_numpy().astype(float)
@@ -500,7 +461,7 @@ def test_multiscale_wideband_does_not_diverge() -> None:
     assert clean_peak < 2 * dirty_peak
 
 
-def _clean_single_and_hybrid(
+def clean_single_and_hybrid(
     sim_dirty: NDArray[np.complexfloating],
     rmsf: NDArray[np.complexfloating],
     phi: NDArray[np.float64],
@@ -531,7 +492,7 @@ def _clean_single_and_hybrid(
     return single, multi
 
 
-def _model_shape_err(
+def model_shape_err(
     model: NDArray[np.complexfloating], truth: NDArray[np.complexfloating]
 ) -> float:
     """Scale-free rms of |model| against best-fit-amplitude |truth|."""
@@ -542,12 +503,7 @@ def _model_shape_err(
 
 
 def test_hybrid_model_quality_wideband() -> None:
-    """On a wide band (300-1800 MHz) a thick Gaussian's raw component model is
-    much closer to truth under hybrid selection than single-scale's spike comb.
-
-    The full benchmark bounds this ratio at 0.6 over 24 realisations; loosened
-    to 0.7 here for 4 realisations with distinct seeds.
-    """
+    """On a wide band, hybrid beats single-scale's spike comb on a thick Gaussian."""
     freqs = np.linspace(300e6, 1800e6, 300)
     geom = build_geometry(freqs)
     spec = gauss(1.5, amp=1.0)
@@ -557,7 +513,7 @@ def test_hybrid_model_quality_wideband() -> None:
     for i in range(4):
         rng = np.random.default_rng(800000 + i)
         sim = simulate_fdf(spec, freqs, rng=rng, signal_to_noise=24.0, geometry=geom)
-        single, multi = _clean_single_and_hybrid(
+        single, multi = clean_single_and_hybrid(
             sim.dirty_fdf,
             sim.rmsf_arr,
             geom.phi_arr_radm2,
@@ -566,16 +522,14 @@ def test_hybrid_model_quality_wideband() -> None:
             sim.fdf_noise,
             pms,
         )
-        err_single = _model_shape_err(np.asarray(single.model_fdf_arr).ravel(), truth)
-        err_multi = _model_shape_err(np.asarray(multi.model_fdf_arr).ravel(), truth)
+        err_single = model_shape_err(np.asarray(single.model_fdf_arr).ravel(), truth)
+        err_multi = model_shape_err(np.asarray(multi.model_fdf_arr).ravel(), truth)
         ratios.append(err_multi / err_single)
     assert float(np.median(ratios)) <= 0.7
 
 
 def test_hybrid_delta_steps_parity() -> None:
-    """On a bright offset delta, hybrid multiscale does single-scale work: the
-    same flux and effectively the same sub-minor step count (within the one-step
-    slack of the adaptive two-phase clean), all on the delta scale."""
+    """On a bright offset delta, hybrid does single-scale work, on the delta scale."""
     freqs = np.linspace(300e6, 1800e6, 300)
     geom = build_geometry(freqs)
     spec = delta(center_fwhm=3.3, amp=1.0)
@@ -583,7 +537,7 @@ def test_hybrid_delta_steps_parity() -> None:
     for i in range(4):
         rng = np.random.default_rng(810000 + i)
         sim = simulate_fdf(spec, freqs, rng=rng, signal_to_noise=24.0, geometry=geom)
-        single, multi = _clean_single_and_hybrid(
+        single, multi = clean_single_and_hybrid(
             sim.dirty_fdf,
             sim.rmsf_arr,
             geom.phi_arr_radm2,
@@ -601,9 +555,8 @@ def test_hybrid_delta_steps_parity() -> None:
         m0_multi = calc_faraday_moments(
             np.abs(multi.clean_fdf_arr), geom.phi_arr_radm2, geom.fwhm
         ).mom0
-        # Sub-percent, not bit-identical: the adaptive two-phase clean restores
-        # the delta a hair differently from single-scale. Still catches flux
-        # being destroyed or doubled.
+        # Sub-percent, not bit-identical: the adaptive clean restores the delta a hair
+        # differently. Still catches flux being destroyed or doubled.
         assert np.isclose(m0_single, m0_multi, rtol=0.02)
 
 

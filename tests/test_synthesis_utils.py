@@ -32,42 +32,42 @@ from rm_lite.utils.synthesis import (
     rmsynth_nufft,
 )
 
-RNG: Generator = np.random.default_rng()
-
 
 def test_freq_lsq_freq():
-    freqs = RNG.uniform(1e6, 10e9, 1000)
+    rng = np.random.default_rng(0)
+    freqs = rng.uniform(1e6, 10e9, 1000)
 
     assert np.allclose(lambda2_to_freq(freq_to_lambda2(freqs)), freqs)
 
 
 def test_lsq_freq_lsq():
-    lambda2s = RNG.uniform(1e-6, 1, 1000)
+    rng = np.random.default_rng(0)
+    lambda2s = rng.uniform(1e-6, 1, 1000)
 
     assert np.allclose(freq_to_lambda2(lambda2_to_freq(lambda2s)), lambda2s)
 
 
-def test_phi_arr():
-    for max_val in [100, 1000, 10000]:
-        for step_val in [1, 10, 100]:
-            phi_one = make_phi_arr(max_val, step_val)
-            assert len(phi_one) == max_val // step_val * 2 + 1
-            assert np.isclose(np.max(phi_one), max_val)
-            assert np.isclose(np.min(phi_one), -max_val)
-            # Check that middle pixel is 0
-            assert phi_one[len(phi_one) // 2] == 0
+@pytest.mark.parametrize("max_val", [100, 1000, 10000])
+@pytest.mark.parametrize("step_val", [1, 10, 100])
+def test_phi_arr(max_val: int, step_val: int):
+    phi_one = make_phi_arr(max_val, step_val)
+    assert len(phi_one) == max_val // step_val * 2 + 1
+    assert np.isclose(np.max(phi_one), max_val)
+    assert np.isclose(np.min(phi_one), -max_val)
+    # Check that middle pixel is 0
+    assert phi_one[len(phi_one) // 2] == 0
 
 
-def test_doubel_phi_arr():
-    for max_val in [100, 1000, 10000]:
-        for step_val in [1, 10, 100]:
-            phi_arr = make_phi_arr(max_val, step_val)
-            phi_double_arr = make_double_phi_arr(phi_arr)
-            assert len(phi_double_arr) == len(phi_arr) * 2 + 1
-            assert np.isclose(np.max(phi_double_arr), (max_val * 2) + step_val)
-            assert np.isclose(np.min(phi_double_arr), -(max_val * 2) - step_val)
-            # Check that middle pixel is 0
-            assert phi_double_arr[len(phi_double_arr) // 2] == 0
+@pytest.mark.parametrize("max_val", [100, 1000, 10000])
+@pytest.mark.parametrize("step_val", [1, 10, 100])
+def test_double_phi_arr(max_val: int, step_val: int):
+    phi_arr = make_phi_arr(max_val, step_val)
+    phi_double_arr = make_double_phi_arr(phi_arr)
+    assert len(phi_double_arr) == len(phi_arr) * 2 + 1
+    assert np.isclose(np.max(phi_double_arr), (max_val * 2) + step_val)
+    assert np.isclose(np.min(phi_double_arr), -(max_val * 2) - step_val)
+    # Check that middle pixel is 0
+    assert phi_double_arr[len(phi_double_arr) // 2] == 0
 
 
 def test_moments_unresolved_gaussian():
@@ -275,9 +275,7 @@ def test_fit_sampled_peak_without_a_maximum():
 def test_peaks_recover_a_thin_source():
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm, amplitude, rm, pa0, lam_sq_0 = 40.0, 2.0, 37.3, 30.0, 0.05
-    # A Faraday-thin FDF: an RMSF-shaped lobe carrying the angle the source has
-    # at the reference lambda^2, 2*(pa0 + RM*lam_sq_0). `gaussian` takes the
-    # complex amplitude, so that is the whole spectrum.
+    # A Faraday-thin FDF: an RMSF-shaped lobe at the source's reference angle.
     fdf = gaussian(
         phi_arr,
         amplitude * np.exp(2j * (np.deg2rad(pa0) + rm * lam_sq_0)),
@@ -365,9 +363,7 @@ def test_peaks_without_a_peak():
 
 
 def test_peaks_report_faint_peaks_with_their_snr():
-    # Peaks carry no detection cut: thresholding on `peak_pi` would be a cut on
-    # the quantity being reported, so a faint peak is measured and the caller
-    # selects on peak_pi / peak_pi_error instead.
+    # Peaks carry no detection cut; the caller selects on peak_pi / peak_pi_error.
     phi_arr = make_phi_arr(300.0, 5.0)
     fwhm = 40.0
     bright = gaussian(phi_arr, 2.0, 37.3, fwhm=fwhm).astype(np.complex128)
@@ -463,9 +459,7 @@ def test_debias_fdf_recovers_signal():
     sigma = 0.05
     signal = 2.0
     phi_arr = np.array([-10.0, 10.0])
-    # Angles either side of the -pi/pi wrap to exercise the component filtering.
-    # theta = 0 also discriminates the paper projection (U sin + Q cos) from a
-    # Q/U-swapped one, which would return ~0 rather than the signal.
+    # Angles either side of the -pi/pi wrap; theta = 0 also catches a Q/U swap.
     for theta in [0.0, np.pi / 3, np.pi - 0.05, -np.pi + 0.05]:
         fdf = signal * np.exp(1j * theta) + (
             rng.normal(0, sigma, (2, 64, 64)) + 1j * rng.normal(0, sigma, (2, 64, 64))
@@ -581,9 +575,8 @@ def test_moments_debias_option():
 
 
 def test_moments_auto_threshold_dask_multichunk_guard():
-    # calc_faraday_moments' auto-threshold noise estimate reduces over the
-    # Faraday depth axis, which dask cannot do across chunks, so it must raise a
-    # clear error rather than an opaque dask failure (mirrors debias_fdf).
+    # The auto-threshold estimate reduces over Faraday depth, which dask cannot do
+    # across chunks, so it must raise clearly rather than fail opaquely.
     phi_arr = make_phi_arr(200, 1)
     fdf = np.zeros((len(phi_arr), 4, 4), dtype=np.complex128)
     fdf_dask = da.from_array(fdf, chunks=(50, 4, 4))
@@ -592,9 +585,8 @@ def test_moments_auto_threshold_dask_multichunk_guard():
 
 
 def test_moments_auto_threshold_broad_source():
-    # A broad component fills most of the band, so median(|FDF|) is dominated
-    # by signal and would inflate the noise estimate past the peak, masking the
-    # source entirely. The mad_std estimate on the real/imag parts stays robust.
+    # A broad component dominates median(|FDF|) and would mask the source; mad_std
+    # on the real/imag parts stays robust.
     rng = np.random.default_rng(7)
     phi_arr = make_phi_arr(150, 1)
     fwhm = 200.0
@@ -653,7 +645,7 @@ def test_moments_min_weight_fraction_signed():
     )
 
 
-def _stokes_data(
+def stokes_data(
     stokes_i: NDArray[np.float64],
     stokes_i_error: NDArray[np.float64],
     freq_arr_hz: NDArray[np.float64],
@@ -673,7 +665,7 @@ def test_fractional_spectra_snr_cut_needs_an_error() -> None:
     """The 1D path rejects the same silent no-op the cube path does."""
     freq = np.linspace(800e6, 1800e6, 64)
     stokes_i = np.full(freq.size, 1.0)
-    data = _stokes_data(stokes_i, np.zeros(freq.size), freq)
+    data = stokes_data(stokes_i, np.zeros(freq.size), freq)
 
     with pytest.raises(ValueError, match="needs a Stokes I error"):
         create_fractional_spectra(data, float(freq.mean()), StokesIFitOptions())
@@ -686,15 +678,11 @@ def test_fractional_spectra_snr_cut_needs_an_error() -> None:
 
 
 def test_fractional_spectra_falls_back_rather_than_raising() -> None:
-    """An unusable model is a data condition, so 1D warns and carries on.
-
-    A polynomial through noise dips below zero at a band edge; dividing Q/U by
-    it would flip their sign there, so the flat model stands in.
-    """
+    """An unusable model is a data condition, so 1D warns and carries on."""
     rng = np.random.default_rng(20260826)
     freq = np.linspace(800e6, 1800e6, 125)
     stokes_i = rng.normal(0, 0.05, freq.size) + 0.01
-    data = _stokes_data(stokes_i, np.full(freq.size, 0.05), freq)
+    data = stokes_data(stokes_i, np.full(freq.size, 0.05), freq)
 
     options = StokesIFitOptions(snr_cut=None, fit_function="linear")
     result = create_fractional_spectra(data, float(freq.mean()), options)
@@ -707,7 +695,7 @@ def test_fractional_spectra_falls_back_rather_than_raising() -> None:
 
     # And it is the gate doing it, not a fit that happened to come out flat:
     # the same fit on data shifted clear of zero keeps its spectral shape.
-    lifted = _stokes_data(stokes_i + 1.0, np.full(freq.size, 0.05), freq)
+    lifted = stokes_data(stokes_i + 1.0, np.full(freq.size, 0.05), freq)
     ungated = create_fractional_spectra(lifted, float(freq.mean()), options)
     assert ungated is not None
     ungated_model = ungated.stokes_data.stokes_i_model_arr
@@ -716,9 +704,8 @@ def test_fractional_spectra_falls_back_rather_than_raising() -> None:
 
 
 def test_moments_noise_flux_closed_form():
-    # abs() rectifies, so each RMSF-width cell in the summed range adds
-    # sigma sqrt(pi/2) with the same sign and mom0 grows with the range.
-    # mom0_debias removes exactly that and must sit on zero.
+    # abs() rectifies, so mom0 grows with the summed range; mom0_debias removes
+    # exactly that.
     rng = np.random.default_rng(20240904)
     fwhm = 57.4
     sigma = 0.05
@@ -739,9 +726,7 @@ def test_moments_noise_flux_closed_form():
 
 
 def test_moments_pi_lam_sq_0_is_polarisation_at_reference():
-    # Summing the complex FDF keeps the phase, so on a deconvolved FDF it gives
-    # the source's polarisation at lam_sq_0, sum_k P_k exp(2i(psi_k + phi_k
-    # lam_sq_0)). Built as a restored clean FDF, what the pipelines pass in.
+    # Summing the complex FDF keeps the phase, giving the polarisation at lam_sq_0.
     phi_arr = make_phi_arr(600.0, 1.0)
     fwhm = 60.0
     lam_sq_0_m2 = 0.1
@@ -768,9 +753,8 @@ def test_moments_pi_lam_sq_0_is_polarisation_at_reference():
 
 
 def test_moments_pi_lam_sq_0_cancels_where_mom0_does_not():
-    # Polarisation phase is 2*psi, so two equal components 90 deg apart in
-    # intrinsic angle are antiparallel and cancel in the coherent sum while the
-    # amplitude sum is unchanged. Nothing else here sees the relative angle.
+    # Polarisation phase is 2*psi, so components 90 deg apart cancel in the coherent
+    # sum while the amplitude sum is unchanged.
     phi_arr = make_phi_arr(600.0, 1.0)
     fwhm = 60.0
 
@@ -841,12 +825,7 @@ def test_moments_errors_need_fdf_error():
 def clean_fdf_realisation(
     rng: Generator, amplitude: float, rm_radm2: float = 40.0
 ) -> tuple[NDArray[np.complex128], NDArray[np.float64], float, float]:
-    """Restored component plus RM-synthesis residual noise.
-
-    The residual has to come through RM-synthesis rather than be drawn in
-    Faraday depth: FDF noise is correlated over one RMSF width, which is the
-    covariance the moment errors assume.
-    """
+    """Restored component plus RM-synthesis residual noise."""
     freq_arr_hz = np.linspace(0.8e9, 1.1e9, 288)
     n_chan = freq_arr_hz.size
     complex_pol_error = np.full(n_chan, 1.0 + 1.0j, dtype=np.complex128)
@@ -875,10 +854,8 @@ def clean_fdf_realisation(
 
 
 def test_moments_errors_track_monte_carlo_scatter():
-    # With a threshold in place, so the summed samples carry signal, the errors
-    # track the realised scatter to within ~25%. Near the detection limit which
-    # samples clear the cut dominates the variance, which first-order
-    # propagation cannot see, so mom1 degrades to ~1.5x. Pin both.
+    # With a threshold the errors track the realised scatter to ~25%. Near the limit,
+    # which samples clear the cut dominates, which propagation cannot see: mom1 ~1.5x.
     def ratios(amplitude: float) -> NDArray[np.float64]:
         rng = np.random.default_rng(4)
         realised = []
@@ -908,9 +885,8 @@ def test_moments_errors_track_monte_carlo_scatter():
 
 
 def test_moments_errors_are_conservative_without_a_cut():
-    # Noise-only amplitudes scatter by sqrt(2 - pi/2) sigma, not a full sigma,
-    # so summing the whole grid over-reports the errors. That is the safe
-    # direction, but pin the margin: no cut must never under-report.
+    # Noise-only amplitudes scatter by sqrt(2 - pi/2) sigma, so no cut over-reports.
+    # That is the safe direction, but pin the margin.
     rng = np.random.default_rng(5)
 
     realised = []
@@ -945,9 +921,8 @@ def test_moments_span_sets_the_noise_terms():
 
     assert float(narrow.mom0_error) < 0.5 * float(wide.mom0_error)
     assert float(narrow.mom2_error) < 0.1 * float(wide.mom2_error)
-    # Summing the whole grid, the removed noise flux matches the closed form
-    # exactly; the cut keeps only the samples around the peak, so it scales
-    # down with them.
+    # Over the whole grid the removed noise flux matches the closed form; the cut
+    # keeps only the samples around the peak, so it scales down with them.
     areas = phi_arr.size * 2.0 / (fwhm * gaussian_integrand(1.0, fwhm=1.0))
     removed_wide = float(wide.mom0) - float(wide.mom0_debias)
     removed_narrow = float(narrow.mom0) - float(narrow.mom0_debias)

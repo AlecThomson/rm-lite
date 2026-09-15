@@ -147,15 +147,16 @@ module = [
     "rm_lite.utils.dask_io",
     "rm_lite.tools_3d.rmsynth",
     "rm_lite.tools_3d.rmclean",
-    "tests.test_tools_3d_dask",
-    "tests._dask_memory_worker",
+    "test_tools_3d_dask",
+    "dask_memory_worker",
+    "conftest",
 ]
 disallow_untyped_calls = false
 warn_return_any = false
 
 [[tool.mypy.overrides]]
 # nbconvert/nbformat have no type stubs.
-module = ["tests.test_examples"]
+module = ["test_examples"]
 disallow_untyped_calls = false
 
 

@@ -7,6 +7,7 @@ from time import time
 from typing import Any, NamedTuple
 
 import numpy as np
+import pytest
 from numpy.typing import NDArray
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
@@ -49,23 +50,7 @@ def do_rmsynth_planes_old(
     verbose=False,
     log=print,
 ):
-    """Perform RM-synthesis on Stokes Q and U cubes (1,2 or 3D). This version
-    of the routine loops through spectral planes and is faster than the pixel-
-    by-pixel code. This version also correctly deals with isolated clumps of
-    NaN-flagged voxels within the data-cube (unlikely in interferometric cubes,
-    but possible in single-dish cubes). Input data must be in standard python
-    [z,y,x] order, where z is the frequency axis in ascending order.
-
-    dataQ           ... 1, 2 or 3D Stokes Q data array
-    dataU           ... 1, 2 or 3D Stokes U data array
-    lambdaSqArr_m2  ... vector of wavelength^2 values (ascending freq order)
-    phiArr_radm2    ... vector of trial Faraday depth values
-    weightArr       ... vector of weights, default [None] is Uniform (all 1s)
-    nBits           ... precision of data arrays [32]
-    verbose         ... print feedback during calculation [False]
-    log             ... function to be used to output messages [print]
-
-    """
+    """Perform RM-synthesis on Stokes Q and U cubes, a plane at a time."""
 
     # Default data types
     dtFloat = "float" + str(nBits)
@@ -158,13 +143,7 @@ def do_rmsynth_planes_old(
 
 
 def extrap(x, xp, yp):
-    """
-    Wrapper to allow np.interp to linearly extrapolate at function ends.
-
-    np.interp function with linear extrapolation
-    http://stackoverflow.com/questions/2745329/how-to-make-scipy-interpolate
-    -give-a-an-extrapolated-result-beyond-the-input-ran
-    """
+    """Wrapper to allow np.interp to linearly extrapolate at function ends."""
 
     y = np.interp(x, xp, yp)
     y = np.where(x < xp[0], yp[0] + (x - xp[0]) * (yp[0] - yp[1]) / (xp[0] - xp[1]), y)
@@ -184,29 +163,7 @@ def get_rmsf_planes_old(
     verbose=False,
     log=print,
 ):
-    """Calculate the Rotation Measure Spread Function from inputs. This version
-    returns a cube (1, 2 or 3D) of RMSF spectra based on the shape of a
-    boolean mask array, where flagged data are True and unflagged data False.
-    If only whole planes (wavelength channels) are flagged then the RMSF is the
-    same for all pixels and the calculation is done once and replicated to the
-    dimensions of the mask. If some isolated voxels are flagged then the RMSF
-    is calculated by looping through each wavelength plane, which can take some
-    time. By default the routine returns the analytical width of the RMSF main
-    lobe but can also use MPFIT to fit a Gaussian.
-
-    lambdaSqArr_m2  ... vector of wavelength^2 values (ascending freq order)
-    phiArr_radm2    ... vector of trial Faraday depth values
-    weightArr       ... vector of weights, default [None] is no weighting
-    maskArr         ... cube of mask values used to shape return cube [None]
-    lam0Sq_m2       ... force a reference lambda^2 value (def=calculate) [None]
-    double          ... pad the Faraday depth to double-size [True]
-    fitRMSF         ... fit the main lobe of the RMSF with a Gaussian [False]
-    fitRMSFreal     ... fit RMSF.real, rather than abs(RMSF) [False]
-    nBits           ... precision of data arrays [32]
-    verbose         ... print feedback during calculation [False]
-    log             ... function to be used to output messages [print]
-
-    """
+    """Calculate the Rotation Measure Spread Function from inputs."""
 
     # Default data types
     dtFloat = "float" + str(nBits)
@@ -332,7 +289,8 @@ def get_rmsf_planes_old(
     return RMSFcube, phi2Arr, fwhmRMSFArr, statArr
 
 
-def make_fake_data() -> FakeData:
+@pytest.fixture
+def fake_data() -> FakeData:
     # Set up
     freq = (np.arange(744, 1032, 1) * 1e6).astype(np.float64)
     lsq = ((2.998e8 / freq) ** 2).astype(np.float64)
@@ -358,100 +316,94 @@ def make_fake_data() -> FakeData:
     )
 
 
-def test_rmsynth() -> None:
+@pytest.mark.parametrize("eps", [1e-4, 1e-5, 1e-6, 1e-8])
+def test_rmsynth(fake_data: FakeData, eps: float) -> None:
     """Test the NUFFT RM-synthesis routine against DFT."""
-    fake_data = make_fake_data()
-    for eps in [1e-4, 1e-5, 1e-6, 1e-8]:
-        tick = time()
-        FDFcube = rmsynth_nufft(
-            complex_pol_arr=fake_data.stokes_q + 1j * fake_data.stokes_u,
-            lambda_sq_arr_m2=fake_data.lsq,
-            phi_arr_radm2=fake_data.phis,
-            weight_arr=fake_data.weights,
-            lam_sq_0_m2=fake_data.lsq_0,
-            eps=eps,
-        )
-        tock = time()
-        msg = f"Time taken for NUFFT: {(tock - tick) * 1000:0.2f} ms"
-        logger.info(msg)
+    tick = time()
+    FDFcube = rmsynth_nufft(
+        complex_pol_arr=fake_data.stokes_q + 1j * fake_data.stokes_u,
+        lambda_sq_arr_m2=fake_data.lsq,
+        phi_arr_radm2=fake_data.phis,
+        weight_arr=fake_data.weights,
+        lam_sq_0_m2=fake_data.lsq_0,
+        eps=eps,
+    )
+    tock = time()
+    msg = f"Time taken for NUFFT: {(tock - tick) * 1000:0.2f} ms"
+    logger.info(msg)
 
-        tick = time()
-        FDFcube_old, lam0Sq_m2_old = do_rmsynth_planes_old(  # type: ignore[no-untyped-call]
-            dataQ=fake_data.stokes_q,
-            dataU=fake_data.stokes_u,
-            lambdaSqArr_m2=fake_data.lsq,
-            phiArr_radm2=fake_data.phis,
-            weightArr=fake_data.weights,
-            lam0Sq_m2=fake_data.lsq_0,
-        )
-        tock = time()
-        msg = f"Time taken for DFT: {(tock - tick) * 1000:0.2f} ms"
-        logger.info(msg)
+    tick = time()
+    FDFcube_old, lam0Sq_m2_old = do_rmsynth_planes_old(  # type: ignore[no-untyped-call]
+        dataQ=fake_data.stokes_q,
+        dataU=fake_data.stokes_u,
+        lambdaSqArr_m2=fake_data.lsq,
+        phiArr_radm2=fake_data.phis,
+        weightArr=fake_data.weights,
+        lam0Sq_m2=fake_data.lsq_0,
+    )
+    tock = time()
+    msg = f"Time taken for DFT: {(tock - tick) * 1000:0.2f} ms"
+    logger.info(msg)
 
-        # fiNUFFT can't go below 1e-8 in precision!
-        if eps == 1e-8:
-            assert np.allclose(FDFcube, FDFcube_old, rtol=eps * 10, atol=eps * 10)
-        else:
-            assert np.allclose(FDFcube, FDFcube_old, rtol=eps, atol=eps)
+    # fiNUFFT can't go below 1e-8 in precision!
+    if eps == 1e-8:
+        assert np.allclose(FDFcube, FDFcube_old, rtol=eps * 10, atol=eps * 10)
+    else:
+        assert np.allclose(FDFcube, FDFcube_old, rtol=eps, atol=eps)
 
 
-def test_rmsf():
+@pytest.mark.parametrize("eps", [1e-4, 1e-5, 1e-6, 1e-8])
+def test_rmsf(fake_data: FakeData, eps: float):
     """Test the NUFFT RMSF routine against DFT."""
-    fake_data = make_fake_data()
-    for eps in [1e-4, 1e-5, 1e-6, 1e-8]:
-        tick = time()
-        RMSFcube, phi2Arr, fwhmRMSFArr, statArr = get_rmsf_nufft(
-            lambda_sq_arr_m2=fake_data.lsq,
-            phi_arr_radm2=fake_data.phis,
-            weight_arr=fake_data.weights,
-            lam_sq_0_m2=fake_data.lsq_0,
-            eps=eps,
-        )
-        tock = time()
-        msg = f"Time taken for NUFFT: {(tock - tick) * 1000:0.2f} ms"
-        logger.info(msg)
+    tick = time()
+    RMSFcube, phi2Arr, fwhmRMSFArr, statArr = get_rmsf_nufft(
+        lambda_sq_arr_m2=fake_data.lsq,
+        phi_arr_radm2=fake_data.phis,
+        weight_arr=fake_data.weights,
+        lam_sq_0_m2=fake_data.lsq_0,
+        eps=eps,
+    )
+    tock = time()
+    msg = f"Time taken for NUFFT: {(tock - tick) * 1000:0.2f} ms"
+    logger.info(msg)
 
-        tick = time()
-        RMSFcube_old, phi2Arr_old, fwhmRMSFArr_old, statArr_old = get_rmsf_planes_old(  # type: ignore[no-untyped-call]
-            lambdaSqArr_m2=fake_data.lsq,
-            phiArr_radm2=fake_data.phis,
-            weightArr=fake_data.weights,
-            lam0Sq_m2=fake_data.lsq_0,
-        )
-        tock = time()
-        msg = f"Time taken for DFT: {(tock - tick) * 1000:0.2f} ms"
-        logger.info(msg)
+    tick = time()
+    RMSFcube_old, phi2Arr_old, fwhmRMSFArr_old, statArr_old = get_rmsf_planes_old(  # type: ignore[no-untyped-call]
+        lambdaSqArr_m2=fake_data.lsq,
+        phiArr_radm2=fake_data.phis,
+        weightArr=fake_data.weights,
+        lam0Sq_m2=fake_data.lsq_0,
+    )
+    tock = time()
+    msg = f"Time taken for DFT: {(tock - tick) * 1000:0.2f} ms"
+    logger.info(msg)
 
-        # fiNUFFT can't go below 1e-8 in precision!
-        for name, new, old in zip(
-            ["phi2Arr", "RMSFcube", "fwhmRMSFArr"],
-            [phi2Arr, RMSFcube, fwhmRMSFArr],
-            [phi2Arr_old, RMSFcube_old, fwhmRMSFArr_old],
-            strict=False,
-        ):
-            msg = f"Testing {name}"
+    # fiNUFFT can't go below 1e-8 in precision!
+    for name, new, old in zip(
+        ["phi2Arr", "RMSFcube", "fwhmRMSFArr"],
+        [phi2Arr, RMSFcube, fwhmRMSFArr],
+        [phi2Arr_old, RMSFcube_old, fwhmRMSFArr_old],
+        strict=False,
+    ):
+        msg = f"Testing {name}"
+        logger.info(msg)
+        if eps == 1e-8:
+            assert np.allclose(new, old, rtol=eps * 10, atol=eps * 10)
+        else:
+            msg = f"{new=},{old=}"
             logger.info(msg)
-            if eps == 1e-8:
-                assert np.allclose(new, old, rtol=eps * 10, atol=eps * 10)
-            else:
-                msg = f"{new=},{old=}"
-                logger.info(msg)
-                assert np.allclose(new, old, rtol=eps * 2, atol=eps * 2)
+            assert np.allclose(new, old, rtol=eps * 2, atol=eps * 2)
 
 
-def _rmsf_for_mask(
+def rmsf_for_mask(
     fake_data: FakeData,
     mask_arr: NDArray[np.bool_],
     reuse_rmsf: bool,
     nthreads: int = 1,
 ) -> NDArray[Any]:
-    # NDArray[Any]: RMSFResults.rmsf_cube is annotated float64 but is complex128
-    # at runtime, a mismatch this test has no business asserting either way.
-    #
-    # nthreads=1 by default, which is what the dask path uses: finufft's
-    # multithreaded type-3 splits the work differently for one transform than
-    # for many, so at nthreads=0 (all cores) the one-spectrum and per-pixel
-    # answers differ in the last couple of bits. See the tolerance case below.
+    # rmsf_cube is annotated float64 but is complex128 at runtime, hence NDArray[Any].
+    # nthreads=1 is what the dask path uses; at nthreads=0 finufft splits the work
+    # differently and the last couple of bits move. See the tolerance case below.
     return get_rmsf_nufft(
         lambda_sq_arr_m2=fake_data.lsq,
         phi_arr_radm2=fake_data.phis,
@@ -463,17 +415,8 @@ def _rmsf_for_mask(
     ).rmsf_cube
 
 
-def test_rmsf_reuse_matches_per_pixel():
-    """Reusing one RMSF must give exactly the per-pixel answer, and only when
-    every pixel really does share the same channel flagging.
-
-    A pixel's RMSF depends only on which channels that pixel has flagged, so
-    when the flagging is uniform -- the normal case, since real flagging is
-    per-channel -- there is one distinct RMSF in the cube. Mix in a fully
-    blanked pixel and that stops being true, and the per-pixel path has to come
-    back.
-    """
-    fake_data = make_fake_data()
+def test_rmsf_reuse_matches_per_pixel(fake_data: FakeData):
+    """Reuse matches per-pixel exactly, and only when the flagging really is shared."""
     n_freq = fake_data.lsq.size
     ny, nx = 4, 6
 
@@ -494,26 +437,21 @@ def test_rmsf_reuse_matches_per_pixel():
         shared = bool(np.array_equal(flat.all(axis=1), flat.any(axis=1)))
         assert shared is expect_shared, label
 
-        per_pixel = _rmsf_for_mask(fake_data, mask_arr, reuse_rmsf=False)
-        reused = _rmsf_for_mask(fake_data, mask_arr, reuse_rmsf=True)
+        per_pixel = rmsf_for_mask(fake_data, mask_arr, reuse_rmsf=False)
+        reused = rmsf_for_mask(fake_data, mask_arr, reuse_rmsf=True)
         assert reused.shape == per_pixel.shape, label
         assert np.array_equal(reused, per_pixel, equal_nan=True), label
 
     # And the reuse really is a single spectrum repeated, not a coincidence
-    reused = _rmsf_for_mask(fake_data, uniform, reuse_rmsf=True)
+    reused = rmsf_for_mask(fake_data, uniform, reuse_rmsf=True)
     flat_reused = reused.reshape(reused.shape[0], -1)
     assert np.array_equal(
         flat_reused, np.repeat(flat_reused[:, :1], flat_reused.shape[1], axis=1)
     )
 
 
-def test_rmsf_reuse_fits_one_spectrum_for_every_pixel():
-    """With `do_fit_rmsf`, sharing fits one spectrum and fans the fit out.
-
-    The FWHM and status maps still have to be filled for every pixel, and hold
-    what the per-pixel path would have fitted.
-    """
-    fake_data = make_fake_data()
+def test_rmsf_reuse_fits_one_spectrum_for_every_pixel(fake_data: FakeData):
+    """With `do_fit_rmsf`, sharing fits one spectrum and fans the fit out."""
     n_freq = fake_data.lsq.size
     ny, nx = 3, 5
     mask_arr = np.zeros((n_freq, ny, nx), dtype=bool)
@@ -543,20 +481,12 @@ def test_rmsf_reuse_fits_one_spectrum_for_every_pixel():
     assert np.array_equal(reused_status, per_pixel_status)
 
 
-def test_rmsf_reuse_at_default_nthreads_is_within_nufft_tolerance():
-    """At finufft's default thread count the two paths agree, but not to the bit.
-
-    finufft splits a multithreaded type-3 differently for one transform than for
-    a batch of them, so the reduction order changes and the one-spectrum answer
-    lands a few ulp from the per-pixel one. That is finufft's own rounding, not
-    the reuse: nthreads=1, which is what `rmsynth_3d` uses, is exact (above).
-    The gap here is many orders of magnitude below the requested `eps` of 1e-6.
-    """
-    fake_data = make_fake_data()
+def test_rmsf_reuse_at_default_nthreads_is_within_nufft_tolerance(fake_data: FakeData):
+    """At finufft's default thread count the two paths agree, but not to the bit."""
     n_freq = fake_data.lsq.size
     uniform = np.zeros((n_freq, 4, 6), dtype=bool)
     uniform[2] = True
 
-    per_pixel = _rmsf_for_mask(fake_data, uniform, reuse_rmsf=False, nthreads=0)
-    reused = _rmsf_for_mask(fake_data, uniform, reuse_rmsf=True, nthreads=0)
+    per_pixel = rmsf_for_mask(fake_data, uniform, reuse_rmsf=False, nthreads=0)
+    reused = rmsf_for_mask(fake_data, uniform, reuse_rmsf=True, nthreads=0)
     assert np.abs(reused - per_pixel).max() < 1e-9
