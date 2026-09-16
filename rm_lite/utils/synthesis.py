@@ -768,10 +768,12 @@ def calc_faraday_peaks(
     axis, so numpy or dask arrays of any dimensionality work, chunked however
     you like.
 
-    Everything is NaN for a spectrum with no interior maximum (peak on an end
-    sample, flat, or no finite samples). No detection cut is applied: the peak
-    and its error are both reported, so `peak_pi / peak_pi_error` is the SNR
-    to select on.
+    A peak the sub-sample fit cannot refine, because it sits on an end sample or
+    its three samples do not turn over, is reported where it sits, at that
+    sample's own Faraday depth. Everything is NaN only for a spectrum with no
+    peak at all: flat, all-zero, or no finite samples. No detection cut is
+    applied: the peak and its error are both reported, so
+    `peak_pi / peak_pi_error` is the SNR to select on.
 
     Args:
         complex_fdf_arr (NDArray[np.complexfloating]): Complex FDF. Real input has no
@@ -821,13 +823,24 @@ def calc_faraday_peaks(
 
     fdf_below, fdf_at, fdf_above = (sample_offset_from_peak(o) for o in (-1, 0, 1))
     # A brightest sample at either end of the axis has no neighbour on one side,
-    # where the gather above returned zero rather than a sample. Blank it, so the
-    # fit reports no peak instead of fitting that zero.
+    # where the gather above returned zero rather than a sample. Hide it from the
+    # fit, so the fit cannot refine a peak against that zero.
     is_interior = (peak_index > 0) & (peak_index < n_phi - 1)
-    fdf_at = np.where(is_interior, fdf_at, np.nan)
+    peak = fit_sampled_peak(fdf_below, np.where(is_interior, fdf_at, np.nan), fdf_above)
 
-    peak = fit_sampled_peak(fdf_below, fdf_at, fdf_above)
-    peak_pi, peak_offset, peak_fdf = peak.amplitude, peak.offset, peak.value
+    # Where the fit has no triple to work with, the brightest sample is still
+    # the peak, so report it unrefined rather than blanking a pixel the cube has
+    # data at. Only a spectrum with nothing to peak at keeps no peak: its
+    # brightest sample is no brighter than its faintest, which covers a flat or
+    # all-zero spectrum, and an all-NaN one, whose minimum is inf.
+    refined = np.isfinite(peak.amplitude)
+    peak_abs = np.abs(fdf_at)
+    has_peak = peak_abs > np.min(
+        np.where(np.isfinite(abs_fdf_arr), abs_fdf_arr, np.inf), axis=axis
+    )
+    peak_pi = np.where(refined, peak.amplitude, np.where(has_peak, peak_abs, np.nan))
+    peak_offset = np.where(refined, peak.offset, np.where(has_peak, 0.0, np.nan))
+    peak_fdf = np.where(refined, peak.value, np.where(has_peak, fdf_at, np.nan))
     # The fit's offset is in samples; the Faraday depth grid is uniform.
     peak_rm_radm2 = phi_arr_radm2[0] + (peak_index + peak_offset) * phi_step
 

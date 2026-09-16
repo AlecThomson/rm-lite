@@ -739,6 +739,40 @@ def test_rmclean_3d_peak_maps(
         np.testing.assert_allclose(peak_map, ref_map, equal_nan=True)
 
 
+def test_peak_maps_have_no_holes_over_noise(chunked: Callable[..., da.Array]):
+    """Empty sky still gets a peak in every pixel, dirty and clean.
+
+    The sub-sample fit used to blank a peak that landed on an end of the Faraday
+    depth axis. An FDF carries more power at its ends than a white spectrum
+    would, so that punched holes through the noise of every peak map, a few
+    percent of the image, scattered wherever a noise peak happened to land
+    there.
+    """
+    rng = np.random.default_rng(2026)
+    n_freq, ny, nx = 24, 16, 16
+    freq_arr_hz = (np.arange(744, 1032, 12) * 1e6).astype(np.float64)
+    shape = (n_freq, ny, nx)
+    q = rng.normal(0, 1e-3, shape)
+    u = rng.normal(0, 1e-3, shape)
+
+    synth = rmsynth_3d(
+        chunked(q, 8, 8),
+        chunked(u, 8, 8),
+        freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=300.0,
+        weight_type="uniform",
+    )
+    clean = run_rmclean_from_synth(synth)
+    dirty_peaks = calc_faraday_peaks(
+        synth.fdf_dirty_cube, synth.phi_arr_radm2, synth.fwhm_rmsf_radm2
+    )
+    dirty_pi, clean_pi = compute(dirty_peaks.peak_pi, clean.peak_pi_map)
+    assert np.isfinite(dirty_pi).all()
+    assert np.isfinite(clean_pi).all()
+    assert (dirty_pi > 0).all()
+
+
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_rmclean_3d_from_synth_peak_maps(
     synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]

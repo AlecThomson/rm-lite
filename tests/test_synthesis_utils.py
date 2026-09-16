@@ -345,13 +345,13 @@ def test_peaks_dask_matches_numpy():
 
 
 def test_peaks_without_a_peak():
+    """A spectrum with nothing to peak at, as against one the fit cannot refine."""
     phi_arr = make_phi_arr(100.0, 1.0)
     flat = np.zeros((len(phi_arr), 3), dtype=np.complex128)
     all_nan = np.full((len(phi_arr), 3), np.nan, dtype=np.complex128)
-    edge = np.zeros((len(phi_arr), 3), dtype=np.complex128)
-    edge[0] = 5.0
+    constant = np.full((len(phi_arr), 3), 3.0, dtype=np.complex128)
 
-    for fdf in (flat, all_nan, edge):
+    for fdf in (flat, all_nan, constant):
         peaks = calc_faraday_peaks(fdf, phi_arr, 20.0, fdf_error=0.01)
         for name, peak in peaks._asdict().items():
             # The noise is a property of the observation, not of a detection,
@@ -360,6 +360,38 @@ def test_peaks_without_a_peak():
                 assert (peak == 0.01).all()
             else:
                 assert np.isnan(peak).all()
+
+
+@pytest.mark.parametrize("end", [0, -1])
+def test_peaks_on_an_end_sample_are_reported_unrefined(end: int):
+    """A peak with no neighbour on one side is reported where it sits.
+
+    Blanking it instead left holes scattered over the noise of every peak map,
+    since an FDF's ends carry more power than its middle.
+    """
+    phi_arr = make_phi_arr(100.0, 1.0)
+    fdf = np.zeros((len(phi_arr), 3), dtype=np.complex128)
+    fdf[:] = np.arange(len(phi_arr))[:, np.newaxis] * 1e-3
+    fdf[end] = 5.0
+
+    peaks = calc_faraday_peaks(fdf, phi_arr, 20.0, fdf_error=0.01)
+    # The sample itself, at its own Faraday depth, with no sub-sample shift.
+    np.testing.assert_allclose(peaks.peak_pi, 5.0)
+    np.testing.assert_allclose(peaks.peak_rm_radm2, phi_arr[end])
+    assert np.isfinite(peaks.peak_pa_deg).all()
+    assert np.isfinite(peaks.peak_rm_error_radm2).all()
+
+
+def test_peaks_survive_a_non_finite_neighbour():
+    """A NaN beside the peak costs the refinement, not the pixel."""
+    phi_arr = make_phi_arr(100.0, 1.0)
+    fdf = gaussian(phi_arr, 2.0, 10.0, fwhm=20.0).astype(np.complex128)
+    peak_index = int(np.argmax(np.abs(fdf)))
+    fdf[peak_index + 1] = np.nan
+
+    peaks = calc_faraday_peaks(fdf, phi_arr, 20.0, fdf_error=0.01)
+    np.testing.assert_allclose(float(peaks.peak_pi), np.abs(fdf[peak_index]))
+    np.testing.assert_allclose(float(peaks.peak_rm_radm2), phi_arr[peak_index])
 
 
 def test_peaks_report_faint_peaks_with_their_snr():
