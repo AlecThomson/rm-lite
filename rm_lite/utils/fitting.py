@@ -884,7 +884,8 @@ class PixelFit(NamedTuple):
     e_spec: NDArray[np.float64]
     """The pixel's error spectrum, for the noise floor."""
     good: NDArray[np.bool_]
-    """Finite-channel mask, for the flat-model fallback."""
+    """Finite Stokes I channels, for the flat-model fallback. The error is not
+    in it: a pixel the fit could not weight still has a mean to fall back to."""
     fit: FitResult | None
     """The fit, or None if the pixel was skipped (too few channels / low SNR)."""
 
@@ -909,7 +910,7 @@ def _iter_pixel_fits(
         for x in range(cx):
             i_spec = i_block[:, y, x]
             e_spec = _pixel_stokes_i_error(err_block, err_1d, n_freq, y, x)
-            good = np.isfinite(i_spec) & np.isfinite(e_spec)
+            good = np.isfinite(i_spec)
             fit = fit_stokes_i_model(
                 freq_arr_hz=freq_arr_hz,
                 ref_freq_hz=ref_freq_for_pixel(ref_freq_hz, y, x),
@@ -1052,10 +1053,12 @@ def _fit_stokes_i_block(
     per-pixel `ref_freq_hz` block when `has_ref_block`; the error cube is
     optional (see `_pixel_stokes_i_error`). A pixel that was not fitted (too few
     finite channels or SNR below `fit_options.snr_cut`) or whose model is
-    unusable (below `fit_options.model_floor_sigma` times the pixel's
-    band-averaged noise, see `model_is_usable`) falls back to a flat
-    model at its mean Stokes I, so it gets no spectral correction and its alpha,
-    order, terms and errors stay NaN. A pixel with no finite channels stays NaN.
+    unusable (non-finite anywhere, or below `fit_options.model_floor_sigma`
+    times the pixel's band-averaged noise, see `model_is_usable`) falls back to
+    a flat model at its mean Stokes I, and one whose mean cannot divide either
+    (negative, or no finite Stokes I at all) to a flat 1.0, leaving Q/U
+    uncorrected. Either way the model is finite, so no pixel of the FDF is
+    blanked by the Stokes I pass alone; alpha, order, terms and errors stay NaN.
     """
     i_block = arrays[0]
     # A per-pixel reference arrives as a (cy, cx) block after the data;
@@ -1076,9 +1079,7 @@ def _fit_stokes_i_block(
         for y, x, i_spec, e_spec, good, fit in _iter_pixel_fits(
             i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options
         ):
-            if not good.any():
-                continue
-            mean_flux = float(np.mean(i_spec[good]))
+            mean_flux = float(np.mean(i_spec[good])) if good.any() else np.nan
             if fit is None:
                 _write_flat_model(out, y, x, planes, mean_flux)
                 continue
@@ -1086,8 +1087,10 @@ def _fit_stokes_i_block(
             model = fit.stokes_i_model_func(
                 freq_arr_hz / pixel_ref_hz, *np.asarray(fit.popt)
             )
-            noise_floor = model_noise_floor(e_spec[good], fit_options.model_floor_sigma)
-            if not model_is_usable(model[good], noise_floor):
+            noise_floor = model_noise_floor(e_spec, fit_options.model_floor_sigma)
+            # The whole model divides Q/U, including channels Stokes I had
+            # flagged and Q/U did not, so all of it has to be usable.
+            if not model_is_usable(model, noise_floor):
                 n_rejected += 1
                 _write_flat_model(out, y, x, planes, mean_flux)
                 continue
