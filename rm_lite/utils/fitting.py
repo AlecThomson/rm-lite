@@ -884,8 +884,7 @@ class PixelFit(NamedTuple):
     e_spec: NDArray[np.float64]
     """The pixel's error spectrum, for the noise floor."""
     good: NDArray[np.bool_]
-    """Finite Stokes I channels, for the flat-model fallback. The error is not
-    in it: a pixel the fit could not weight still has a mean to fall back to."""
+    """Finite-channel mask, for the flat-model fallback."""
     fit: FitResult | None
     """The fit, or None if the pixel was skipped (too few channels / low SNR)."""
 
