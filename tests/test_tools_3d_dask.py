@@ -739,6 +739,40 @@ def test_rmclean_3d_peak_maps(
         np.testing.assert_allclose(peak_map, ref_map, equal_nan=True)
 
 
+def test_peak_maps_have_no_holes_over_noise(chunked: Callable[..., da.Array]):
+    """Empty sky still gets a peak in every pixel, dirty and clean.
+
+    The sub-sample fit used to blank a peak that landed on an end of the Faraday
+    depth axis. An FDF carries more power at its ends than a white spectrum
+    would, so that punched holes through the noise of every peak map, a few
+    percent of the image, scattered wherever a noise peak happened to land
+    there.
+    """
+    rng = np.random.default_rng(2026)
+    n_freq, ny, nx = 24, 16, 16
+    freq_arr_hz = (np.arange(744, 1032, 12) * 1e6).astype(np.float64)
+    shape = (n_freq, ny, nx)
+    q = rng.normal(0, 1e-3, shape)
+    u = rng.normal(0, 1e-3, shape)
+
+    synth = rmsynth_3d(
+        chunked(q, 8, 8),
+        chunked(u, 8, 8),
+        freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=300.0,
+        weight_type="uniform",
+    )
+    clean = run_rmclean_from_synth(synth)
+    dirty_peaks = calc_faraday_peaks(
+        synth.fdf_dirty_cube, synth.phi_arr_radm2, synth.fwhm_rmsf_radm2
+    )
+    dirty_pi, clean_pi = compute(dirty_peaks.peak_pi, clean.peak_pi_map)
+    assert np.isfinite(dirty_pi).all()
+    assert np.isfinite(clean_pi).all()
+    assert (dirty_pi > 0).all()
+
+
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_rmclean_3d_from_synth_peak_maps(
     synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
@@ -1472,7 +1506,7 @@ def test_rmsynth_3d_from_fits_on_a_dummy_stokes_axis(
 
 
 def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
-    """A zeroed linmos weight must blank pixels silently, not warn per chunk."""
+    """A zeroed linmos weight costs the fit, not the FDF, and warns nothing."""
     rng = np.random.default_rng(2025)
     freq_arr_hz = (np.arange(744, 1032, 6) * 1e6).astype(np.float64)
     ny = nx = 12
@@ -1522,8 +1556,7 @@ def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
     )
     alpha_map = require(synth.stokes_i_alpha_map)
 
-    # Both blanked divisions are on this path: inverting the zero weight, and
-    # dividing Q+iU by the NaN model the fit leaves outside the cutoff.
+    # Inverting the zero weight is a blanked division on this path.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         computed = alpha_map.compute()
@@ -1539,10 +1572,20 @@ def test_weight_as_stokes_i_error_is_quiet_outside_the_beam(tmp_path):
     ]
     assert blanked == []
 
+    # An infinite error leaves the fit nothing to weight or cut against, so
+    # those pixels report no alpha. Q and U still have data, so the FDF keeps
+    # them: uncorrected, which is what the flat fallback reduces to.
     assert np.all(np.isnan(computed[~inside]))
     np.testing.assert_allclose(computed[inside], alpha, atol=1e-5)
-    assert np.all(np.isnan(fdf_cube[:, ~inside]))
-    assert np.all(np.isfinite(fdf_cube[:, inside]))
+    assert np.all(np.isfinite(fdf_cube))
+    plain = rmsynth_3d_from_fits(
+        tmp_path / "q.fits",
+        tmp_path / "u.fits",
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=150.0,
+    ).fdf_dirty_cube.compute()
+    # rtol: the flat model divides and rescales in the cube's float32.
+    np.testing.assert_allclose(fdf_cube[:, ~inside], plain[:, ~inside], rtol=1e-5)
 
 
 def test_channel_noise_from_channel_chunks_matches_whole_cube(

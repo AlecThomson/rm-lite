@@ -440,6 +440,108 @@ def test_stokes_i_snr_cut_falls_back_to_flat_model(chunked: Callable[..., da.Arr
     assert np.isfinite(model).all()
 
 
+def test_blank_stokes_i_error_keeps_the_fdf(chunked: Callable[..., da.Array]):
+    """A pixel with no usable Stokes I error falls back, it does not blank.
+
+    A linmos weight cube is zero outside the primary beam, so the error rm-lite
+    derives from it is inf there while Q/U still hold real data.
+    """
+    q, u, i_obs, err, freq = cube_with_faint_pixels([])
+    err[:, 1, 1] = np.inf
+    err[:, 2, 0] = np.nan
+    common: dict[str, Any] = {
+        "d_phi_radm2": D_PHI_RADM2,
+        "weight_type": "uniform",
+        "phi_max_radm2": 200.0,
+    }
+    result = rmsynth_3d(
+        chunked(q),
+        chunked(u),
+        freq,
+        stokes_i=chunked(i_obs),
+        stokes_i_error=chunked(err),
+        stokes_i_snr_cut=5.0,
+        **common,
+    )
+    raw = rmsynth_3d(chunked(q), chunked(u), freq, **common)
+
+    model = require(result.stokes_i_model_cube).compute()
+    fdf = result.fdf_dirty_cube.compute()
+    fdf_raw = raw.fdf_dirty_cube.compute()
+    assert np.isfinite(model).all()
+    assert np.isfinite(fdf).all()
+    for j, i in ((1, 1), (2, 0)):
+        # Fallback #1: flat at the pixel's mean Stokes I, which cancels out of
+        # the FDF, leaving the uncorrected Q/U one.
+        np.testing.assert_allclose(model[:, j, i], model[0, j, i], rtol=1e-10)
+        np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
+
+
+def test_blank_stokes_i_keeps_the_fdf(chunked: Callable[..., da.Array]):
+    """A pixel with no Stokes I at all, or a negative mean, still gets an FDF."""
+    q, u, i_obs, err, freq = cube_with_faint_pixels([])
+    i_obs[:, 0, 2] = np.nan
+    i_obs[:, 1, 3] *= -1.0
+    common: dict[str, Any] = {
+        "d_phi_radm2": D_PHI_RADM2,
+        "weight_type": "uniform",
+        "phi_max_radm2": 200.0,
+    }
+    result = rmsynth_3d(
+        chunked(q),
+        chunked(u),
+        freq,
+        stokes_i=chunked(i_obs),
+        stokes_i_error=chunked(err),
+        stokes_i_snr_cut=5.0,
+        **common,
+    )
+    raw = rmsynth_3d(chunked(q), chunked(u), freq, **common)
+
+    model = require(result.stokes_i_model_cube).compute()
+    fdf = result.fdf_dirty_cube.compute()
+    fdf_raw = raw.fdf_dirty_cube.compute()
+    assert np.isfinite(model).all()
+    assert np.isfinite(fdf).all()
+    for j, i in ((0, 2), (1, 3)):
+        # Fallback #2: no mean to divide by, so no Stokes I correction at all.
+        np.testing.assert_allclose(model[:, j, i], 1.0, rtol=1e-10)
+        np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
+
+
+def test_model_must_be_usable_outside_the_fitted_channels(
+    chunked: Callable[..., da.Array],
+) -> None:
+    """Stokes I flagging does not excuse a model from the channels Q/U kept.
+
+    The whole model divides Q/U, so a fit run over half a band and extrapolated
+    through zero across the other half is rejected, not divided by.
+    """
+    q, u, i_obs, err, freq = cube_with_faint_pixels([])
+    half = freq.size // 2
+    i_obs[half:, 1, 2] = np.nan
+    i_obs[:half, 1, 2] = np.geomspace(5.0, 0.05, half)
+    result = rmsynth_3d(
+        chunked(q),
+        chunked(u),
+        freq,
+        stokes_i=chunked(i_obs),
+        stokes_i_error=chunked(err),
+        stokes_i_snr_cut=5.0,
+        fit_order=3,
+        fit_function="linear",
+        d_phi_radm2=D_PHI_RADM2,
+        weight_type="uniform",
+        phi_max_radm2=200.0,
+    )
+    model = require(result.stokes_i_model_cube).compute()[:, 1, 2]
+    assert model_is_usable(model, model_noise_floor(err[:, 1, 2], 0.01))
+    # Rejected, so the flat fallback: constant, and alpha/order stay NaN.
+    np.testing.assert_allclose(model, model[0], rtol=1e-10)
+    assert np.isnan(require(result.stokes_i_model_order_map).compute()[1, 2])
+    assert np.isfinite(result.fdf_dirty_cube.compute()).all()
+
+
 def test_stokes_i_snr_cut_zero_fits_all_pixels(chunked: Callable[..., da.Array]):
     """A cut of 0 disables the SNR gate, so even faint pixels are fitted."""
     faint = [(0, 0)]
@@ -805,8 +907,8 @@ def test_flat_stokes_i_leaves_the_theoretical_noise_alone() -> None:
     )
 
 
-def test_pixel_with_no_finite_channels_stays_nan() -> None:
-    """A fully blanked Stokes I pixel gets no model at all, not a flat one."""
+def test_pixel_with_no_finite_channels_gets_no_correction() -> None:
+    """A fully blanked Stokes I pixel goes uncorrected, and leaves its neighbours alone."""
     rng = np.random.default_rng(20260824)
     n_freq, ny, nx = 64, 2, 3
     freq = np.linspace(800e6, 1800e6, n_freq)
@@ -829,7 +931,8 @@ def test_pixel_with_no_finite_channels_stays_nan() -> None:
     model = np.asarray(require(result.stokes_i_model_cube).compute())
     alpha = np.asarray(require(result.stokes_i_alpha_map).compute())
 
-    assert np.isnan(model[:, 0, 0]).all()
+    # No mean to divide by, so a model of 1: Q/U pass through untouched.
+    np.testing.assert_allclose(model[:, 0, 0], 1.0)
     assert np.isnan(alpha[0, 0])
     # Every other pixel is untouched by its blank neighbour.
     assert np.isfinite(model[:, 0, 1:]).all()
