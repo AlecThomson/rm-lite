@@ -590,14 +590,22 @@ def model_noise_floor(
 
 def model_is_usable(model: NDArray[np.float64], noise_floor: float = 0.0) -> bool:
     """Whether a Stokes I model can safely divide Q/U: finite, and never below
-    `noise_floor` or too small to divide by.
+    `noise_floor` or outside what float32 can hold.
 
     Dividing by it amplifies Q/U by `model(ref_freq) / min(model)`, unbounded
-    once a fit runs to zero in a channel. The bare guard is float32's smallest
-    normal, the dtype it divides in.
+    once a fit runs to zero in a channel. Both bare guards are float32's, the
+    dtype it divides in: the fit works in float64, but the model is cast to the
+    cube's precision before it divides anything, and a fit that runs away past
+    float32's range is inf by the time the reference flux is read off it, which
+    blanks that pixel's whole FDF spectrum.
     """
     floor = max(float(noise_floor), float(np.finfo(np.float32).tiny))
-    return bool(np.all(np.isfinite(model)) and np.min(model) > floor)
+    ceiling = float(np.finfo(np.float32).max)
+    return bool(
+        np.all(np.isfinite(model))
+        and np.min(model) > floor
+        and np.max(model) <= ceiling
+    )
 
 
 def flat_model_value(mean_flux: float) -> float:

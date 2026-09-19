@@ -24,7 +24,7 @@ from rm_lite.utils.fitting import (
     polynomial,
     power_law,
 )
-from rm_lite.utils.synthesis import freq_to_lambda2
+from rm_lite.utils.synthesis import calc_faraday_peaks, freq_to_lambda2
 from scipy import optimize
 
 
@@ -540,6 +540,108 @@ def test_model_must_be_usable_outside_the_fitted_channels(
     np.testing.assert_allclose(model, model[0], rtol=1e-10)
     assert np.isnan(require(result.stokes_i_model_order_map).compute()[1, 2])
     assert np.isfinite(result.fdf_dirty_cube.compute()).all()
+
+
+def runaway_stokes_i_pixel() -> tuple[
+    NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], float
+]:
+    """A Stokes I spectrum whose order-2 fit runs away past float32's range.
+
+    A wide band with the reference frequency at its top edge, and only four
+    channels surviving the flagging, clustered together: three terms fitted to
+    four points is near-degenerate, and the parabola in log space explodes where
+    the band has no data left to hold it down. Values taken from a real field,
+    where the fit returned beta ~ 900 and models reaching 1e93.
+    """
+    freq_arr_hz = np.linspace(799e6, 1799e6, 36)
+    ref_freq_hz = 1.7213e9
+    rng = np.random.default_rng(1)
+    i_spec = 1e-3 * (freq_arr_hz / ref_freq_hz) ** -0.8 + rng.normal(0, 1e-4, 36)
+    err = np.full(36, 1e-4)
+    flagged = np.ones(36, dtype=bool)
+    flagged[30:34] = False
+    i_spec[flagged] = np.nan
+    err[flagged] = np.nan
+    return freq_arr_hz, i_spec, err, ref_freq_hz
+
+
+def test_runaway_fit_is_rejected_before_it_overflows_float32() -> None:
+    """A model too large for float32 is unusable, however finite it is in float64.
+
+    Left through, the cast to the cube's precision made it inf, which took the
+    pixel's reference flux to NaN and blanked its whole FDF spectrum.
+    """
+    freq_arr_hz, i_spec, err, ref_freq_hz = runaway_stokes_i_pixel()
+    fit = fit_stokes_i_model(
+        freq_arr_hz,
+        ref_freq_hz,
+        i_spec,
+        err,
+        StokesIFitOptions(fit_order=2, fit_function="log", snr_cut=5.0),
+    )
+    assert fit is not None
+    model = fit.stokes_i_model_func(freq_arr_hz / ref_freq_hz, *np.asarray(fit.popt))
+    # The fit really does run away, and float64 alone does not catch it.
+    assert np.isfinite(model).all()
+    assert model.max() > np.finfo(np.float32).max
+    with np.errstate(over="ignore"):
+        assert not np.isfinite(model.astype(np.float32)).all()
+
+    # It runs away upward, so the noise floor does not catch it: only a ceiling does.
+    floor = model_noise_floor(err, 0.01)
+    assert model.min() > floor
+    assert not model_is_usable(model, floor)
+
+
+def test_runaway_fit_keeps_the_pixel(chunked: Callable[..., da.Array]) -> None:
+    """The runaway pixel falls back instead of blanking, end to end."""
+    freq_arr_hz, i_spec, err, _ = runaway_stokes_i_pixel()
+    n_freq = freq_arr_hz.size
+    lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
+    angle = 2 * 40.0 * lambda_sq_arr_m2
+    q = np.empty((n_freq, 1, 2))
+    u = np.empty_like(q)
+    stokes_i = np.empty_like(q)
+    stokes_i_err = np.empty_like(q)
+    # Pixel 0 is ordinary, pixel 1 is the runaway. Q/U have data at both.
+    clean_i = 1e-3 * (freq_arr_hz / 1.7213e9) ** -0.8
+    for i, (i_col, e_col) in enumerate(
+        ((clean_i, np.full(n_freq, 1e-4)), (i_spec, err))
+    ):
+        stokes_i[:, 0, i] = i_col
+        stokes_i_err[:, 0, i] = e_col
+        q[:, 0, i] = 0.05 * clean_i * np.cos(angle)
+        u[:, 0, i] = 0.05 * clean_i * np.sin(angle)
+
+    result = rmsynth_3d(
+        chunked(q, 1, 2),
+        chunked(u, 1, 2),
+        freq_arr_hz,
+        stokes_i=chunked(stokes_i, 1, 2),
+        stokes_i_error=chunked(stokes_i_err, 1, 2),
+        stokes_i_snr_cut=5.0,
+        fit_order=2,
+        # Pin the reference to the band edge, which is what makes the order-2
+        # fit degenerate on a pixel with four channels left.
+        lam_sq_0_m2=float(freq_to_lambda2(np.array([1.7213e9]))[0]),
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=200.0,
+        weight_type="uniform",
+    )
+    model = require(result.stokes_i_model_cube).compute()
+    ref_flux = require(result.stokes_i_ref_flux_map).compute()
+    fdf = result.fdf_dirty_cube.compute()
+    # The model stays inside float32, so the reference flux is a number and the
+    # FDF is not multiplied by NaN.
+    assert np.isfinite(model).all()
+    with np.errstate(over="ignore"):
+        assert np.isfinite(np.asarray(model, dtype=np.float32)).all()
+    assert np.isfinite(fdf).all()
+    peaks = calc_faraday_peaks(fdf, result.phi_arr_radm2, result.fwhm_rmsf_radm2)
+    assert np.isfinite(peaks.peak_pi).all()
+    # Rejected, so the flat fallback: constant, and no reported reference flux.
+    np.testing.assert_allclose(model[:, 0, 1], model[0, 0, 1], rtol=1e-10)
+    assert np.isnan(ref_flux[0, 1])
 
 
 def test_stokes_i_snr_cut_zero_fits_all_pixels(chunked: Callable[..., da.Array]):
