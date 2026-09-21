@@ -284,7 +284,9 @@ def test_multiscale_recovers_thick_flux() -> None:
             RMCleanOptions(mask=8 * noise, threshold=1 * noise, fdf_noise=noise),
             multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
         )
-    mom0 = calc_faraday_moments(np.abs(result.clean_fdf_arr), phi, fwhm).mom0
+    mom0 = calc_faraday_moments(
+        np.abs(result.clean_fdf_arr), phi, fwhm, fdf_units="per_rmsf"
+    ).mom0
     true_flux = 0.9
     # Recovers most of the true integrated flux, no runaway divergence.
     assert 0.75 * true_flux < mom0 < 1.3 * true_flux
@@ -320,8 +322,12 @@ def test_multiscale_thin_matches_single_scale() -> None:
         abs(phi[np.argmax(np.abs(single_fdf))] - phi[np.argmax(np.abs(multi_fdf))])
         <= abs(phi[1] - phi[0]) + 1e-6
     )
-    m0_single = calc_faraday_moments(np.abs(single_fdf), phi, fwhm).mom0
-    m0_multi = calc_faraday_moments(np.abs(multi_fdf), phi, fwhm).mom0
+    m0_single = calc_faraday_moments(
+        np.abs(single_fdf), phi, fwhm, fdf_units="per_rmsf"
+    ).mom0
+    m0_multi = calc_faraday_moments(
+        np.abs(multi_fdf), phi, fwhm, fdf_units="per_rmsf"
+    ).mom0
     assert np.isclose(m0_single, m0_multi, rtol=0.3)
 
 
@@ -413,8 +419,12 @@ def test_multiscale_wideband_preserves_point_flux() -> None:
             multiscale_options=MultiscaleOptions(max_iter_sub_minor=2000),
             phi_max_scale_radm2=phi_max_scale,
         )
-    m0_single = calc_faraday_moments(np.abs(single.clean_fdf_arr), phi, fwhm).mom0
-    m0_multi = calc_faraday_moments(np.abs(multi.clean_fdf_arr), phi, fwhm).mom0
+    m0_single = calc_faraday_moments(
+        np.abs(single.clean_fdf_arr), phi, fwhm, fdf_units="per_rmsf"
+    ).mom0
+    m0_multi = calc_faraday_moments(
+        np.abs(multi.clean_fdf_arr), phi, fwhm, fdf_units="per_rmsf"
+    ).mom0
     # Point flux preserved: the thin source stays on scale 0. rtol 0.2 covers
     # noise realisation while still catching flux being destroyed or doubled.
     assert np.isclose(m0_single, m0_multi, rtol=0.2)
@@ -550,10 +560,16 @@ def test_hybrid_delta_steps_parity() -> None:
         steps_multi = int(np.ravel(multi.sub_minor_iter_arr)[0])
         assert abs(steps_multi - steps_single) <= 1
         m0_single = calc_faraday_moments(
-            np.abs(single.clean_fdf_arr), geom.phi_arr_radm2, geom.fwhm
+            np.abs(single.clean_fdf_arr),
+            geom.phi_arr_radm2,
+            geom.fwhm,
+            fdf_units="per_rmsf",
         ).mom0
         m0_multi = calc_faraday_moments(
-            np.abs(multi.clean_fdf_arr), geom.phi_arr_radm2, geom.fwhm
+            np.abs(multi.clean_fdf_arr),
+            geom.phi_arr_radm2,
+            geom.fwhm,
+            fdf_units="per_rmsf",
         ).mom0
         # Sub-percent, not bit-identical: the adaptive clean restores the delta a hair
         # differently. Still catches flux being destroyed or doubled.

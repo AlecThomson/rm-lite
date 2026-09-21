@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from numpy.random import Generator
 from numpy.typing import NDArray
+from rm_lite.utils.clean import restore_model
 from rm_lite.utils.fitting import (
     StokesIFitOptions,
     fit_sampled_peak,
@@ -77,7 +78,7 @@ def test_moments_unresolved_gaussian():
     center = 123.0
     fdf = gaussian(phi_arr, amplitude, center, fwhm=fwhm).astype(np.complex128)
 
-    moments = calc_faraday_moments(fdf, phi_arr, fwhm)
+    moments = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_units="per_rmsf")
 
     sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
     assert np.isclose(float(moments.mom0), amplitude, rtol=1e-3)
@@ -93,8 +94,10 @@ def test_moments_ignore_phase():
     fdf_real = gaussian(phi_arr, 2.0, -50.0, fwhm=fwhm).astype(np.complex128)
     fdf_rotated = fdf_real * np.exp(2j * 0.5 * phi_arr)
 
-    moments_real = calc_faraday_moments(fdf_real, phi_arr, fwhm)
-    moments_rotated = calc_faraday_moments(fdf_rotated, phi_arr, fwhm)
+    moments_real = calc_faraday_moments(fdf_real, phi_arr, fwhm, fdf_units="per_rmsf")
+    moments_rotated = calc_faraday_moments(
+        fdf_rotated, phi_arr, fwhm, fdf_units="per_rmsf"
+    )
 
     assert np.allclose(
         [moments_real.mom0, moments_real.mom1, moments_real.mom2],
@@ -111,7 +114,7 @@ def test_moments_delta_function():
     index = 60
     fdf[index] = amplitude
 
-    moments = calc_faraday_moments(fdf, phi_arr, fwhm)
+    moments = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_units="per_rmsf")
 
     delta_phi = phi_arr[1] - phi_arr[0]
     assert np.isclose(
@@ -126,17 +129,21 @@ def test_moments_nd_and_axis():
     phi_arr = make_phi_arr(1000, 1)
     fwhm = 60.0
     fdf_1d = gaussian(phi_arr, 3.0, 123.0, fwhm=fwhm).astype(np.complex128)
-    moments_1d = calc_faraday_moments(fdf_1d, phi_arr, fwhm, fdf_error=0.01)
+    moments_1d = calc_faraday_moments(
+        fdf_1d, phi_arr, fwhm, fdf_error=0.01, fdf_units="per_rmsf"
+    )
 
     fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 2, 3))
-    moments_3d = calc_faraday_moments(fdf_3d, phi_arr, fwhm, fdf_error=0.01)
+    moments_3d = calc_faraday_moments(
+        fdf_3d, phi_arr, fwhm, fdf_error=0.01, fdf_units="per_rmsf"
+    )
     for moment_3d, moment_1d in zip(moments_3d, moments_1d, strict=True):
         assert moment_3d.shape == (2, 3)
         assert np.allclose(moment_3d, moment_1d, equal_nan=True)
 
     fdf_last = np.moveaxis(fdf_3d, 0, -1)
     moments_last = calc_faraday_moments(
-        fdf_last, phi_arr, fwhm, axis=-1, fdf_error=0.01
+        fdf_last, phi_arr, fwhm, axis=-1, fdf_error=0.01, fdf_units="per_rmsf"
     )
     for moment_last, moment_3d in zip(moments_last, moments_3d, strict=True):
         assert np.allclose(moment_last, moment_3d, equal_nan=True)
@@ -149,9 +156,11 @@ def test_moments_threshold():
     weak = gaussian(phi_arr, 0.05, -300.0, fwhm=fwhm)
     fdf = (strong + weak).astype(np.complex128)
 
-    moments = calc_faraday_moments(fdf, phi_arr, fwhm, threshold=0.5)
+    moments = calc_faraday_moments(
+        fdf, phi_arr, fwhm, threshold=0.5, fdf_units="per_rmsf"
+    )
     moments_clean = calc_faraday_moments(
-        strong.astype(np.complex128), phi_arr, fwhm, threshold=0.5
+        strong.astype(np.complex128), phi_arr, fwhm, threshold=0.5, fdf_units="per_rmsf"
     )
 
     assert np.allclose(
@@ -173,7 +182,9 @@ def test_moments_auto_threshold():
     )
     fdf = signal + noise
 
-    moments = calc_faraday_moments(fdf, phi_arr, fwhm, auto_threshold_sigma=5.0)
+    moments = calc_faraday_moments(
+        fdf, phi_arr, fwhm, auto_threshold_sigma=5.0, fdf_units="per_rmsf"
+    )
 
     sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
     assert np.isclose(float(moments.mom1), center, atol=1.0)
@@ -185,7 +196,12 @@ def test_moments_mutually_exclusive_thresholds():
     fdf = np.ones_like(phi_arr, dtype=np.complex128)
     with pytest.raises(ValueError, match="mutually exclusive"):
         calc_faraday_moments(
-            fdf, phi_arr, 20.0, threshold=1.0, auto_threshold_sigma=5.0
+            fdf,
+            phi_arr,
+            20.0,
+            threshold=1.0,
+            auto_threshold_sigma=5.0,
+            fdf_units="per_rmsf",
         )
 
 
@@ -193,7 +209,7 @@ def test_moments_shape_mismatch():
     phi_arr = make_phi_arr(100, 1)
     fdf = np.ones(len(phi_arr) + 1, dtype=np.complex128)
     with pytest.raises(ValueError, match="length"):
-        calc_faraday_moments(fdf, phi_arr, 20.0)
+        calc_faraday_moments(fdf, phi_arr, 20.0, fdf_units="per_rmsf")
 
 
 def test_moments_empty_spectrum():
@@ -201,7 +217,7 @@ def test_moments_empty_spectrum():
     fdf = np.zeros((len(phi_arr), 2), dtype=np.complex128)
     fdf[:, 1] = gaussian(phi_arr, 1.0, 0.0, fwhm=20.0)
 
-    moments = calc_faraday_moments(fdf, phi_arr, 20.0)
+    moments = calc_faraday_moments(fdf, phi_arr, 20.0, fdf_units="per_rmsf")
 
     assert moments.mom0[0] == 0.0
     assert np.isnan(moments.mom1[0])
@@ -216,18 +232,32 @@ def test_moments_dask():
     fdf_3d = np.tile(fdf_1d[:, np.newaxis, np.newaxis], (1, 4, 4))
     fdf_dask = da.from_array(fdf_3d, chunks=(len(phi_arr), 2, 2))
 
-    moments_numpy = calc_faraday_moments(fdf_3d, phi_arr, fwhm, fdf_error=0.01)
-    moments_dask = calc_faraday_moments(fdf_dask, phi_arr, fwhm, fdf_error=0.01)
+    moments_numpy = calc_faraday_moments(
+        fdf_3d, phi_arr, fwhm, fdf_error=0.01, fdf_units="per_rmsf"
+    )
+    moments_dask = calc_faraday_moments(
+        fdf_dask, phi_arr, fwhm, fdf_error=0.01, fdf_units="per_rmsf"
+    )
 
     for moment_dask, moment_numpy in zip(moments_dask, moments_numpy, strict=True):
         assert isinstance(moment_dask, da.Array)
         assert np.allclose(moment_dask.compute(), moment_numpy, equal_nan=True)
 
     moments_dask_auto = calc_faraday_moments(
-        fdf_dask, phi_arr, fwhm, auto_threshold_sigma=5.0, fdf_error=0.01
+        fdf_dask,
+        phi_arr,
+        fwhm,
+        auto_threshold_sigma=5.0,
+        fdf_error=0.01,
+        fdf_units="per_rmsf",
     )
     moments_numpy_auto = calc_faraday_moments(
-        fdf_3d, phi_arr, fwhm, auto_threshold_sigma=5.0, fdf_error=0.01
+        fdf_3d,
+        phi_arr,
+        fwhm,
+        auto_threshold_sigma=5.0,
+        fdf_error=0.01,
+        fdf_units="per_rmsf",
     )
     for moment_dask, moment_numpy in zip(
         moments_dask_auto, moments_numpy_auto, strict=True
@@ -566,13 +596,15 @@ def test_moments_signed_real_input():
     fwhm = 20.0
     signed = gaussian(phi_arr, 2.0, 0.0, fwhm=fwhm) - 0.5
 
-    moments = calc_faraday_moments(signed, phi_arr, fwhm)
+    moments = calc_faraday_moments(signed, phi_arr, fwhm, fdf_units="per_rmsf")
 
     delta_phi = phi_arr[1] - phi_arr[0]
     expected = np.sum(signed) * delta_phi / gaussian_integrand(1.0, fwhm=fwhm)
     assert np.isclose(float(moments.mom0), expected)
     # abs() of the same values gives a strictly larger mom0
-    folded = calc_faraday_moments(np.abs(signed).astype(np.complex128), phi_arr, fwhm)
+    folded = calc_faraday_moments(
+        np.abs(signed).astype(np.complex128), phi_arr, fwhm, fdf_units="per_rmsf"
+    )
     assert float(folded.mom0) > float(moments.mom0)
 
 
@@ -582,10 +614,13 @@ def test_moments_debias_option():
     fwhm = 60.0
 
     moments = calc_faraday_moments(
-        fdf, phi_arr, fwhm, debias=True, lam_sq_0_m2=lam_sq_0_m2
+        fdf, phi_arr, fwhm, debias=True, lam_sq_0_m2=lam_sq_0_m2, fdf_units="per_rmsf"
     )
     manual = calc_faraday_moments(
-        debias_fdf(fdf, phi_arr, lam_sq_0_m2=lam_sq_0_m2), phi_arr, fwhm
+        debias_fdf(fdf, phi_arr, lam_sq_0_m2=lam_sq_0_m2),
+        phi_arr,
+        fwhm,
+        fdf_units="per_rmsf",
     )
 
     assert np.allclose(moments.mom0, manual.mom0, equal_nan=True)
@@ -594,7 +629,7 @@ def test_moments_debias_option():
     assert np.allclose(moments.mom0, expected_mom0, rtol=0.1)
 
     with pytest.raises(ValueError, match="required"):
-        calc_faraday_moments(fdf, phi_arr, fwhm, debias=True)
+        calc_faraday_moments(fdf, phi_arr, fwhm, debias=True, fdf_units="per_rmsf")
     with pytest.raises(ValueError, match="not supported"):
         calc_faraday_moments(
             fdf,
@@ -603,6 +638,7 @@ def test_moments_debias_option():
             debias=True,
             lam_sq_0_m2=lam_sq_0_m2,
             auto_threshold_sigma=5.0,
+            fdf_units="per_rmsf",
         )
 
 
@@ -613,7 +649,9 @@ def test_moments_auto_threshold_dask_multichunk_guard():
     fdf = np.zeros((len(phi_arr), 4, 4), dtype=np.complex128)
     fdf_dask = da.from_array(fdf, chunks=(50, 4, 4))
     with pytest.raises(ValueError, match="single chunk"):
-        calc_faraday_moments(fdf_dask, phi_arr, 20.0, auto_threshold_sigma=5.0)
+        calc_faraday_moments(
+            fdf_dask, phi_arr, 20.0, auto_threshold_sigma=5.0, fdf_units="per_rmsf"
+        )
 
 
 def test_moments_auto_threshold_broad_source():
@@ -629,7 +667,9 @@ def test_moments_auto_threshold_broad_source():
     )
     fdf = signal + noise
 
-    moments = calc_faraday_moments(fdf, phi_arr, fwhm, auto_threshold_sigma=5.0)
+    moments = calc_faraday_moments(
+        fdf, phi_arr, fwhm, auto_threshold_sigma=5.0, fdf_units="per_rmsf"
+    )
 
     assert np.isfinite(moments.mom1)
     assert float(moments.mom0) > 0
@@ -643,7 +683,13 @@ def test_moments_debias_threshold_guard():
     fdf = np.ones((len(phi_arr), 4, 4), dtype=np.complex128)
     with pytest.raises(ValueError, match="not supported"):
         calc_faraday_moments(
-            fdf, phi_arr, 20.0, debias=True, lam_sq_0_m2=0.1, threshold=0.5
+            fdf,
+            phi_arr,
+            20.0,
+            debias=True,
+            lam_sq_0_m2=0.1,
+            threshold=0.5,
+            fdf_units="per_rmsf",
         )
 
 
@@ -657,11 +703,13 @@ def test_moments_min_weight_fraction_signed():
 
     # Default guard (weight_sum > 0) admits the tiny positive sum -> the mean
     # Faraday depth is a finite but meaningless value.
-    default = calc_faraday_moments(signed, phi_arr, fwhm)
+    default = calc_faraday_moments(signed, phi_arr, fwhm, fdf_units="per_rmsf")
     assert np.isfinite(default.mom1)
 
     # Opt-in floor masks the near-cancelling spectrum symmetrically.
-    guarded = calc_faraday_moments(signed, phi_arr, fwhm, min_weight_fraction=0.1)
+    guarded = calc_faraday_moments(
+        signed, phi_arr, fwhm, min_weight_fraction=0.1, fdf_units="per_rmsf"
+    )
     assert np.isnan(guarded.mom1)
     assert np.isnan(guarded.mom2)
     # mom0 (integrated flux) is unaffected by the guard.
@@ -669,8 +717,10 @@ def test_moments_min_weight_fraction_signed():
 
     # For non-negative |FDF| input the guard is a no-op (ratio == 1).
     pos = gaussian(phi_arr, 2.0, 0.0, fwhm=fwhm).astype(np.complex128)
-    plain = calc_faraday_moments(pos, phi_arr, fwhm)
-    floored = calc_faraday_moments(pos, phi_arr, fwhm, min_weight_fraction=0.5)
+    plain = calc_faraday_moments(pos, phi_arr, fwhm, fdf_units="per_rmsf")
+    floored = calc_faraday_moments(
+        pos, phi_arr, fwhm, min_weight_fraction=0.5, fdf_units="per_rmsf"
+    )
     assert np.allclose(
         [plain.mom0, plain.mom1, plain.mom2],
         [floored.mom0, floored.mom1, floored.mom2],
@@ -746,7 +796,9 @@ def test_moments_noise_flux_closed_form():
         noise = rng.normal(0, sigma, (phi_arr.size, 24, 24)) + 1j * rng.normal(
             0, sigma, (phi_arr.size, 24, 24)
         )
-        moments = calc_faraday_moments(noise, phi_arr, fwhm, fdf_error=sigma)
+        moments = calc_faraday_moments(
+            noise, phi_arr, fwhm, fdf_error=sigma, fdf_units="per_rmsf"
+        )
 
         areas = phi_arr.size * 2.0 / (fwhm * gaussian_integrand(1.0, fwhm=1.0))
         expected = np.sqrt(np.pi / 2) * sigma * areas
@@ -769,7 +821,7 @@ def test_moments_pi_lam_sq_0_is_polarisation_at_reference():
         phase = 2.0 * (psi0 + rm * lam_sq_0_m2)
         fdf += amp * np.exp(1j * phase) * gaussian(phi_arr, 1.0, rm, fwhm=fwhm)
 
-    moments = calc_faraday_moments(fdf, phi_arr, fwhm)
+    moments = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_units="per_rmsf")
 
     expected = sum(
         amp * np.exp(2j * (psi0 + rm * lam_sq_0_m2)) for amp, rm, psi0 in components
@@ -797,9 +849,13 @@ def test_moments_pi_lam_sq_0_cancels_where_mom0_does_not():
         )
         return np.asarray(fdf + second, dtype=np.complex128)
 
-    aligned = calc_faraday_moments(restored(0.0), phi_arr, fwhm)
-    crossed = calc_faraday_moments(restored(np.pi / 2), phi_arr, fwhm)
-    square = calc_faraday_moments(restored(np.pi / 4), phi_arr, fwhm)
+    aligned = calc_faraday_moments(restored(0.0), phi_arr, fwhm, fdf_units="per_rmsf")
+    crossed = calc_faraday_moments(
+        restored(np.pi / 2), phi_arr, fwhm, fdf_units="per_rmsf"
+    )
+    square = calc_faraday_moments(
+        restored(np.pi / 4), phi_arr, fwhm, fdf_units="per_rmsf"
+    )
 
     for other in (crossed, square):
         assert np.isclose(float(aligned.mom0), float(other.mom0), rtol=1e-3)
@@ -817,7 +873,9 @@ def test_moments_real_input_has_no_coherent_quantities():
     fwhm = 20.0
     signed = gaussian(phi_arr, 2.0, 0.0, fwhm=fwhm) - 0.5
 
-    moments = calc_faraday_moments(signed, phi_arr, fwhm, fdf_error=0.05)
+    moments = calc_faraday_moments(
+        signed, phi_arr, fwhm, fdf_error=0.05, fdf_units="per_rmsf"
+    )
 
     assert np.isnan(moments.pi_lam_sq_0)
     assert np.isnan(moments.pa_lam_sq_0)
@@ -829,7 +887,7 @@ def test_moments_errors_need_fdf_error():
     fwhm = 40.0
     fdf = gaussian(phi_arr, 2.0, 10.0, fwhm=fwhm).astype(np.complex128)
 
-    bare = calc_faraday_moments(fdf, phi_arr, fwhm)
+    bare = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_units="per_rmsf")
     for field in (
         "mom0_debias",
         "mom0_error",
@@ -841,7 +899,9 @@ def test_moments_errors_need_fdf_error():
     ):
         assert np.isnan(getattr(bare, field)), field
 
-    witherr = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_error=0.02)
+    witherr = calc_faraday_moments(
+        fdf, phi_arr, fwhm, fdf_error=0.02, fdf_units="per_rmsf"
+    )
     for field in (
         "mom0_debias",
         "mom0_error",
@@ -895,7 +955,12 @@ def test_moments_errors_track_monte_carlo_scatter():
         for _ in range(120):
             fdf, phi_arr, fwhm, sigma = clean_fdf_realisation(rng, amplitude)
             moments = calc_faraday_moments(
-                fdf, phi_arr, fwhm, fdf_error=sigma, threshold=5 * sigma
+                fdf,
+                phi_arr,
+                fwhm,
+                fdf_error=sigma,
+                threshold=5 * sigma,
+                fdf_units="per_rmsf",
             )
             realised.append(
                 [float(moments.mom0), float(moments.mom1), float(moments.mom2)]
@@ -925,7 +990,9 @@ def test_moments_errors_are_conservative_without_a_cut():
     reported = []
     for _ in range(120):
         fdf, phi_arr, fwhm, sigma = clean_fdf_realisation(rng, amplitude=1.0)
-        moments = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_error=sigma)
+        moments = calc_faraday_moments(
+            fdf, phi_arr, fwhm, fdf_error=sigma, fdf_units="per_rmsf"
+        )
         realised.append([float(moments.mom0), float(moments.pi_lam_sq_0)])
         reported.append([float(moments.mom0_error), float(moments.pi_lam_sq_0_error)])
     ratio = np.std(np.array(realised), axis=0) / np.mean(np.array(reported), axis=0)
@@ -946,9 +1013,11 @@ def test_moments_span_sets_the_noise_terms():
         + 1j * rng.normal(0, sigma, phi_arr.shape)
     )
 
-    wide = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_error=sigma)
+    wide = calc_faraday_moments(
+        fdf, phi_arr, fwhm, fdf_error=sigma, fdf_units="per_rmsf"
+    )
     narrow = calc_faraday_moments(
-        fdf, phi_arr, fwhm, fdf_error=sigma, threshold=5 * sigma
+        fdf, phi_arr, fwhm, fdf_error=sigma, threshold=5 * sigma, fdf_units="per_rmsf"
     )
 
     assert float(narrow.mom0_error) < 0.5 * float(wide.mom0_error)
@@ -960,3 +1029,72 @@ def test_moments_span_sets_the_noise_terms():
     removed_narrow = float(narrow.mom0) - float(narrow.mom0_debias)
     assert np.isclose(removed_wide, np.sqrt(np.pi / 2) * sigma * areas, rtol=1e-6)
     assert removed_narrow < 0.15 * removed_wide
+
+
+def test_moments_integrated_units_sum_components():
+    # A CLEAN model is a list of point masses already carrying their own flux,
+    # so mom0 is their sum with no RMSF area divided out.
+    phi_arr = make_phi_arr(1000, 4)
+    fwhm = 48.0
+    model = np.zeros_like(phi_arr, dtype=np.complex128)
+    for centre, flux in ((-200.0, 0.008), (300.0, 0.004)):
+        model[np.argmin(np.abs(phi_arr - centre))] = flux
+
+    moments = calc_faraday_moments(model, phi_arr, fwhm, fdf_units="integrated")
+
+    assert np.isclose(float(moments.mom0), 0.012)
+
+
+def test_moments_integrated_matches_restored_model():
+    # The two units describe the same source: summing a delta model and
+    # integrating that model convolved with the clean beam must agree.
+    phi_arr = make_phi_arr(1000, 4)
+    fwhm = 48.0
+    flux = 0.012
+    model = np.zeros_like(phi_arr, dtype=np.complex128)
+    model[np.argmin(np.abs(phi_arr - 30.0))] = flux
+    restored = restore_model(model, phi_arr, fwhm)
+
+    from_model = calc_faraday_moments(model, phi_arr, fwhm, fdf_units="integrated")
+    from_restored = calc_faraday_moments(restored, phi_arr, fwhm, fdf_units="per_rmsf")
+
+    assert np.isclose(float(from_model.mom0), flux)
+    assert np.isclose(float(from_restored.mom0), flux, rtol=1e-3)
+
+
+def test_moments_per_rmsf_on_a_model_is_out_by_the_rmsf_area():
+    # The bug this guards: a model read as per-RMSF amplitudes is divided by
+    # the RMSF area a second time.
+    phi_arr = make_phi_arr(1000, 4)
+    fwhm = 48.0
+    delta_phi = float(phi_arr[1] - phi_arr[0])
+    model = np.zeros_like(phi_arr, dtype=np.complex128)
+    model[len(phi_arr) // 2] = 0.012
+
+    integrated = calc_faraday_moments(model, phi_arr, fwhm, fdf_units="integrated")
+    per_rmsf = calc_faraday_moments(model, phi_arr, fwhm, fdf_units="per_rmsf")
+
+    rmsf_area = fwhm * gaussian_integrand(amplitude=1.0, fwhm=1.0)
+    assert np.isclose(
+        float(integrated.mom0) / float(per_rmsf.mom0), rmsf_area / delta_phi
+    )
+
+
+def test_moments_units_leave_mom1_and_mom2_alone():
+    # mom1 and mom2 are weight-normalised ratios, so the flux scale cancels.
+    phi_arr = make_phi_arr(1000, 4)
+    fwhm = 48.0
+    fdf = gaussian(phi_arr, 2.0, 40.0, fwhm=fwhm).astype(np.complex128)
+
+    per_rmsf = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_units="per_rmsf")
+    integrated = calc_faraday_moments(fdf, phi_arr, fwhm, fdf_units="integrated")
+
+    assert np.isclose(float(per_rmsf.mom1), float(integrated.mom1))
+    assert np.isclose(float(per_rmsf.mom2), float(integrated.mom2))
+
+
+def test_moments_reject_unknown_units():
+    phi_arr = make_phi_arr(100, 1)
+    fdf = gaussian(phi_arr, 1.0, 0.0, fwhm=20.0).astype(np.complex128)
+    with pytest.raises(ValueError, match="fdf_units"):
+        calc_faraday_moments(fdf, phi_arr, 20.0, fdf_units="jy/beam")  # type: ignore[arg-type]

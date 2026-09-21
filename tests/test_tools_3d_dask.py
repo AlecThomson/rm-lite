@@ -658,6 +658,7 @@ def test_rmclean_3d_moment_maps(
         synth.phi_arr_radm2,
         synth.fwhm_rmsf_radm2,
         threshold=moment_threshold,
+        fdf_units="per_rmsf",
     )
     m0, m1, m2, r0, r1, r2 = compute(
         clean.mom0_map, clean.mom1_map, clean.mom2_map, ref.mom0, ref.mom1, ref.mom2
