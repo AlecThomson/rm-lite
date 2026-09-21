@@ -31,6 +31,7 @@ from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import (
     FaradayMoments,
     FaradayPeaks,
+    FDFUnits,
     calc_faraday_moments,
     calc_faraday_peaks,
 )
@@ -136,6 +137,7 @@ def faraday_maps_on_block(
     per_pixel_fields: tuple[str, ...],
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
+    fdf_units: FDFUnits,
     lambda_sq_arr_m2: NDArray[np.float64] | None,
     fdf_noise: float | None,
     moment_threshold: float | None,
@@ -162,6 +164,7 @@ def faraday_maps_on_block(
         clean_block,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_units=fdf_units,
         fdf_error=values["fdf_noise"],
         threshold=values["moment_threshold"],
     )
@@ -186,6 +189,7 @@ def faraday_maps(
     clean: da.Array,
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
+    fdf_units: FDFUnits,
     lam_sq_0_m2: float | NDArray[np.float64] | da.Array,
     lambda_sq_arr_m2: NDArray[np.float64] | None,
     fdf_noise: float | NDArray[np.float64] | da.Array | None,
@@ -196,6 +200,9 @@ def faraday_maps(
     One task a block for all of them, rather than a chain per map. Debiased
     maps are not included: `debias_fdf` needs neighbouring pixels, so it cannot
     run inside a per-block task.
+
+    `fdf_units` describes `clean`, so pass `"integrated"` when running this over
+    a CLEAN component model rather than an FDF. See `calc_faraday_moments`.
     """
     names = FaradayMoments._fields + FaradayPeaks._fields
     scalars = {
@@ -222,6 +229,7 @@ def faraday_maps(
         per_pixel_fields=tuple(per_pixel),
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_units=fdf_units,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         **scalars,
     )
@@ -596,6 +604,7 @@ def run_rmclean(
         clean,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_units="per_rmsf",
         lam_sq_0_m2=lam_sq_0_m2,
         lambda_sq_arr_m2=lambda_sq_arr_m2,
         fdf_noise=fdf_noise,

@@ -135,6 +135,10 @@ LamSq0Mode: TypeAlias = Literal["auto", "per_pixel"]
 or each pixel's own (B&dB 2005 eq. 32, whose criterion is per pixel whenever the
 weights are). """
 
+FDFUnits: TypeAlias = Literal["per_rmsf", "integrated"]
+"""Amplitude units of an FDF: RM-synthesis output is per RMSF, a CLEAN component
+model is already integrated (each component is a flux)."""
+
 WeightType: TypeAlias = Literal[
     "variance", "natural", "uniform", "uniform_lsq", "briggs"
 ]
@@ -142,13 +146,6 @@ WeightType: TypeAlias = Literal[
 `uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
 narrows the RMSF), `briggs` (robust interpolation between natural and
 uniform_lsq, needs `robust`). """
-WEIGHT_TYPES: tuple[str, ...] = (
-    "variance",
-    "natural",
-    "uniform",
-    "uniform_lsq",
-    "briggs",
-)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -185,9 +182,10 @@ class FDFOptions:
         elif not np.isfinite(self.lam_sq_0_m2) or self.lam_sq_0_m2 <= 0:
             msg = f"A given lam_sq_0_m2 must be finite and > 0, got {self.lam_sq_0_m2}."
             raise ValueError(msg)
-        if self.weight_type not in WEIGHT_TYPES:
+        if self.weight_type not in get_args(WeightType):
             msg = (
-                f"weight_type must be one of {WEIGHT_TYPES}, got {self.weight_type!r}."
+                f"weight_type must be one of {get_args(WeightType)}, "
+                f"got {self.weight_type!r}."
             )
             raise ValueError(msg)
         if self.weight_type == "briggs" and self.robust is None:
@@ -248,7 +246,8 @@ class FaradayMoments(NamedTuple):
     """
 
     mom0: NDArray[np.float64]
-    """Zeroth moment: total polarised intensity, in the input FDF amplitude units"""
+    """Zeroth moment: total polarised intensity, in flux units (the input's
+    amplitude units with any per-RMSF scaling divided out)"""
     mom0_debias: NDArray[np.float64]
     """`mom0` less the noise's own contribution; NaN without `fdf_error`"""
     mom0_error: NDArray[np.float64]
@@ -331,6 +330,7 @@ def calc_faraday_moments(
     complex_fdf_arr: NDArray[np.complexfloating] | NDArray[np.floating],
     phi_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float | NDArray[np.float64],
+    fdf_units: FDFUnits,
     axis: int = 0,
     fdf_error: float | NDArray[np.float64] | None = None,
     threshold: float | NDArray[np.float64] | None = None,
@@ -342,10 +342,9 @@ def calc_faraday_moments(
 ) -> FaradayMoments:
     """Compute the zeroth, first, and second moments of a Faraday depth spectrum.
 
-    The FDF amplitude is in units per RMSF (the native RM-synthesis scale). mom0
-    is converted to integrated units by dividing the Faraday-depth sum by the
-    RMSF area (a Gaussian of FWHM `fwhm_rmsf_radm2`), so an unresolved component
-    of peak amplitude P gives `mom0 = P`.
+    Pass `fdf_units="per_rmsf"` for an FDF (dirty, residual or restored clean)
+    and `"integrated"` for a CLEAN component model. mom0 is in flux units for
+    both: an unresolved component of peak amplitude P gives `mom0 = P`.
 
     Complex input is reduced with `np.abs`; real input is used as-is, so the
     signed debiased amplitudes from `debias_fdf` integrate without folding noise
@@ -361,6 +360,8 @@ def calc_faraday_moments(
         phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth array in rad/m^2.
         fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
             An array must broadcast against the FDF shape with the Faraday depth axis removed.
+        fdf_units (FDFUnits): `"per_rmsf"` for an FDF, `"integrated"` for a
+            CLEAN component model, whose amplitudes are fluxes already.
         axis (int, optional): Faraday depth axis of `complex_fdf_arr`. Defaults to 0.
         fdf_error (float | NDArray[np.float64] | None, optional): 1-sigma FDF
             noise per component (e.g. `TheoreticalNoise.fdf_error_noise`). Every
@@ -388,7 +389,7 @@ def calc_faraday_moments(
             alternative. Defaults to None.
 
     Returns:
-        FaradayMoments: mom0 (FDF amplitude units), mom1 (rad/m^2), mom2
+        FaradayMoments: mom0 (flux units), mom1 (rad/m^2), mom2
             (dispersion, rad/m^2), the polarised intensity and angle at the
             reference lambda^2, and an error for each. Spectra with no valid
             amplitude have mom0 = 0 and mom1 = mom2 = NaN.
@@ -398,6 +399,9 @@ def calc_faraday_moments(
     width. Good to ~20% on samples carrying signal, ~1.5x conservative over the
     whole grid and for mom1 near the detection limit.
     """
+    if fdf_units not in get_args(FDFUnits):
+        msg = f"`fdf_units` must be one of {get_args(FDFUnits)}, got {fdf_units!r}."
+        raise ValueError(msg)
     if threshold is not None and auto_threshold_sigma is not None:
         msg = "`threshold` and `auto_threshold_sigma` are mutually exclusive."
         raise ValueError(msg)
@@ -496,15 +500,19 @@ def calc_faraday_moments(
         keepdims=True,
     )
 
+    # Per-RMSF amplitudes sample a function the RMSF has smeared, so the sum
+    # deconvolves by the RMSF area. Model components are point masses already
+    # carrying their own flux, so they just add up.
     rmsf_area = fwhm_rmsf_radm2 * gaussian_integrand(amplitude=1.0, fwhm=1.0)
-    mom0 = np.squeeze(weight_sum, axis=axis) * delta_phi / rmsf_area
+    flux_scale = delta_phi / rmsf_area if fdf_units == "per_rmsf" else 1.0
+    mom0 = np.squeeze(weight_sum, axis=axis) * flux_scale
     mom1_out = np.squeeze(mom1, axis=axis)
     mom2_out = np.squeeze(mom2, axis=axis)
-    # RMSF areas integrated: the noise terms all scale with this
-    areas = np.squeeze(n_used, axis=axis) * delta_phi / rmsf_area
+    # Resolution elements summed over: the noise terms all scale with this
+    areas = np.squeeze(n_used, axis=axis) * flux_scale
 
     pi_lam_sq_0, pa_lam_sq_0 = coherent_polarisation(
-        complex_fdf_arr, valid, axis, delta_phi / rmsf_area, mom0
+        complex_fdf_arr, valid, axis, flux_scale, mom0
     )
 
     # An unknown noise is a NaN noise: every formula below then returns NaN on
@@ -2453,6 +2461,7 @@ def get_fdf_parameters(
         complex_fdf_arr=fdf_arr,
         phi_arr_radm2=phi_arr_radm2,
         fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+        fdf_units="per_rmsf",
         fdf_error=theoretical_noise.fdf_error_noise,
         threshold=moment_threshold,
     )
