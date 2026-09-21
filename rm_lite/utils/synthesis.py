@@ -348,13 +348,9 @@ def calc_faraday_moments(
 ) -> FaradayMoments:
     """Compute the zeroth, first, and second moments of a Faraday depth spectrum.
 
-    `fdf_units` says what the input amplitudes are, and mom0 comes out in flux
-    units either way. RM-synthesis output is `"per_rmsf"`: the Faraday-depth sum
-    is divided by the RMSF area (a Gaussian of FWHM `fwhm_rmsf_radm2`), so an
-    unresolved component of peak amplitude P gives `mom0 = P`. A CLEAN component
-    model is `"integrated"`: each component is already a flux, so the components
-    are summed as they stand. Passing `"per_rmsf"` for a model divides it by the
-    RMSF area a second time, and it is out by that factor.
+    Pass `fdf_units="per_rmsf"` for an FDF (dirty, residual or restored clean)
+    and `"integrated"` for a CLEAN component model. mom0 is in flux units for
+    both: an unresolved component of peak amplitude P gives `mom0 = P`.
 
     Complex input is reduced with `np.abs`; real input is used as-is, so the
     signed debiased amplitudes from `debias_fdf` integrate without folding noise
@@ -370,9 +366,8 @@ def calc_faraday_moments(
         phi_arr_radm2 (NDArray[np.float64]): Uniformly spaced Faraday depth array in rad/m^2.
         fwhm_rmsf_radm2 (float | NDArray[np.float64]): FWHM of the RMSF main lobe in rad/m^2.
             An array must broadcast against the FDF shape with the Faraday depth axis removed.
-        fdf_units (FDFUnits): Amplitude units of `complex_fdf_arr`. `"per_rmsf"`
-            for anything RM-synthesis produced (dirty, residual, or restored
-            CLEAN FDF), `"integrated"` for a CLEAN component model.
+        fdf_units (FDFUnits): `"per_rmsf"` for an FDF, `"integrated"` for a
+            CLEAN component model, whose amplitudes are fluxes already.
         axis (int, optional): Faraday depth axis of `complex_fdf_arr`. Defaults to 0.
         fdf_error (float | NDArray[np.float64] | None, optional): 1-sigma FDF
             noise per component (e.g. `TheoreticalNoise.fdf_error_noise`). Every
