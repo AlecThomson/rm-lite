@@ -146,13 +146,6 @@ WeightType: TypeAlias = Literal[
 `uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
 narrows the RMSF), `briggs` (robust interpolation between natural and
 uniform_lsq, needs `robust`). """
-WEIGHT_TYPES: tuple[str, ...] = (
-    "variance",
-    "natural",
-    "uniform",
-    "uniform_lsq",
-    "briggs",
-)
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -189,9 +182,10 @@ class FDFOptions:
         elif not np.isfinite(self.lam_sq_0_m2) or self.lam_sq_0_m2 <= 0:
             msg = f"A given lam_sq_0_m2 must be finite and > 0, got {self.lam_sq_0_m2}."
             raise ValueError(msg)
-        if self.weight_type not in WEIGHT_TYPES:
+        if self.weight_type not in get_args(WeightType):
             msg = (
-                f"weight_type must be one of {WEIGHT_TYPES}, got {self.weight_type!r}."
+                f"weight_type must be one of {get_args(WeightType)}, "
+                f"got {self.weight_type!r}."
             )
             raise ValueError(msg)
         if self.weight_type == "briggs" and self.robust is None:

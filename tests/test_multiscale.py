@@ -590,3 +590,17 @@ def test_explicit_scales_sorted_and_require_delta() -> None:
     # Empty is still rejected.
     with pytest.raises(ValueError, match="non-empty"):
         MultiscaleOptions(scales=np.array([]))
+
+
+def test_multiscale_options_reject_unknown_kernel():
+    # Used to be accepted and then fall back to gaussian, so a typo quietly
+    # changed the deconvolution kernel.
+    with pytest.raises(ValueError, match="kernel"):
+        MultiscaleOptions(kernel="taperedquad")  # type: ignore[arg-type]
+
+
+def test_multiscale_options_reject_unknown_selection():
+    # Used to be accepted and then fall back to snr, which the default hybrid
+    # selector exists precisely to avoid.
+    with pytest.raises(ValueError, match="selection"):
+        MultiscaleOptions(selection="hybird")  # type: ignore[arg-type]

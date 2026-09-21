@@ -7,7 +7,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Literal, NamedTuple, TypeAlias, TypeVar
+from typing import Literal, NamedTuple, TypeAlias, TypeVar, get_args
 
 import numpy as np
 from numpy.typing import NDArray
@@ -920,6 +920,15 @@ class MultiscaleOptions:
     smallest wins, which keeps points on the delta scale. 0 = raw argmax."""
 
     def __post_init__(self) -> None:
+        if self.kernel not in get_args(KernelType):
+            msg = f"kernel must be one of {get_args(KernelType)}, got {self.kernel!r}."
+            raise ValueError(msg)
+        if self.selection not in get_args(SelectionType):
+            msg = (
+                f"selection must be one of {get_args(SelectionType)}, "
+                f"got {self.selection!r}."
+            )
+            raise ValueError(msg)
         if not 0 <= self.selection_margin < 1:
             msg = f"selection_margin must be in [0, 1), got {self.selection_margin}."
             raise ValueError(msg)
@@ -1077,7 +1086,7 @@ def convolve_fdf_scale(
     """
     if scale == 0:
         return fdf_arr
-    kernel_func = KERNEL_FUNCS.get(kernel, gaussian_scale_kernel_function)
+    kernel_func = KERNEL_FUNCS[kernel]
     # Sample the kernel on a zero-centred grid trimmed to its real support (see
     # KERNEL_SUPPORT_FACTOR), not the full signal length: scipy.ndimage.convolve is
     # O(n * kernel_len), and the kernel is negligible (tapered_quad: exactly zero)
@@ -1086,9 +1095,7 @@ def convolve_fdf_scale(
     # under scipy's reflect mode.
     d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
     n = len(fdf_arr)
-    support_factor = KERNEL_SUPPORT_FACTOR.get(
-        kernel, KERNEL_SUPPORT_FACTOR["gaussian"]
-    )
+    support_factor = KERNEL_SUPPORT_FACTOR[kernel]
     half_width = min(int(np.ceil(support_factor * scale * fwhm / d_phi)), (n - 1) // 2)
     kernel_grid = np.arange(-half_width, half_width + 1) * d_phi
     kernel_arr = kernel_func(kernel_grid, scale, fwhm, sum_normalised=sum_normalised)
