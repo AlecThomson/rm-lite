@@ -662,10 +662,9 @@ def run_rmclean_from_synth(
     Convenience wrapper that unpacks an `RMSynth3DResults` into `run_rmclean`,
     mirroring `rm_lite.tools_1d.rmclean.run_rmclean_from_synth`. `mask` and
     `threshold` are scaled from `rm_synth_3d_results.theoretical_noise`, the
-    same way the 1D version scales from its per-pixel theoretical noise. 3D
-    RM-synthesis only carries a per-channel (not per-pixel) noise estimate (see
-    `rm_lite.utils.dask_io.estimate_channel_noise_mad`), so the resulting `mask`
-    and `threshold` are uniform across the cube rather than per-pixel.
+    same way the 1D version scales from its per-pixel theoretical noise, and
+    are per-pixel maps wherever that noise is one: an SNR-scaled mask is only
+    an SNR anywhere if it tracks the noise each pixel actually has.
 
     Args:
         rm_synth_3d_results (RMSynth3DResults): Results from `rmsynth_3d`.
