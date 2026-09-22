@@ -2048,3 +2048,23 @@ def test_noise_map_follows_each_pixels_channel_coverage(
         np.testing.assert_allclose(noise_map[:, index], measured, rtol=0.3)
         if fraction < 1.0:
             assert (noise_map[:, index] > noise_map[:, 0]).all()
+
+
+def test_rmsynth_3d_rejects_mismatched_stokes_shapes():
+    freq_arr_hz = np.linspace(1.0e9, 1.4e9, 8)
+    stokes_q = da.zeros((8, 4, 4), chunks=(8, 2, 2))
+    stokes_u = da.zeros((8, 4, 5), chunks=(8, 2, 2))
+
+    with pytest.raises(ValueError, match="same shape"):
+        rmsynth_3d(stokes_q, stokes_u, freq_arr_hz, d_phi_radm2=D_PHI_RADM2)
+
+
+def test_rmsynth_3d_rejects_mismatched_stokes_chunking():
+    # Same shape, different blocks: `map_blocks` would silently pair up
+    # mismatched pixels, so this is caught before any of it is built.
+    freq_arr_hz = np.linspace(1.0e9, 1.4e9, 8)
+    stokes_q = da.zeros((8, 4, 4), chunks=(8, 2, 2))
+    stokes_u = da.zeros((8, 4, 4), chunks=(8, 4, 4))
+
+    with pytest.raises(ValueError, match="identical chunking"):
+        rmsynth_3d(stokes_q, stokes_u, freq_arr_hz, d_phi_radm2=D_PHI_RADM2)
