@@ -13,6 +13,7 @@ from dask.base import compute
 from numpy.typing import NDArray
 
 from rm_lite.utils.arrays import (
+    broadcast_over_channels,
     complex_dtype,
     divide_quiet,
     error_from_weight_cube,
@@ -90,9 +91,10 @@ class RMSynth3DResults(NamedTuple):
     what lets an FDF be moved between references afterwards
     (`rm_lite.utils.synthesis.derotate_to`, Brentjens & de Bruyn 2005 eq. 33)."""
     theoretical_noise: TheoreticalNoise
-    """Theoretical FDF-domain noise from the weight array, uniform across the
-    cube unless the weights are per pixel, or a Stokes I model makes it a lazy
-    per-pixel map (see `fractional_theoretical_noise`)."""
+    """Theoretical FDF-domain noise, a lazy per-pixel map: it follows the weights
+    each pixel's FDF is really normalised by, so a pixel the band only partly
+    covers gets the noise it actually has (see `noise_weights`). Uniform only
+    where every pixel shares both its weights and its flagging."""
     stokes_i_model_cube: da.Array | None = None
     """Per-pixel Stokes I model cube, lazy, shape (n_freq, ny, nx). None unless a
     Stokes I cube or model was supplied to `rmsynth_3d`."""
@@ -162,19 +164,16 @@ class RMSynth3DResults(NamedTuple):
 
 def _compute_global_params(
     freq_arr_hz: NDArray[np.float64],
-    weight_arr: NDArray[np.float64] | da.Array,
     weight_summary: WeightSummary,
     fdf_options: FDFOptions,
-) -> tuple[RMSynthParams, TheoreticalNoise]:
-    """Compute phi_arr/lam_sq_0_m2/weight_arr and theoretical FDF noise, once for the whole cube.
+) -> RMSynthParams:
+    """Compute phi_arr/lam_sq_0_m2/weight_arr, once for the whole cube.
 
     `compute_rmsynth_params` is written for a single per-pixel spectrum, but
     its weight-array derivation round-trips exactly from a per-channel error
     spectrum (`weight = 1/error**2`), so a synthetic, fully-finite spectrum
     with `error = 1/sqrt(weight_arr)` reuses it unmodified for a per-channel
-    (not per-pixel) weight array shared by every spatial chunk. The same
-    reconstructed error feeds `compute_theoretical_noise` for a per-channel
-    (not per-pixel) theoretical noise estimate.
+    (not per-pixel) weight array shared by every spatial chunk.
     """
     # The globals take the summed channel profile, not the whole array: exact
     # for a weighted mean (the pixel sums factor out) and far cheaper. Per-pixel
@@ -182,23 +181,54 @@ def _compute_global_params(
     complex_pol_error = error_from_weight(weight_summary.channel_profile)
     complex_pol_arr = np.ones_like(freq_arr_hz, dtype=np.complex128)
 
-    rmsynth_params = compute_rmsynth_params(
+    return compute_rmsynth_params(
         freq_arr_hz=freq_arr_hz,
         complex_pol_arr=complex_pol_arr,
         complex_pol_error=complex_pol_error,
         fdf_options=fdf_options,
     )
-    # From the full array, so a per-pixel weight gives a per-pixel noise map,
-    # left lazy until something asks for it.
-    theoretical_noise = compute_theoretical_noise(
-        complex_pol_error=error_from_weight(weight_arr),
-        weight_arr=weight_arr,
+
+
+class NoiseWeights(NamedTuple):
+    """What the theoretical FDF noise follows from, in argument order."""
+
+    complex_pol_error: NDArray[np.complexfloating] | da.Array
+    """Per-channel Q/U error the natural weights imply, shaped to broadcast
+    over the cube."""
+    effective_weight: da.Array
+    """Per-pixel weights the FDF is really normalised by, shape (n_freq, ny, nx)."""
+
+
+def noise_weights(
+    weight_arr: NDArray[np.float64] | da.Array,
+    pol_cube: da.Array,
+    rmsynth_params: RMSynthParams,
+    fdf_options: FDFOptions,
+) -> NoiseWeights:
+    """The error and weights the FDF noise follows from, aligned to `pol_cube`.
+
+    Lazy, so nothing is read until the noise is asked for.
+    """
+    aligned = _weight_arr_map_blocks_args(weight_arr, pol_cube)
+    complex_pol_error = error_from_weight(aligned[0] if aligned else weight_arr)
+    if np.ndim(complex_pol_error) == 1:
+        # Spatial axes too, or it will not broadcast against the weight cube.
+        complex_pol_error = broadcast_over_channels(complex_pol_error, pol_cube)
+    return NoiseWeights(
+        complex_pol_error=complex_pol_error,
+        effective_weight=da.map_blocks(
+            _effective_weight_on_block,
+            pol_cube,
+            *aligned,
+            dtype=real_dtype(pol_cube.dtype),
+            rmsynth_params=rmsynth_params,
+            fdf_options=fdf_options,
+        ),
     )
-    return rmsynth_params, theoretical_noise
 
 
 def fractional_theoretical_noise(
-    weight_arr: NDArray[np.float64] | da.Array,
+    weights: NoiseWeights,
     stokes_i_model_cube: da.Array,
     ref_flux_map: da.Array,
 ) -> TheoreticalNoise:
@@ -207,16 +237,11 @@ def fractional_theoretical_noise(
     Scales each channel's error by `ref_flux / model`, as the signal is. Reads
     the model cube, so compute it with the FDF or the fit runs twice.
     """
-    complex_pol_error = error_from_weight(weight_arr)
-    if np.ndim(complex_pol_error) == 1:
-        # Spatial axes too, or it will not broadcast against the model cube.
-        complex_pol_error = complex_pol_error[:, np.newaxis, np.newaxis]
-        weight_arr = weight_arr[:, np.newaxis, np.newaxis]
-    scaled_error = complex_pol_error * (
+    scaled_error = weights.complex_pol_error * (
         ref_flux_map[np.newaxis, :, :] / stokes_i_model_cube
     )
     return compute_theoretical_noise(
-        complex_pol_error=scaled_error, weight_arr=weight_arr
+        complex_pol_error=scaled_error, weight_arr=weights.effective_weight
     )
 
 
@@ -408,6 +433,27 @@ def _weight_arr_for_block(
     return weight_arr.astype(dtype, copy=False)
 
 
+def _effective_weight_on_block(
+    block: NDArray[np.complexfloating],
+    weight_block: NDArray[np.float64] | None = None,
+    *,
+    rmsynth_params: RMSynthParams,
+    fdf_options: FDFOptions,
+) -> NDArray[np.float64]:
+    """The weights each pixel of this chunk is actually weighted by.
+
+    `_weight_arr_for_block` of the requested type, broadcast over the block and
+    zeroed on the channels a pixel has no data in. `rmsynth_nufft` divides every
+    pixel by the sum of exactly these, so anything derived from the weights has
+    to use them rather than the cube's weight spectrum: a pixel only a few
+    sub-bands cover is nothing like one the whole band covers.
+    """
+    weight_arr = _weight_arr_for_block(block, weight_block, rmsynth_params, fdf_options)
+    if np.ndim(weight_arr) == 1:
+        weight_arr = np.broadcast_to(weight_arr[:, np.newaxis, np.newaxis], block.shape)
+    return np.where(np.isfinite(block), weight_arr, 0.0)
+
+
 def _lam_sq_0_on_block(
     block: NDArray[np.complexfloating],
     weight_block: NDArray[np.float64] | None = None,
@@ -416,12 +462,11 @@ def _lam_sq_0_on_block(
     fdf_options: FDFOptions,
 ) -> NDArray[np.float64]:
     """This chunk's per-pixel reference lambda^2, from its own weights."""
-    weight_arr = _weight_arr_for_block(block, weight_block, rmsynth_params, fdf_options)
-    if np.ndim(weight_arr) == 1:
-        weight_arr = np.broadcast_to(weight_arr[:, np.newaxis, np.newaxis], block.shape)
     # A channel the pixel does not have cannot pull its reference; this matches
     # the weights `rmsynth_nufft` builds the pixel's own RMSF from.
-    weight_arr = np.where(np.isfinite(block), weight_arr, 0.0)
+    weight_arr = _effective_weight_on_block(
+        block, weight_block, rmsynth_params=rmsynth_params, fdf_options=fdf_options
+    )
     return lam_sq_0_per_pixel(weight_arr, rmsynth_params.lambda_sq_arr_m2)
 
 
@@ -748,9 +793,17 @@ def rmsynth_3d(
             "the same in every pixel to keep the shared one."
         )
         per_pixel_rmsf = True
-    rmsynth_params, theoretical_noise = _compute_global_params(
+    if not per_pixel_rmsf:
+        # Not checked against the data, which would cost a pass over the cube
+        # to answer. Cheap to say, and easy to miss otherwise.
+        logger.warning(
+            "Every pixel will be cleaned with the one shared RMSF, which is "
+            "only its own if it has the cube's flagged channels. Pass "
+            "per_pixel_rmsf=True where that does not hold -- a partly blanked "
+            "mosaic, whose edge pixels only some sub-bands cover."
+        )
+    rmsynth_params = _compute_global_params(
         freq_arr_hz=freq_arr_hz,
-        weight_arr=weight_arr,
         weight_summary=weight_summary,
         fdf_options=fdf_options,
     )
@@ -846,11 +899,18 @@ def rmsynth_3d(
             freq_arr_hz=freq_arr_hz,
             ref_freq_hz=ref_freq_hz,
         )
+
+    # After any Stokes I division, so the blanking folded in is the blanking the
+    # FDF is actually built from.
+    weights = noise_weights(weight_arr, pol_cube, rmsynth_params, fdf_options)
+    if stokes_i_model_cube is not None and ref_flux_map is not None:
         theoretical_noise = fractional_theoretical_noise(
-            weight_arr=weight_arr,
+            weights=weights,
             stokes_i_model_cube=stokes_i_model_cube,
             ref_flux_map=ref_flux_map,
         )
+    else:
+        theoretical_noise = compute_theoretical_noise(*weights)
 
     fdf_dirty_cube = da.map_blocks(
         _rmsynth_on_block,

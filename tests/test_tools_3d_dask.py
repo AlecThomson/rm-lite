@@ -63,6 +63,8 @@ from rm_lite.utils.synthesis import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from numpy.typing import NDArray
+
 D_PHI_RADM2 = 1.0
 MASK_THRESHOLD = 0.15
 CLEAN_THRESHOLD = 0.03
@@ -1981,3 +1983,88 @@ def test_rmsynth_3d_from_fits_estimates_the_stokes_i_noise(qu_fits_cubes):
     )
 
     assert np.isfinite(results.fdf_dirty_cube.compute()).any()
+
+
+def partly_covered_cube(coverage: tuple[float, ...] = (1.0, 0.5, 0.1)):
+    """Q/U whose columns the band only partly covers, as a mosaic edge does."""
+    rng = np.random.default_rng(1234)
+    n_freq, ny = 64, 3
+    freq_arr_hz = np.linspace(0.9e9, 1.4e9, n_freq)
+    sigma = 1e-3
+    shape = (n_freq, ny, len(coverage))
+    stokes_q = rng.normal(0, sigma, shape)
+    stokes_u = rng.normal(0, sigma, shape)
+    for index, fraction in enumerate(coverage):
+        stokes_q[int(fraction * n_freq) :, :, index] = np.nan
+        stokes_u[int(fraction * n_freq) :, :, index] = np.nan
+    return freq_arr_hz, stokes_q, stokes_u, sigma
+
+
+@pytest.mark.filterwarnings("ignore: All channels masked")
+@pytest.mark.parametrize("per_pixel_weights", [False, True])
+def test_noise_map_follows_each_pixels_channel_coverage(
+    chunked: Callable[..., da.Array], per_pixel_weights: bool
+):
+    """A pixel the band only partly covers has a noisier FDF, and must say so.
+
+    `rmsynth_nufft` normalises each pixel by the sum of its own unblanked
+    channels' weights, so summing over every channel instead understates the
+    noise by sqrt(n_channels / n_kept) -- enough to turn an SNR-scaled CLEAN
+    mask into a few sigma at a mosaic's edge.
+    """
+    coverage = (1.0, 0.5, 0.1)
+    freq_arr_hz, stokes_q, stokes_u, sigma = partly_covered_cube(coverage)
+    # Both of the ways a caller supplies noise: one spectrum for the cube, or a
+    # noise cube per pixel. The blanking is what matters, so both must track it.
+    weight_arr: da.Array | NDArray[np.float64] = (
+        chunked(np.full(stokes_q.shape, 1.0 / sigma**2), 3, 2)
+        if per_pixel_weights
+        else np.full(stokes_q.shape[0], 1.0 / sigma**2)
+    )
+
+    synth = rmsynth_3d(
+        chunked(stokes_q, 3, 2),
+        chunked(stokes_u, 3, 2),
+        freq_arr_hz,
+        weight_arr=weight_arr,
+        d_phi_radm2=D_PHI_RADM2,
+    )
+    noise_map, fdf = compute(
+        synth.theoretical_noise.fdf_error_noise, synth.fdf_dirty_cube
+    )
+    assert noise_map.shape == stokes_q.shape[1:]
+
+    n_kept = np.isfinite(stokes_q).sum(axis=0)
+    for index, fraction in enumerate(coverage):
+        # Equal weights, so the pixel's noise is sigma over root its own channels.
+        np.testing.assert_allclose(
+            noise_map[:, index], sigma / np.sqrt(n_kept[:, index]), rtol=1e-6
+        )
+        # And that is the scatter the FDF really has. Loose: a pixel down to a
+        # tenth of the band has few enough channels to be a noisy estimate of
+        # its own noise.
+        column = fdf[:, :, index]
+        measured = np.nanstd(np.concatenate([column.real.ravel(), column.imag.ravel()]))
+        np.testing.assert_allclose(noise_map[:, index], measured, rtol=0.3)
+        if fraction < 1.0:
+            assert (noise_map[:, index] > noise_map[:, 0]).all()
+
+
+def test_rmsynth_3d_rejects_mismatched_stokes_shapes():
+    freq_arr_hz = np.linspace(1.0e9, 1.4e9, 8)
+    stokes_q = da.zeros((8, 4, 4), chunks=(8, 2, 2))
+    stokes_u = da.zeros((8, 4, 5), chunks=(8, 2, 2))
+
+    with pytest.raises(ValueError, match="same shape"):
+        rmsynth_3d(stokes_q, stokes_u, freq_arr_hz, d_phi_radm2=D_PHI_RADM2)
+
+
+def test_rmsynth_3d_rejects_mismatched_stokes_chunking():
+    # Same shape, different blocks: `map_blocks` would silently pair up
+    # mismatched pixels, so this is caught before any of it is built.
+    freq_arr_hz = np.linspace(1.0e9, 1.4e9, 8)
+    stokes_q = da.zeros((8, 4, 4), chunks=(8, 2, 2))
+    stokes_u = da.zeros((8, 4, 4), chunks=(8, 4, 4))
+
+    with pytest.raises(ValueError, match="identical chunking"):
+        rmsynth_3d(stokes_q, stokes_u, freq_arr_hz, d_phi_radm2=D_PHI_RADM2)
