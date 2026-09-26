@@ -912,12 +912,9 @@ class MultiscaleOptions:
     sub_minor_fraction: float = 0.5
     """Re-select a scale once the activated scale's peak drops by this fraction"""
     selection: SelectionType = "hybrid"
-    """Scale selector (default "hybrid"). "snr" = matched filter
-    max|R conv K_s| / sigma_s; "hybrid" = width-gated snr: engages extended scales
-    only when the residual peak fits wider than the measured dirty beam and the
-    extended score competes with scale 0, else behaves as "snr". Plain "snr" scores
-    are near scale-degenerate under correlated FDF noise, so with the default margin
-    it almost never engages; "hybrid" does while staying point-safe."""
+    """Scale selector. "snr": best matched-filter score, preferring smaller scales
+    within `selection_margin`. "hybrid": a wide scale only when the residual peak is
+    clearly wide (the `hybrid_*` fields), else as "snr"."""
     selection_margin: float = 0.08
     """SNR selector (and the hybrid fallback): relative margin in [0, 1) favouring
     smaller scales. Among scales within this fraction of the best score, the
