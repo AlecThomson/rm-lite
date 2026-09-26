@@ -57,6 +57,10 @@ HYBRID_WIDTH_FACTOR = 1.2
 HYBRID_SCORE_FACTOR = 0.85
 HYBRID_ENGAGE_MASK_FACTOR = 2.0
 
+# Adaptive auto-mask: minor iterations without a 20% peak drop before the region
+# is treated as stuck, and the brightest allowed channel outside it is added.
+ADAPTIVE_STALL_ITERS = 300
+
 
 @dataclass
 class CleanProgress:
@@ -305,6 +309,7 @@ def minor_loop(
     iter_count = int(minor_loop_options.start_iter)
     thr_eff = minor_loop_options.mask_threshold
     last_recompute_peak = np.inf
+    last_recompute_iter = int(minor_loop_options.start_iter)
     if minor_loop_options.update_mask and minor_loop_options.noise is not None:
         # Start tight (seed only) so the RMSF sidelobe ringing sits off-source and
         # inflates the MAD; the incoming mask becomes the hard cap the mask grows in.
@@ -359,6 +364,7 @@ def minor_loop(
                 if new_seed.any():
                     mask_arr |= new_seed
                     last_recompute_peak = np.inf
+                    last_recompute_iter = iter_count
                     continue
             logger.info(
                 f"Threshold reached. Exiting loop...performed {iter_count} iterations"
@@ -407,22 +413,34 @@ def minor_loop(
                 # stays confined to it between recomputes, so it tracks the source
                 # instead of chasing RMSF sidelobes. On a peak drop (ponytail: O(n)
                 # MAD only then, ~tens/spectrum, matters for 3D) recompute the
-                # sidelobe-inflated threshold, grow the region off it, and re-seed
-                # the global peak (always real emission). The floor gate means a
-                # noise-like residual seeds nothing, so the loop converges and a
-                # noise-only spectrum cleans nothing.
+                # sidelobe-inflated threshold and grow the region off it. If the
+                # peak has stalled instead, also seed the global peak (always real
+                # emission), so a source cut off by a null still gets cleaned. The
+                # floor gate means a noise-like residual seeds nothing, so the loop
+                # converges and a noise-only spectrum cleans nothing.
                 peak = float(np.abs(peak_fdf))
-                if peak < 0.8 * last_recompute_peak:
+                stalled = iter_count - last_recompute_iter >= ADAPTIVE_STALL_ITERS
+                if peak < 0.8 * last_recompute_peak or stalled:
                     offsrc_rms = _offsource_rms(resid_fdf_spectrum, mask_arr)
                     noise = minor_loop_options.noise
                     ratio = offsrc_rms / noise if noise > 0 else 1.0
                     thr_eff = minor_loop_options.mask_threshold * max(1.0, ratio)
                     last_recompute_peak = peak
+                    last_recompute_iter = iter_count
                     # Grow only into channels contiguous with the current region
                     # (binary dilation) so the mask cannot jump the RMSF nulls onto
                     # disconnected sidelobe islands.
                     above = (np.abs(resid_fdf_spectrum) > thr_eff) & mask_arr_original
                     mask_arr = mask_arr | (binary_dilation(mask_arr) & above)
+                    if stalled:
+                        # The peak left in the region has stopped falling: it is
+                        # held up by the sidelobes of a brighter source outside,
+                        # which the growth above cannot reach across a null.
+                        mask_arr |= _seed_mask(
+                            resid_fdf_spectrum,
+                            mask_arr_original,
+                            minor_loop_options.mask_threshold,
+                        )
             else:
                 # Mask anything that was previously masked
                 mask_arr = (
