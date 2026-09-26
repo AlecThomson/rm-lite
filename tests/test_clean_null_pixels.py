@@ -24,6 +24,7 @@ from rm_lite.utils.clean import (
     rmclean,
 )
 from rm_lite.utils.logging import quiet_logs
+from rm_lite.utils.simulate import Component, FDFSpec, simulate_fdf
 from rm_lite.utils.synthesis import (
     freq_to_lambda2,
     get_fwhm_rmsf,
@@ -397,3 +398,31 @@ def test_divergence_guard_stops_and_keeps_the_best_state(caplog) -> None:
         float(np.nanmax(np.abs(results.resid_fdf_spectrum))),
         float(np.nanmax(np.abs(spectrum))),
     )
+
+
+def test_adaptive_mask_reaches_a_second_source_behind_a_null() -> None:
+    """A bright pair must not leave the fainter source uncleaned at max_iter."""
+    freq_hz = np.linspace(800e6, 1088e6, 288)
+    spec = FDFSpec(
+        (Component("delta", 0.0, 0.0, 1.0), Component("delta", 0.0, 2.5, 0.6))
+    )
+    sim = simulate_fdf(spec, freq_hz, rng=np.random.default_rng(1), sigma=0.003)
+    noise = sim.fdf_noise
+    max_iter = 100_000
+    with quiet_logs():
+        results = rmclean(
+            RMSynthArrays(
+                dirty_fdf_arr=sim.dirty_fdf,
+                phi_arr_radm2=sim.phi_arr_radm2,
+                phi_double_arr_radm2=sim.phi_double_arr_radm2,
+                rmsf_arr=sim.rmsf_arr,
+                fwhm_rmsf_arr=np.array(sim.fwhm),
+            ),
+            RMCleanOptions(
+                mask=7 * noise, threshold=noise, fdf_noise=noise, max_iter=max_iter
+            ),
+        )
+    second = np.abs(sim.phi_arr_radm2 - 2.5 * sim.fwhm) <= 0.5 * sim.fwhm
+    assert int(results.clean_iter_arr.squeeze()) < max_iter
+    assert np.abs(results.resid_fdf_arr).max() < 10 * noise
+    assert abs(np.abs(results.model_fdf_arr[second].sum()) - 0.6) < 0.03

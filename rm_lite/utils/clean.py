@@ -44,20 +44,6 @@ class CleanState(StrEnum):
     STALLED = "stalled"
 
 
-# Hybrid (width-gated snr) selection.
-# Engage an extended scale only when the residual peak fits wider than
-# HYBRID_WIDTH_FACTOR x the measured dirty-beam width AND the best extended
-# matched-filter score reaches HYBRID_SCORE_FACTOR x the scale-0 score, while
-# the peak is above HYBRID_ENGAGE_MASK_FACTOR x the component-finding mask;
-# otherwise fall back to plain snr selection. The width test must use the
-# MEASURED half-max width of |RMSF| (the dirty beam, near-in sidelobe
-# shoulders included), never the theoretical fwhm: under non-uniform lambda^2
-# sampling a pure delta fits far wider than 1.2 x the theoretical fwhm.
-HYBRID_WIDTH_FACTOR = 1.2
-HYBRID_SCORE_FACTOR = 0.85
-HYBRID_ENGAGE_MASK_FACTOR = 2.0
-
-
 @dataclass
 class CleanProgress:
     """Whether a CLEAN loop is still converging, diverging, or cleaning noise.
@@ -209,6 +195,8 @@ class MinorLoopOptions:
     noise: float | None = None
     """FDF noise floor for the adaptive off-source auto-mask; None disables it
     (fixed mask, legacy behaviour)."""
+    stall_iters: int = 300
+    """Iterations without progress before the adaptive mask adds the global peak"""
 
 
 def _offsource_rms(
@@ -305,6 +293,7 @@ def minor_loop(
     iter_count = int(minor_loop_options.start_iter)
     thr_eff = minor_loop_options.mask_threshold
     last_recompute_peak = np.inf
+    last_recompute_iter = int(minor_loop_options.start_iter)
     if minor_loop_options.update_mask and minor_loop_options.noise is not None:
         # Start tight (seed only) so the RMSF sidelobe ringing sits off-source and
         # inflates the MAD; the incoming mask becomes the hard cap the mask grows in.
@@ -359,6 +348,7 @@ def minor_loop(
                 if new_seed.any():
                     mask_arr |= new_seed
                     last_recompute_peak = np.inf
+                    last_recompute_iter = iter_count
                     continue
             logger.info(
                 f"Threshold reached. Exiting loop...performed {iter_count} iterations"
@@ -407,22 +397,36 @@ def minor_loop(
                 # stays confined to it between recomputes, so it tracks the source
                 # instead of chasing RMSF sidelobes. On a peak drop (ponytail: O(n)
                 # MAD only then, ~tens/spectrum, matters for 3D) recompute the
-                # sidelobe-inflated threshold, grow the region off it, and re-seed
-                # the global peak (always real emission). The floor gate means a
-                # noise-like residual seeds nothing, so the loop converges and a
-                # noise-only spectrum cleans nothing.
+                # sidelobe-inflated threshold and grow the region off it. If the
+                # peak has stalled instead, also seed the global peak (always real
+                # emission), so a source cut off by a null still gets cleaned. The
+                # floor gate means a noise-like residual seeds nothing, so the loop
+                # converges and a noise-only spectrum cleans nothing.
                 peak = float(np.abs(peak_fdf))
-                if peak < 0.8 * last_recompute_peak:
+                stalled = (
+                    iter_count - last_recompute_iter >= minor_loop_options.stall_iters
+                )
+                if peak < 0.8 * last_recompute_peak or stalled:
                     offsrc_rms = _offsource_rms(resid_fdf_spectrum, mask_arr)
                     noise = minor_loop_options.noise
                     ratio = offsrc_rms / noise if noise > 0 else 1.0
                     thr_eff = minor_loop_options.mask_threshold * max(1.0, ratio)
                     last_recompute_peak = peak
+                    last_recompute_iter = iter_count
                     # Grow only into channels contiguous with the current region
                     # (binary dilation) so the mask cannot jump the RMSF nulls onto
                     # disconnected sidelobe islands.
                     above = (np.abs(resid_fdf_spectrum) > thr_eff) & mask_arr_original
                     mask_arr = mask_arr | (binary_dilation(mask_arr) & above)
+                    if stalled:
+                        # The peak left in the region has stopped falling: it is
+                        # held up by the sidelobes of a brighter source outside,
+                        # which the growth above cannot reach across a null.
+                        mask_arr |= _seed_mask(
+                            resid_fdf_spectrum,
+                            mask_arr_original,
+                            minor_loop_options.mask_threshold,
+                        )
             else:
                 # Mask anything that was previously masked
                 mask_arr = (
@@ -908,16 +912,19 @@ class MultiscaleOptions:
     sub_minor_fraction: float = 0.5
     """Re-select a scale once the activated scale's peak drops by this fraction"""
     selection: SelectionType = "hybrid"
-    """Scale selector (default "hybrid"). "snr" = matched filter
-    max|R conv K_s| / sigma_s; "hybrid" = width-gated snr: engages extended scales
-    only when the residual peak fits wider than the measured dirty beam and the
-    extended score competes with scale 0, else behaves as "snr". Plain "snr" scores
-    are near scale-degenerate under correlated FDF noise, so with the default margin
-    it almost never engages; "hybrid" does while staying point-safe."""
+    """Scale selector. "snr": best matched-filter score, preferring smaller scales
+    within `selection_margin`. "hybrid": a wide scale only when the residual peak is
+    clearly wide (the `hybrid_*` fields), else as "snr"."""
     selection_margin: float = 0.08
     """SNR selector (and the hybrid fallback): relative margin in [0, 1) favouring
     smaller scales. Among scales within this fraction of the best score, the
     smallest wins, which keeps points on the delta scale. 0 = raw argmax."""
+    hybrid_width_factor: float = 1.2
+    """Hybrid: min peak width, in measured dirty-beam widths"""
+    hybrid_score_factor: float = 0.85
+    """Hybrid: min extended score, relative to the delta scale"""
+    hybrid_engage_factor: float = 2.0
+    """Hybrid: min residual peak, in CLEAN masks"""
 
     def __post_init__(self) -> None:
         if self.kernel not in get_args(KernelType):
@@ -939,6 +946,13 @@ class MultiscaleOptions:
             raise ValueError(msg)
         if self.max_iter_sub_minor < 1:
             msg = "max_iter_sub_minor must be >= 1."
+            raise ValueError(msg)
+        for name in ("hybrid_width_factor", "hybrid_score_factor"):
+            if getattr(self, name) <= 0:
+                msg = f"{name} must be > 0, got {getattr(self, name)}."
+                raise ValueError(msg)
+        if self.hybrid_engage_factor < 0:
+            msg = f"hybrid_engage_factor must be >= 0, got {self.hybrid_engage_factor}."
             raise ValueError(msg)
         if self.scales is not None:
             if len(self.scales) == 0:
@@ -1267,10 +1281,8 @@ def find_significant_scale(
     scale_kernels: ScaleKernels,
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
-    kernel: KernelType,
+    multiscale_options: MultiscaleOptions,
     active: NDArray[np.bool_] | None = None,
-    selection: SelectionType = "snr",
-    selection_margin: float = 0.0,
     engage_floor: float = 0.0,
 ) -> int:
     """Index of the most-significant scale (Offringa & Smirnov 2017).
@@ -1286,34 +1298,55 @@ def find_significant_scale(
         scale_kernels (ScaleKernels): Precomputed per-scale responses.
         rmsf_fwhm (float): RMSF FWHM in rad/m^2.
         phi_double_arr_radm2 (NDArray[np.float64]): Double-phi axis.
-        kernel (KernelType): Scale-kernel shape.
+        multiscale_options (MultiscaleOptions): Kernel, selector, margin and
+            hybrid gates.
         active (NDArray[np.bool_] | None): Scales still allowed to be selected.
-        selection ("snr" | "hybrid"): Scale selector.
-        selection_margin (float): SNR parsimony margin (see MultiscaleOptions);
-            for "hybrid" it applies to the snr fallback.
         engage_floor (float): Hybrid only: below this residual peak (absolute FDF
             units) always fall back to snr. 0 disables the gate.
 
     Returns:
         int: Index into `scale_kernels.scales` of the selected scale.
     """
-    if selection == "hybrid":
+    if multiscale_options.selection == "hybrid":
         return _hybrid_scale_selection(
             resid_fdf_spectrum,
             scale_kernels,
             rmsf_fwhm,
             phi_double_arr_radm2,
-            kernel,
+            multiscale_options,
             active=active,
-            selection_margin=selection_margin,
             engage_floor=engage_floor,
         )
+    return _snr_scale_selection(
+        resid_fdf_spectrum,
+        scale_kernels,
+        rmsf_fwhm,
+        phi_double_arr_radm2,
+        multiscale_options,
+        active=active,
+    )
+
+
+def _snr_scale_selection(
+    resid_fdf_spectrum: NDArray[np.complexfloating],
+    scale_kernels: ScaleKernels,
+    rmsf_fwhm: float,
+    phi_double_arr_radm2: NDArray[np.float64],
+    multiscale_options: MultiscaleOptions,
+    active: NDArray[np.bool_] | None,
+) -> int:
+    """Matched-filter snr selection, preferring the smallest scale in the margin"""
+    selection_margin = multiscale_options.selection_margin
     scores = np.full_like(scale_kernels.scales, -np.inf)
     for i, scale in enumerate(scale_kernels.scales):
         if active is not None and not active[i]:
             continue
         resid_conv = convolve_fdf_scale(
-            scale, rmsf_fwhm, resid_fdf_spectrum, phi_double_arr_radm2, kernel
+            scale,
+            rmsf_fwhm,
+            resid_fdf_spectrum,
+            phi_double_arr_radm2,
+            multiscale_options.kernel,
         )
         peak = float(np.nanmax(np.abs(resid_conv)))
         scores[i] = peak / scale_kernels.sigma_s[i]
@@ -1332,9 +1365,8 @@ def _hybrid_scale_selection(
     scale_kernels: ScaleKernels,
     rmsf_fwhm: float,
     phi_double_arr_radm2: NDArray[np.float64],
-    kernel: KernelType,
+    multiscale_options: MultiscaleOptions,
     active: NDArray[np.bool_] | None,
-    selection_margin: float,
     engage_floor: float,
 ) -> int:
     """Width-gated snr selection.
@@ -1342,25 +1374,23 @@ def _hybrid_scale_selection(
     Engage an extended scale only when two independent tests agree, else fall
     back to plain snr selection with `selection_margin`:
     1. Width: bounded half-max fit of the residual peak wider than
-       HYBRID_WIDTH_FACTOR x the measured dirty-beam width (a delta fits 1.0x,
+       `hybrid_width_factor` x the measured dirty-beam width (a delta fits 1.0x,
        the narrowest genuinely extended source ~2x).
     2. Score: best active extended matched-filter score at least
-       HYBRID_SCORE_FACTOR x the scale-0 score (kills residual junk that fits
+       `hybrid_score_factor` x the scale-0 score (kills residual junk that fits
        wide but scores poorly at wide scales).
     Engagement takes the argmax score among active extended scales. Below
     `engage_floor` (endgame) always falls back.
     """
 
     def snr_fallback() -> int:
-        return find_significant_scale(
+        return _snr_scale_selection(
             resid_fdf_spectrum,
             scale_kernels,
             rmsf_fwhm,
             phi_double_arr_radm2,
-            kernel,
+            multiscale_options,
             active=active,
-            selection="snr",
-            selection_margin=selection_margin,
         )
 
     abs_resid = np.abs(resid_fdf_spectrum)
@@ -1383,7 +1413,7 @@ def _hybrid_scale_selection(
     lo = peak_index
     while lo - 1 >= 0 and abs_resid[lo - 1] > half_val and peak_index - lo < max_steps:
         lo -= 1
-    if (hi - lo + 1) * d_phi < HYBRID_WIDTH_FACTOR * point_width:
+    if (hi - lo + 1) * d_phi < multiscale_options.hybrid_width_factor * point_width:
         return snr_fallback()
 
     scales = scale_kernels.scales
@@ -1401,13 +1431,17 @@ def _hybrid_scale_selection(
         if not (ext_active[i] or float(scale) == 0):
             continue
         resid_conv = convolve_fdf_scale(
-            float(scale), rmsf_fwhm, resid_fdf_spectrum, phi_double_arr_radm2, kernel
+            float(scale),
+            rmsf_fwhm,
+            resid_fdf_spectrum,
+            phi_double_arr_radm2,
+            multiscale_options.kernel,
         )
         scores[i] = float(np.nanmax(np.abs(resid_conv))) / float(
             scale_kernels.sigma_s[i]
         )
     best_ext = int(np.argmax(np.where(ext_active, scores, -np.inf)))
-    if scores[best_ext] < HYBRID_SCORE_FACTOR * scores[0]:
+    if scores[best_ext] < multiscale_options.hybrid_score_factor * scores[0]:
         return snr_fallback()
     return best_ext
 
@@ -1484,7 +1518,6 @@ def _multiscale_minor_cycles(
     max_iter = clean_options.max_iter
     max_iter_sub_minor = multiscale_options.max_iter_sub_minor
     sub_minor_fraction = multiscale_options.sub_minor_fraction
-    selection = multiscale_options.selection
     active = np.array([bool(s.any()) for s in allowed_supports])
     support = np.logical_or.reduce(allowed_supports)
     n_iter = 0
@@ -1529,11 +1562,10 @@ def _multiscale_minor_cycles(
             kernels,
             rmsf_fwhm,
             phi_double_arr_radm2,
-            kernel,
+            multiscale_options,
             active=active,
-            selection=selection,
-            selection_margin=multiscale_options.selection_margin,
-            engage_floor=HYBRID_ENGAGE_MASK_FACTOR * float(clean_options.mask),
+            engage_floor=multiscale_options.hybrid_engage_factor
+            * float(clean_options.mask),
         )
         scale = float(scales[scale_index])
         peak_response = float(kernels.peak_response[scale_index])
@@ -1678,7 +1710,7 @@ def _classify_hybrid_source(
         return multiscale_options
     d_phi = float(phi_double_arr_radm2[1] - phi_double_arr_radm2[0])
     width = _halfmax_width_radm2(np.abs(dirty_fdf_spectrum), d_phi)
-    if width < HYBRID_WIDTH_FACTOR * kernels.point_width:
+    if width < multiscale_options.hybrid_width_factor * kernels.point_width:
         return dataclasses.replace(multiscale_options, selection="snr")
     return multiscale_options
 

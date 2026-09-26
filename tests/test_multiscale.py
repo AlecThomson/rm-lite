@@ -215,6 +215,12 @@ def test_multiscale_options_validation() -> None:
         MultiscaleOptions(sub_minor_fraction=1.5)
     with pytest.raises(ValueError, match="max_iter_sub_minor"):
         MultiscaleOptions(max_iter_sub_minor=0)
+    with pytest.raises(ValueError, match="hybrid_width_factor"):
+        MultiscaleOptions(hybrid_width_factor=0.0)
+    with pytest.raises(ValueError, match="hybrid_score_factor"):
+        MultiscaleOptions(hybrid_score_factor=-1.0)
+    with pytest.raises(ValueError, match="hybrid_engage_factor"):
+        MultiscaleOptions(hybrid_engage_factor=-1.0)
 
 
 def test_coupling_identity() -> None:

@@ -16,23 +16,24 @@ Use `uv run` for everything — never call `pytest`/`mypy`/`ruff` bare.
 ## Verify gate (run before calling any task done)
 
 ```
-uv run pytest
+uv run pytest tests/<touched modules>
 uv run prek run --hook-stage manual --all-files
 ```
 
-`--hook-stage manual` because that is what CI passes
-(`.github/workflows/ci.yml`, the `prek` job). Today it runs the same hooks as
-the bare invocation, so match it rather than discover the difference the first
-time a manual-stage hook is added.
+Locally, run only the tests for the modules you touched. Never run the full
+suite locally; push and let GitHub CI run it (`.github/workflows/ci.yml`), then
+check the result there.
 
-Full test suite every time, not just touched modules — dask/zarr tests are slow
-but regressions there are easy to miss with partial runs.
+`--hook-stage manual` because that is what CI passes (the `prek` job). Today it
+runs the same hooks as the bare invocation, so match it rather than discover the
+difference the first time a manual-stage hook is added.
 
 ## Docs
 
 `docs/` uses sphinx-autoapi + nbsphinx. When a public function/param in
-`rm_lite/` changes shape, update the relevant docstring/.rst/example in the same
-change — don't leave it for a follow-up.
+`rm_lite/` changes shape, update its docstring in the same change. Only touch
+the example notebooks when they would otherwise be wrong or broken, not for
+every code change.
 
 ## Code style
 
