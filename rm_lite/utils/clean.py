@@ -196,8 +196,7 @@ class MinorLoopOptions:
     """FDF noise floor for the adaptive off-source auto-mask; None disables it
     (fixed mask, legacy behaviour)."""
     stall_iters: int = 300
-    """Adaptive mask: iterations without a 20% peak drop before the brightest
-    allowed channel outside the mask is added"""
+    """Iterations without progress before the adaptive mask adds the global peak"""
 
 
 def _offsource_rms(
@@ -924,15 +923,11 @@ class MultiscaleOptions:
     smaller scales. Among scales within this fraction of the best score, the
     smallest wins, which keeps points on the delta scale. 0 = raw argmax."""
     hybrid_width_factor: float = 1.2
-    """Hybrid: engage an extended scale only if the residual peak is wider than
-    this x the measured dirty-beam half-max width (a delta fits 1.0x). Measured,
-    not theoretical: under uneven lambda^2 sampling a delta fits far wider than
-    the theoretical FWHM."""
+    """Hybrid: min peak width, in measured dirty-beam widths"""
     hybrid_score_factor: float = 0.85
-    """Hybrid: and only if the best extended matched-filter score is at least
-    this x the delta-scale score"""
+    """Hybrid: min extended score, relative to the delta scale"""
     hybrid_engage_factor: float = 2.0
-    """Hybrid: and only while the residual peak is above this x the CLEAN mask"""
+    """Hybrid: min residual peak, in CLEAN masks"""
 
     def __post_init__(self) -> None:
         if self.kernel not in get_args(KernelType):
