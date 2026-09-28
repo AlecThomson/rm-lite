@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast
@@ -36,14 +37,17 @@ from rm_lite.utils.fitting import (
     StokesIFitOptions,
     alpha_from_model_block,
     coefficient_names,
+    field_spectral_index,
     fit_stokes_cube,
     ref_flux_from_block,
 )
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import (
+    NOISE_WEIGHT_TYPES,
     FDFOptions,
     LamSq0Mode,
     RMSynthParams,
+    StokesIWeighting,
     TheoreticalNoise,
     WeightType,
     apply_weight_type,
@@ -58,6 +62,7 @@ from rm_lite.utils.synthesis import (
     lambda2_to_freq,
     make_double_phi_arr,
     rmsynth_nufft,
+    stokes_i_template,
 )
 
 
@@ -160,6 +165,11 @@ class RMSynth3DResults(NamedTuple):
     `per_pixel_rmsf`, so asking for both computes the transforms twice."""
     per_pixel_rmsf: PerPixelRMSF | None = None
     """How RM-CLEAN rebuilds the RMSF per block. Set with `rmsf_cube`."""
+    stokes_i_weighting: StokesIWeighting | None = None
+    """How the weights followed the Stokes I division; None if they did not."""
+    stokes_i_weight_alpha: float | None = None
+    """Spectral index of the field-wide power law the weights and the fallback
+    used; None if the weights did not follow the Stokes I division."""
 
 
 def _compute_global_params(
@@ -204,13 +214,20 @@ def noise_weights(
     pol_cube: da.Array,
     rmsynth_params: RMSynthParams,
     fdf_options: FDFOptions,
+    noise_weight_arr: NDArray[np.float64] | da.Array | None = None,
 ) -> NoiseWeights:
     """The error and weights the FDF noise follows from, aligned to `pol_cube`.
 
-    Lazy, so nothing is read until the noise is asked for.
+    `noise_weight_arr` is the Q/U inverse variance, when the transform weights
+    `weight_arr` are something else. Lazy, so nothing is read until the noise is
+    asked for.
     """
     aligned = _weight_arr_map_blocks_args(weight_arr, pol_cube)
-    complex_pol_error = error_from_weight(aligned[0] if aligned else weight_arr)
+    noise_source = weight_arr if noise_weight_arr is None else noise_weight_arr
+    noise_aligned = _weight_arr_map_blocks_args(noise_source, pol_cube)
+    complex_pol_error = error_from_weight(
+        noise_aligned[0] if noise_aligned else noise_source
+    )
     if np.ndim(complex_pol_error) == 1:
         # Spatial axes too, or it will not broadcast against the weight cube.
         complex_pol_error = broadcast_over_channels(complex_pol_error, pol_cube)
@@ -638,6 +655,45 @@ def _weight_arr_map_blocks_args(
     return (weight_da.rechunk({0: -1, 1: target.chunks[1], 2: target.chunks[2]}),)
 
 
+def _scale_channels(
+    weight_arr: NDArray[Any] | da.Array, factor: NDArray[np.float64]
+) -> NDArray[Any] | da.Array:
+    """`weight_arr` times a per-channel factor, in its own dtype."""
+    if weight_arr.ndim == 3:
+        factor = factor[:, np.newaxis, np.newaxis]
+    return (weight_arr * factor).astype(weight_arr.dtype)
+
+
+def _per_pixel_weights(
+    noise_weight_arr: NDArray[Any] | da.Array,
+    model_cube: da.Array,
+    ref_flux_map: da.Array,
+) -> da.Array:
+    """Inverse variance of Q/U once divided by each pixel's own model.
+
+    Dividing by `model / ref_flux` scales the error by its inverse, so the
+    weight gains its square.
+    """
+    shape = model_cube / ref_flux_map[np.newaxis].astype(model_cube.dtype)
+    if np.ndim(noise_weight_arr) == 1:
+        noise = np.asarray(noise_weight_arr)[:, np.newaxis, np.newaxis]
+        return cast("da.Array", noise * shape**2)
+    return da.asarray(noise_weight_arr).rechunk(model_cube.chunks) * shape**2
+
+
+def _stokes_i_weight_alpha(
+    fdf_options: FDFOptions,
+    stokes_i: da.Array,
+    stokes_i_error: NDArray[np.float64] | da.Array | None,
+    freq_arr_hz: NDArray[np.float64],
+    fit_options: StokesIFitOptions,
+) -> float:
+    """The field-wide spectral index, pinned or fitted to the summed Stokes I."""
+    if fdf_options.stokes_i_weight_alpha != "auto":
+        return float(fdf_options.stokes_i_weight_alpha)
+    return field_spectral_index(stokes_i, stokes_i_error, freq_arr_hz, fit_options)
+
+
 def rmsynth_3d(
     stokes_q: da.Array,
     stokes_u: da.Array,
@@ -659,6 +715,8 @@ def rmsynth_3d(
     stokes_i_model_floor_sigma: float = 0.01,
     stokes_i_robust_loss: RobustLoss = "cauchy",
     stokes_i_f_scale: float = 3.0,
+    stokes_i_weighting: StokesIWeighting | None = "global",
+    stokes_i_weight_alpha: float | Literal["auto"] = "auto",
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     per_pixel_rmsf: bool = False,
@@ -720,6 +778,20 @@ def rmsynth_3d(
             path only. Defaults to "cauchy".
         stokes_i_f_scale (float, optional): How far out, in sigma, before a
             channel is downweighted. Flat from 1 to 10. Defaults to 3.0.
+        stokes_i_weighting ("global", "per_pixel", None, optional): Dividing Q/U
+            by a Stokes I model divides their error too, so the inverse-variance
+            weights gain a factor of the model shape squared. "global" uses one
+            field-wide power law for every pixel: one RMSF and one reference
+            frequency for the whole map. "per_pixel" uses each pixel's own
+            model: the most sensitive, but the RMSF then varies with the
+            spectral index. Either way pixels without a kept fit fall back to the
+            field-wide power law rather than a flat model. None keeps 1/sigma^2
+            and the flat fallback. No effect without Stokes I or with
+            weight_type="uniform". Defaults to "global".
+        stokes_i_weight_alpha (float | "auto", optional): Spectral index of the
+            field-wide power law, or "auto" to fit it to the Stokes I (or model)
+            averaged over the field. Pin it to share one RMSF between fields.
+            Defaults to "auto".
         compute_model_error (bool, optional): Also compute a per-pixel model error
             cube via Monte-Carlo over the fit covariance, in the same fit pass.
             Logs a warning about the compute coupling when enabled. Defaults to False.
@@ -763,6 +835,8 @@ def rmsynth_3d(
         weight_type=weight_type,
         robust=robust,
         lam_sq_0_m2=lam_sq_0_m2,
+        stokes_i_weighting=stokes_i_weighting,
+        stokes_i_weight_alpha=stokes_i_weight_alpha,
     )
     fit_options = StokesIFitOptions(
         fit_order=fit_order,
@@ -777,6 +851,35 @@ def rmsynth_3d(
 
     if weight_arr is None:
         weight_arr = np.ones_like(freq_arr_hz)
+    stokes_i_source = stokes_i_model if stokes_i_model is not None else stokes_i
+    weighting = (
+        fdf_options.stokes_i_weighting
+        if stokes_i_source is not None and weight_type in NOISE_WEIGHT_TYPES
+        else None
+    )
+    noise_weight_arr = weight_arr
+    weight_alpha: float | None = None
+    if stokes_i_source is not None and weighting is not None:
+        weight_alpha = _stokes_i_weight_alpha(
+            fdf_options,
+            stokes_i_source,
+            stokes_i_error if stokes_i_model is None else None,
+            freq_arr_hz,
+            fit_options,
+        )
+        # The field-wide shape sets the weights up to the fit, so lam_sq_0_m2 and
+        # the Stokes I reference frequency follow them in either mode.
+        weight_arr = _scale_channels(
+            weight_arr, stokes_i_template(freq_arr_hz, weight_alpha) ** 2
+        )
+        fit_options = replace(fit_options, fallback_alpha=weight_alpha)
+    if weighting == "per_pixel" and not per_pixel_rmsf:
+        logger.info(
+            "stokes_i_weighting='per_pixel' weights each pixel by its own Stokes I "
+            "model, so the RMSF differs pixel to pixel; computing the per-pixel "
+            "RMSF cube, which RM-CLEAN needs to match the FDF it is cleaning."
+        )
+        per_pixel_rmsf = True
     weight_summary = _summarise_weight(weight_arr)
     if fdf_options.lam_sq_0_m2 == "per_pixel" and not per_pixel_rmsf:
         logger.info(
@@ -900,9 +1003,20 @@ def rmsynth_3d(
             ref_freq_hz=ref_freq_hz,
         )
 
+    if (
+        weighting == "per_pixel"
+        and stokes_i_model_cube is not None
+        and ref_flux_map is not None
+    ):
+        weight_arr = _per_pixel_weights(
+            noise_weight_arr, stokes_i_model_cube, ref_flux_map
+        )
+
     # After any Stokes I division, so the blanking folded in is the blanking the
     # FDF is actually built from.
-    weights = noise_weights(weight_arr, pol_cube, rmsynth_params, fdf_options)
+    weights = noise_weights(
+        weight_arr, pol_cube, rmsynth_params, fdf_options, noise_weight_arr
+    )
     if stokes_i_model_cube is not None and ref_flux_map is not None:
         theoretical_noise = fractional_theoretical_noise(
             weights=weights,
@@ -1004,6 +1118,8 @@ def rmsynth_3d(
         stokes_i_ref_freq_hz=(ref_freq_hz if stokes_i_model_cube is not None else None),
         rmsf_cube=rmsf_cube,
         per_pixel_rmsf=rmsf_recipe,
+        stokes_i_weighting=weighting,
+        stokes_i_weight_alpha=weight_alpha,
     )
 
 
@@ -1151,6 +1267,8 @@ def rmsynth_3d_from_fits(
     stokes_i_model_floor_sigma: float = 0.01,
     stokes_i_robust_loss: RobustLoss = "cauchy",
     stokes_i_f_scale: float = 3.0,
+    stokes_i_weighting: StokesIWeighting | None = "global",
+    stokes_i_weight_alpha: float | Literal["auto"] = "auto",
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     per_pixel_rmsf: bool = False,
@@ -1201,6 +1319,8 @@ def rmsynth_3d_from_fits(
         stokes_i_model_floor_sigma (float, optional): See `rmsynth_3d`. Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): See `rmsynth_3d`. Defaults to "cauchy".
         stokes_i_f_scale (float, optional): See `rmsynth_3d`. Defaults to 3.0.
+        stokes_i_weighting ("global", "per_pixel", None, optional): See `rmsynth_3d`. Defaults to "global".
+        stokes_i_weight_alpha (float | "auto", optional): See `rmsynth_3d`. Defaults to "auto".
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
         n_error_samples (int, optional): See `rmsynth_3d`. Defaults to 1000.
         per_pixel_rmsf (bool, optional): See `rmsynth_3d`. Defaults to False.
@@ -1292,12 +1412,7 @@ def rmsynth_3d_from_fits(
 
     # Noise-based types use 1/sigma^2 as their base (uniform_lsq/briggs then apply
     # the geometric lambda^2 factor); per-channel `uniform` deliberately ignores noise.
-    if weight_arr is None and weight_type in (
-        "variance",
-        "natural",
-        "uniform_lsq",
-        "briggs",
-    ):
+    if weight_arr is None and weight_type in NOISE_WEIGHT_TYPES:
         weight_arr = get_weight_arr_from_fits(
             stokes_q_file,
             stokes_u_file,
@@ -1350,6 +1465,8 @@ def rmsynth_3d_from_fits(
         stokes_i_model_floor_sigma=stokes_i_model_floor_sigma,
         stokes_i_robust_loss=stokes_i_robust_loss,
         stokes_i_f_scale=stokes_i_f_scale,
+        stokes_i_weighting=stokes_i_weighting,
+        stokes_i_weight_alpha=stokes_i_weight_alpha,
         compute_model_error=compute_model_error,
         n_error_samples=n_error_samples,
         per_pixel_rmsf=per_pixel_rmsf,

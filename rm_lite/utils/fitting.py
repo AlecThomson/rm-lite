@@ -9,6 +9,7 @@ from typing import Any, Literal, NamedTuple, Protocol, TypeAlias, cast
 import dask.array as da
 import numpy as np
 from astropy.stats import akaike_info_criterion_lsq
+from dask.base import compute
 from numpy.typing import ArrayLike, NDArray
 from scipy import optimize, stats
 
@@ -60,6 +61,8 @@ class StokesIFitOptions:
     model_floor_sigma: float = 0.01
     """Reject a model dipping this many sigma below the band-averaged Stokes I
     noise, falling back to a flat one (see `model_noise_floor`); 0 disables"""
+    fallback_alpha: float | None = None
+    """Spectral index of the model used where no fit is kept; None keeps a flat one"""
 
     def __post_init__(self) -> None:
         if self.fit_function not in ("log", "linear"):
@@ -847,6 +850,57 @@ def fit_stokes_cube(
     )
 
 
+def field_spectral_index(
+    stokes_i: da.Array,
+    stokes_i_error: NDArray[np.float64] | da.Array | None,
+    freq_arr_hz: NDArray[np.float64],
+    fit_options: StokesIFitOptions,
+) -> float:
+    """Power-law index of the field's mean Stokes I spectrum.
+
+    One pass over the cube: each channel is averaged over the pixels that have
+    it, and the errors are carried in quadrature. 0 if the fit gives nothing.
+    """
+    finite = da.isfinite(stokes_i)
+    total = da.sum(da.where(finite, stokes_i, 0.0), axis=(1, 2))
+    count = da.sum(finite, axis=(1, 2))
+    variance: da.Array | NDArray[np.float64] | None = None
+    if stokes_i_error is not None and np.ndim(stokes_i_error) == 3:
+        variance = da.sum(
+            da.where(finite, da.asarray(stokes_i_error) ** 2, 0.0), axis=(1, 2)
+        )
+    total, count, variance = compute(total, count, variance)
+    count = np.asarray(count, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mean = np.asarray(total, dtype=np.float64) / count
+        if variance is not None:
+            error = np.sqrt(np.asarray(variance, dtype=np.float64)) / count
+        elif stokes_i_error is not None:
+            error = np.asarray(stokes_i_error, dtype=np.float64) / np.sqrt(count)
+        else:
+            error = np.zeros_like(mean)
+    good = np.isfinite(mean) & np.isfinite(error)
+    if int(good.sum()) < 3:
+        logger.warning("Too few channels to fit the field's Stokes I; using alpha=0.")
+        return 0.0
+    fit = static_fit(
+        freq_arr_hz[good],
+        float(np.exp(np.mean(np.log(freq_arr_hz[good])))),
+        mean[good],
+        error[good],
+        fit_order=1,
+        fit_function="log",
+        robust_loss=fit_options.robust_loss,
+        f_scale=fit_options.f_scale,
+    )
+    alpha = float(np.asarray(fit.popt)[1])
+    if not np.isfinite(alpha):
+        logger.warning("The field's Stokes I gave no spectral index; using alpha=0.")
+        return 0.0
+    logger.info(f"Field-wide Stokes I spectral index for the weights: {alpha:.3f}")
+    return alpha
+
+
 def _pixel_stokes_i_error(
     err_block: NDArray[np.float64] | None,
     err_1d: NDArray[np.float64] | None,
@@ -1013,15 +1067,21 @@ def _write_error_planes(
     out[planes.alpha_error, y, x] = abs(a_high - a_low)
 
 
-def _write_flat_model(
-    out: NDArray[np.float64],
-    y: int,
-    x: int,
-    planes: BlockPlanes,
+def fallback_model(
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: float,
     mean_flux: float,
-) -> None:
-    """Flat model, so Q/U get no correction; alpha, order and terms stay NaN."""
-    out[planes.model, y, x] = flat_model_value(mean_flux)
+    alpha: float | None,
+) -> NDArray[np.float64]:
+    """Model to divide by where no fit is kept.
+
+    Flat at the mean without `alpha`, so Q/U get no correction. With it, a power
+    law of that index, 1 at the reference frequency: the amplitude cancels once
+    the FDF is rescaled, so it needs no flux.
+    """
+    if alpha is None:
+        return np.full_like(freq_arr_hz, flat_model_value(mean_flux))
+    return np.asarray((freq_arr_hz / ref_freq_hz) ** alpha, dtype=np.float64)
 
 
 RefFreqHz: TypeAlias = float | NDArray[np.float64]
@@ -1062,8 +1122,9 @@ def _fit_stokes_i_block(
     finite channels or SNR below `fit_options.snr_cut`) or whose model is
     unusable (non-finite anywhere, or below `fit_options.model_floor_sigma`
     times the pixel's band-averaged noise, see `model_is_usable`) falls back to
-    a flat model at its mean Stokes I, and one whose mean cannot divide either
-    (negative, or no finite Stokes I at all) to a flat 1.0, leaving Q/U
+    `fallback_model`: a power law of `fit_options.fallback_alpha` when that is
+    set, else a flat model at its mean Stokes I, and one whose mean cannot divide
+    either (negative, or no finite Stokes I at all) to a flat 1.0, leaving Q/U
     uncorrected. Either way the model is finite, so no pixel of the FDF is
     blanked by the Stokes I pass alone; alpha, order, terms and errors stay NaN.
     """
@@ -1086,11 +1147,14 @@ def _fit_stokes_i_block(
         for y, x, i_spec, e_spec, good, fit in _iter_pixel_fits(
             i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options
         ):
-            mean_flux = float(np.mean(i_spec[good])) if good.any() else np.nan
-            if fit is None:
-                _write_flat_model(out, y, x, planes, mean_flux)
-                continue
             pixel_ref_hz = ref_freq_for_pixel(ref_freq_hz, y, x)
+            mean_flux = float(np.mean(i_spec[good])) if good.any() else np.nan
+            fallback = fallback_model(
+                freq_arr_hz, pixel_ref_hz, mean_flux, fit_options.fallback_alpha
+            )
+            if fit is None:
+                out[planes.model, y, x] = fallback
+                continue
             model = fit.stokes_i_model_func(
                 freq_arr_hz / pixel_ref_hz, *np.asarray(fit.popt)
             )
@@ -1099,7 +1163,7 @@ def _fit_stokes_i_block(
             # flagged and Q/U did not, so all of it has to be usable.
             if not model_is_usable(model, noise_floor):
                 n_rejected += 1
-                _write_flat_model(out, y, x, planes, mean_flux)
+                out[planes.model, y, x] = fallback
                 continue
             _write_model_planes(
                 out, y, x, planes, fit, model, freq_arr_hz, pixel_ref_hz
@@ -1118,7 +1182,7 @@ def _fit_stokes_i_block(
     if n_rejected:
         logger.warning(
             f"{n_rejected} of {cy * cx} pixels in this chunk fitted an unusable "
-            "Stokes I model and fell back to a flat one (see "
+            "Stokes I model and fell back to `fallback_model` (see "
             "`rm_lite.utils.fitting.model_is_usable`). Expect this on pixels with "
             "no real Stokes I signal, i.e. when `stokes_i_snr_cut` is None, and "
             "on artefacts, whose Stokes I passes through zero."

@@ -40,6 +40,7 @@ from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
     check_snr_cut_has_error,
+    fallback_model,
     fit_fdf,
     fit_rmsf,
     fit_sampled_peak,
@@ -147,6 +148,20 @@ WeightType: TypeAlias = Literal[
 narrows the RMSF), `briggs` (robust interpolation between natural and
 uniform_lsq, needs `robust`). """
 
+StokesIWeighting: TypeAlias = Literal["global", "per_pixel"]
+""" How the noise-based weights follow the Stokes I division: `global` scales
+every pixel's weights by one field-wide spectrum, `per_pixel` by each pixel's own
+model. """
+
+NOISE_WEIGHT_TYPES: tuple[WeightType, ...] = (
+    "variance",
+    "natural",
+    "uniform_lsq",
+    "briggs",
+)
+""" Weight types built on the Q/U noise, so the only ones the Stokes I
+weighting can change. """
+
 
 @dataclass(frozen=True, kw_only=True, slots=True)
 class FDFOptions:
@@ -170,6 +185,12 @@ class FDFOptions:
     """ Reference lambda^2 in m^2, or "auto"/"per_pixel" to derive one. The
     Stokes I reference frequency is derived from it, so the phase and flux
     references always match. """
+    stokes_i_weighting: StokesIWeighting | None = "global"
+    """ Inverse-variance weights for the Q/U that were divided by Stokes I:
+    "global" or "per_pixel" (see `StokesIWeighting`); None keeps 1/sigma^2 """
+    stokes_i_weight_alpha: float | Literal["auto"] = "auto"
+    """ Spectral index of the field-wide spectrum, or "auto" to fit it to the
+    summed Stokes I """
 
     def __post_init__(self) -> None:
         if isinstance(self.lam_sq_0_m2, str):
@@ -190,6 +211,30 @@ class FDFOptions:
             raise ValueError(msg)
         if self.weight_type == "briggs" and self.robust is None:
             msg = "weight_type='briggs' requires a `robust` parameter."
+            raise ValueError(msg)
+        if self.stokes_i_weighting not in (*get_args(StokesIWeighting), None):
+            msg = (
+                f"stokes_i_weighting must be one of {get_args(StokesIWeighting)} "
+                f"or None, got {self.stokes_i_weighting!r}."
+            )
+            raise ValueError(msg)
+        if self.stokes_i_weighting == "per_pixel" and self.lam_sq_0_m2 == "per_pixel":
+            # A per-pixel reference is taken from the weights before the Stokes I
+            # fit, so it could not follow weights that come from the fit.
+            msg = (
+                "stokes_i_weighting='per_pixel' cannot be combined with "
+                "lam_sq_0_m2='per_pixel'."
+            )
+            raise ValueError(msg)
+        alpha = self.stokes_i_weight_alpha
+        bad_alpha = (
+            alpha != "auto" if isinstance(alpha, str) else not np.isfinite(alpha)
+        )
+        if bad_alpha:
+            msg = (
+                "stokes_i_weight_alpha must be 'auto' or a finite value, "
+                f"got {self.stokes_i_weight_alpha!r}."
+            )
             raise ValueError(msg)
         if self.d_phi_radm2 is None and self.n_samples is None:
             msg = "Either d_phi_radm2 or n_samples must be provided."
@@ -1153,21 +1198,35 @@ def create_fractional_spectra(
     noise_floor = model_noise_floor(
         stokes_data.stokes_i_error_arr[no_nan_idx], fit_options.model_floor_sigma
     )
+    kept_fit: FitResult | None = fit_result
     if not model_is_usable(model_good, noise_floor):
         logger.warning(
             "The fitted Stokes I model cannot safely divide Q/U (see "
-            "`rm_lite.utils.fitting.model_is_usable`); falling back to a flat "
-            "model at the mean Stokes I, so Q/U get no spectral correction."
+            "`rm_lite.utils.fitting.model_is_usable`); falling back to "
+            "`rm_lite.utils.fitting.fallback_model`."
         )
-        fit_result = flat_fit_result(
-            flat_model_value(float(np.mean(i_good))),
-            len(np.asarray(fit_result.popt)) - 1,
-            fit_options.fit_function,
-        )
+        kept_fit = None
+        if fit_options.fallback_alpha is None:
+            kept_fit = flat_fit_result(
+                flat_model_value(float(np.mean(i_good))),
+                len(np.asarray(fit_result.popt)) - 1,
+                fit_options.fit_function,
+            )
 
-    stokes_i_model_arr, stokes_i_model_error = sample_model_error(
-        fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples
-    )
+    if kept_fit is None:
+        stokes_i_model_arr = fallback_model(
+            stokes_data.freq_arr_hz,
+            ref_freq_hz,
+            float(np.mean(i_good)),
+            fit_options.fallback_alpha,
+        )
+        stokes_i_model_error = np.zeros_like(stokes_i_model_arr)
+    else:
+        stokes_i_model_arr, stokes_i_model_error = sample_model_error(
+            kept_fit,
+            stokes_data.freq_arr_hz / ref_freq_hz,
+            fit_options.n_error_samples,
+        )
     # The fit runs in double precision; taking the model back down to the data's
     # keeps dividing by it from promoting the fractional spectra.
     model_dtype = real_dtype(stokes_data.complex_pol_arr.dtype)
@@ -1203,7 +1262,7 @@ def create_fractional_spectra(
 
     return FractionalSpectra(
         stokes_data=fractional_stokes_data,
-        fit_result=fit_result,
+        fit_result=kept_fit,
         no_nan_idx=no_nan_idx,
     )
 
@@ -1575,6 +1634,14 @@ def apply_weight_type(
             )
 
     return np.where(_match_channel_mask(channel_mask, weight_arr), 0.0, weight_arr)
+
+
+def stokes_i_template(
+    freq_arr_hz: NDArray[np.float64], alpha: float
+) -> NDArray[np.float64]:
+    """Field-wide Stokes I spectrum `nu**alpha`, 1 at the band's log-centre."""
+    centre = np.exp(np.nanmean(np.log(freq_arr_hz)))
+    return np.asarray((freq_arr_hz / centre) ** alpha, dtype=np.float64)
 
 
 def weighted_lam_sq_0(

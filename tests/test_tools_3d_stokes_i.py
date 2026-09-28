@@ -958,7 +958,7 @@ def artefact_synth(feature_width: float, **kwargs: Any) -> RMSynth3DResults:
 
 def test_artefact_spectrum_does_not_blow_up_the_fdf() -> None:
     """The bug this floor is for: a runaway fit took a 2.5 mJy signal to 1e30."""
-    synth = artefact_synth(0.006)
+    synth = artefact_synth(0.006, stokes_i_weighting=None)
     fdf = np.asarray(synth.fdf_dirty_cube.compute())
     model = np.asarray(require(synth.stokes_i_model_cube).compute())
 
