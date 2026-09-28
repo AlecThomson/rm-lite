@@ -271,10 +271,14 @@ def test_pixels_below_the_snr_cut_are_blank_in_every_map(
         ).items()
     }
     (computed,) = compute(maps)
+    # The CLEAN model of a blank pixel has no components, so it is zero, not NaN.
     finite = [
-        k for k, v in computed.items() if np.isfinite(np.asarray(v)[0, ~fitted]).any()
+        k
+        for k, v in computed.items()
+        if not k.startswith("model.") and np.isfinite(np.asarray(v)[0, ~fitted]).any()
     ]
     assert not finite
+    assert not np.asarray(clean.model_fdf_cube.compute())[:, 0, ~fitted].any()
 
 
 def test_field_spectral_index_recovers_alpha() -> None:
