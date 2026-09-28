@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from dataclasses import replace
 from typing import Literal, NamedTuple, get_args
 
 import dask.array as da
@@ -240,8 +239,7 @@ def run_rmsynth(
         stokes_i_weight_alpha=stokes_i_weight_alpha,
     )
     # snr_cut=None: the 1D fractional fit has only one spectrum, so an SNR cut
-    # would just silently drop fractional polarisation rather than fall back to
-    # a flat per-pixel model as it does in 3D.
+    # would just silently drop its fractional polarisation.
     fit_options = StokesIFitOptions(
         fit_order=fit_order,
         fit_function=fit_function,
@@ -304,7 +302,6 @@ def _run_rmsynth(
         weight_error = noise_error / stokes_i_template(
             stokes_data.freq_arr_hz, weight_alpha
         )
-        fit_options = replace(fit_options, fallback_alpha=weight_alpha)
 
     rmsynth_params = compute_rmsynth_params(
         freq_arr_hz=stokes_data.freq_arr_hz,

@@ -211,15 +211,14 @@ def test_per_pixel_mode_gives_each_pixel_its_own_rmsf() -> None:
     assert widths[1] > widths[0] * 1.04
 
 
-@pytest.mark.parametrize("mode", [None, "global"])
-def test_fallback_keeps_pi_continuous_across_the_snr_cut(
+@pytest.mark.parametrize("mode", MODES)
+def test_pixels_below_the_snr_cut_are_blank_in_every_map(
     mode: StokesIWeighting | None,
 ) -> None:
-    """Pixels below the cut report the same fractional polarisation as those above."""
-    # Wide and steep, so a flat fallback is well off the value at the reference.
+    """Only corrected pixels reach the maps, and they report the right fraction."""
     freq_arr_hz = WIDE_FREQ_ARR_HZ
     ny, nx = 1, 12
-    frac_pol, sigma_i, alpha = 0.1, 1e-3, -4.0
+    frac_pol, sigma_i, alpha = 0.1, 1e-3, -2.0
     amplitude = np.geomspace(0.05, 1.0, nx)[np.newaxis, :]
     stokes_i = (freq_arr_hz / 1.2e9)[:, None, None] ** alpha * amplitude[None]
     stokes_i = stokes_i / np.median(stokes_i[:, 0, -1]) * 0.02
@@ -239,7 +238,7 @@ def test_fallback_keeps_pi_continuous_across_the_snr_cut(
         d_phi_radm2=0.5,
         phi_max_radm2=100.0,
         stokes_i_weighting=mode,
-        stokes_i_weight_alpha=alpha,
+        per_pixel_rmsf=True,
     )
     fitted = np.isfinite(np.asarray(synth.stokes_i_model_order_map))[0]
     assert fitted.any(), "no pixel is above the cut"
@@ -250,12 +249,32 @@ def test_fallback_keeps_pi_continuous_across_the_snr_cut(
         [np.interp(ref_hz, freq_arr_hz, stokes_i[:, 0, i]) for i in range(nx)]
     )
     peak_pi = np.abs(synth.fdf_dirty_cube.compute()).max(axis=0)[0]
-    frac = peak_pi / i_at_ref
-    np.testing.assert_allclose(frac[fitted], frac_pol, rtol=1e-3)
-    if mode is None:
-        assert np.all(np.abs(frac[~fitted] / frac_pol - 1) > 0.1)
-    else:
-        np.testing.assert_allclose(frac[~fitted], frac_pol, rtol=1e-3)
+    np.testing.assert_allclose(peak_pi[fitted] / i_at_ref[fitted], frac_pol, rtol=1e-3)
+
+    clean = rmclean3d_mod.run_rmclean_from_synth(synth, max_iter=10)
+    maps = {
+        f"{label}.{name}": value
+        for label, cube in (
+            ("dirty", synth.fdf_dirty_cube),
+            ("clean", clean.clean_fdf_cube),
+            ("model", clean.model_fdf_cube),
+        )
+        for name, value in rmclean3d_mod.faraday_maps(
+            cube,
+            phi_arr_radm2=synth.phi_arr_radm2,
+            fwhm_rmsf_radm2=synth.fwhm_rmsf_radm2,
+            fdf_units="integrated" if label == "model" else "per_rmsf",
+            lam_sq_0_m2=synth.lam_sq_0_m2,
+            lambda_sq_arr_m2=synth.lambda_sq_arr_m2,
+            fdf_noise=synth.theoretical_noise.fdf_error_noise,
+            moment_threshold=None,
+        ).items()
+    }
+    (computed,) = compute(maps)
+    finite = [
+        k for k, v in computed.items() if np.isfinite(np.asarray(v)[0, ~fitted]).any()
+    ]
+    assert not finite
 
 
 def test_field_spectral_index_recovers_alpha() -> None:

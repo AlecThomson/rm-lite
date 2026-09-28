@@ -599,6 +599,8 @@ def run_rmclean(
         multiscale_options=multiscale_options,
         log_level=log_level,
     )
+    # A blank pixel has no components rather than zero of them.
+    model = da.where(da.isnan(clean), np.nan, model)
 
     maps = faraday_maps(
         clean,

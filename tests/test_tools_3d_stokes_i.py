@@ -23,6 +23,7 @@ from rm_lite.utils.fitting import (
     pad_coefficients,
     polynomial,
     power_law,
+    stokes_i_snr,
 )
 from rm_lite.utils.synthesis import calc_faraday_peaks, freq_to_lambda2
 from scipy import optimize
@@ -391,8 +392,23 @@ def cube_with_faint_pixels(faint: list[tuple[int, int]], noise: float = 1e-3):
     return stokes_q, stokes_u, stokes_i_obs, err, freq_arr_hz
 
 
-def test_stokes_i_snr_cut_falls_back_to_flat_model(chunked: Callable[..., da.Array]):
-    """Pixels below the SNR cut fall back to a flat model, with alpha masked."""
+def assert_only_blanked(
+    result: RMSynth3DResults, blanked: list[tuple[int, int]]
+) -> None:
+    """The Stokes I model and FDF are NaN on `blanked` and finite elsewhere."""
+    model = require(result.stokes_i_model_cube).compute()
+    fdf = result.fdf_dirty_cube.compute()
+    mask = np.zeros(model.shape[1:], dtype=bool)
+    for j, i in blanked:
+        mask[j, i] = True
+    assert np.isnan(model[:, mask]).all()
+    assert np.isnan(fdf[:, mask]).all()
+    assert np.isfinite(model[:, ~mask]).all()
+    assert np.isfinite(fdf[:, ~mask]).all()
+
+
+def test_stokes_i_snr_cut_blanks_faint_pixels(chunked: Callable[..., da.Array]):
+    """Pixels below the SNR cut are blanked, not left uncorrected."""
     faint = [(0, 0), (2, 3)]
     q, u, i_obs, err, freq = cube_with_faint_pixels(faint)
     common: dict[str, Any] = {
@@ -409,23 +425,18 @@ def test_stokes_i_snr_cut_falls_back_to_flat_model(chunked: Callable[..., da.Arr
         stokes_i_snr_cut=5.0,
         **common,
     )
-    # The uncorrected reference FDF (no Stokes I at all).
-    raw = rmsynth_3d(chunked(q), chunked(u), freq, **common)
-
     model = require(result.stokes_i_model_cube).compute()
     alpha = require(result.stokes_i_alpha_map).compute()
     order = require(result.stokes_i_model_order_map).compute()
     fdf = result.fdf_dirty_cube.compute()
-    fdf_raw = raw.fdf_dirty_cube.compute()
 
     faint_mask = np.zeros(model.shape[1:], dtype=bool)
     for j, i in faint:
         faint_mask[j, i] = True
-        # Flat model: finite and constant across frequency.
-        assert np.isfinite(model[:, j, i]).all()
-        np.testing.assert_allclose(model[:, j, i], model[0, j, i], rtol=1e-10)
-        # No spectral correction -> FDF matches the uncorrected Q/U FDF.
-        np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
+    assert np.isnan(model[:, faint_mask]).all()
+    assert np.isnan(fdf[:, faint_mask]).all()
+    assert np.isfinite(model[:, ~faint_mask]).all()
+    assert np.isfinite(fdf[:, ~faint_mask]).all()
 
     # Masked (unfitted) pixels have NaN alpha/order; fitted pixels are finite.
     assert np.isnan(alpha[faint_mask]).all()
@@ -436,12 +447,10 @@ def test_stokes_i_snr_cut_falls_back_to_flat_model(chunked: Callable[..., da.Arr
     assert np.isfinite(fitted_order).all()
     assert (fitted_order >= 0).all()
     np.testing.assert_array_equal(fitted_order, np.round(fitted_order))
-    # The model cube is never blanked, even for masked pixels.
-    assert np.isfinite(model).all()
 
 
-def test_blank_stokes_i_error_keeps_the_fdf(chunked: Callable[..., da.Array]):
-    """A pixel with no usable Stokes I error falls back, it does not blank.
+def test_blank_stokes_i_error_blanks_the_fdf(chunked: Callable[..., da.Array]):
+    """A pixel with no usable Stokes I error has no SNR, so it is blanked.
 
     A linmos weight cube is zero outside the primary beam, so the error rm-lite
     derives from it is inf there while Q/U still hold real data.
@@ -463,22 +472,11 @@ def test_blank_stokes_i_error_keeps_the_fdf(chunked: Callable[..., da.Array]):
         stokes_i_snr_cut=5.0,
         **common,
     )
-    raw = rmsynth_3d(chunked(q), chunked(u), freq, **common)
-
-    model = require(result.stokes_i_model_cube).compute()
-    fdf = result.fdf_dirty_cube.compute()
-    fdf_raw = raw.fdf_dirty_cube.compute()
-    assert np.isfinite(model).all()
-    assert np.isfinite(fdf).all()
-    for j, i in ((1, 1), (2, 0)):
-        # Fallback #1: flat at the pixel's mean Stokes I, which cancels out of
-        # the FDF, leaving the uncorrected Q/U one.
-        np.testing.assert_allclose(model[:, j, i], model[0, j, i], rtol=1e-10)
-        np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
+    assert_only_blanked(result, [(1, 1), (2, 0)])
 
 
-def test_blank_stokes_i_keeps_the_fdf(chunked: Callable[..., da.Array]):
-    """A pixel with no Stokes I at all, or a negative mean, still gets an FDF."""
+def test_blank_stokes_i_blanks_the_fdf(chunked: Callable[..., da.Array]):
+    """A pixel with no Stokes I at all, or a negative one, is blanked."""
     q, u, i_obs, err, freq = cube_with_faint_pixels([])
     i_obs[:, 0, 2] = np.nan
     i_obs[:, 1, 3] *= -1.0
@@ -496,17 +494,7 @@ def test_blank_stokes_i_keeps_the_fdf(chunked: Callable[..., da.Array]):
         stokes_i_snr_cut=5.0,
         **common,
     )
-    raw = rmsynth_3d(chunked(q), chunked(u), freq, **common)
-
-    model = require(result.stokes_i_model_cube).compute()
-    fdf = result.fdf_dirty_cube.compute()
-    fdf_raw = raw.fdf_dirty_cube.compute()
-    assert np.isfinite(model).all()
-    assert np.isfinite(fdf).all()
-    for j, i in ((0, 2), (1, 3)):
-        # Fallback #2: no mean to divide by, so no Stokes I correction at all.
-        np.testing.assert_allclose(model[:, j, i], 1.0, rtol=1e-10)
-        np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
+    assert_only_blanked(result, [(0, 2), (1, 3)])
 
 
 def test_model_must_be_usable_outside_the_fitted_channels(
@@ -534,12 +522,8 @@ def test_model_must_be_usable_outside_the_fitted_channels(
         weight_type="uniform",
         phi_max_radm2=200.0,
     )
-    model = require(result.stokes_i_model_cube).compute()[:, 1, 2]
-    assert model_is_usable(model, model_noise_floor(err[:, 1, 2], 0.01))
-    # Rejected, so the flat fallback: constant, and alpha/order stay NaN.
-    np.testing.assert_allclose(model, model[0], rtol=1e-10)
+    assert_only_blanked(result, [(1, 2)])
     assert np.isnan(require(result.stokes_i_model_order_map).compute()[1, 2])
-    assert np.isfinite(result.fdf_dirty_cube.compute()).all()
 
 
 def runaway_stokes_i_pixel() -> tuple[
@@ -593,8 +577,8 @@ def test_runaway_fit_is_rejected_before_it_overflows_float32() -> None:
     assert not model_is_usable(model, floor)
 
 
-def test_runaway_fit_keeps_the_pixel(chunked: Callable[..., da.Array]) -> None:
-    """The runaway pixel falls back instead of blanking, end to end."""
+def test_runaway_fit_blanks_only_its_pixel(chunked: Callable[..., da.Array]) -> None:
+    """The runaway pixel is blanked, end to end, and its neighbour is kept."""
     freq_arr_hz, i_spec, err, _ = runaway_stokes_i_pixel()
     n_freq = freq_arr_hz.size
     lambda_sq_arr_m2 = freq_to_lambda2(freq_arr_hz)
@@ -628,37 +612,34 @@ def test_runaway_fit_keeps_the_pixel(chunked: Callable[..., da.Array]) -> None:
         phi_max_radm2=200.0,
         weight_type="uniform",
     )
-    model = require(result.stokes_i_model_cube).compute()
+    assert_only_blanked(result, [(0, 1)])
     ref_flux = require(result.stokes_i_ref_flux_map).compute()
-    fdf = result.fdf_dirty_cube.compute()
-    # The model stays inside float32, so the reference flux is a number and the
-    # FDF is not multiplied by NaN.
-    assert np.isfinite(model).all()
-    with np.errstate(over="ignore"):
-        assert np.isfinite(np.asarray(model, dtype=np.float32)).all()
-    assert np.isfinite(fdf).all()
-    peaks = calc_faraday_peaks(fdf, result.phi_arr_radm2, result.fwhm_rmsf_radm2)
-    assert np.isfinite(peaks.peak_pi).all()
-    # Rejected, so the flat fallback: constant, and no reported reference flux.
-    np.testing.assert_allclose(model[:, 0, 1], model[0, 0, 1], rtol=1e-10)
     assert np.isnan(ref_flux[0, 1])
+    fdf = result.fdf_dirty_cube.compute()
+    peaks = calc_faraday_peaks(fdf, result.phi_arr_radm2, result.fwhm_rmsf_radm2)
+    assert np.isfinite(peaks.peak_pi[0, 0])
 
 
 def test_stokes_i_snr_cut_zero_fits_all_pixels(chunked: Callable[..., da.Array]):
     """A cut of 0 disables the SNR gate, so even faint pixels are fitted."""
-    faint = [(0, 0)]
-    q, u, i_obs, err, freq = cube_with_faint_pixels(faint)
-    result = rmsynth_3d(
-        chunked(q),
-        chunked(u),
-        freq,
-        stokes_i=chunked(i_obs),
-        stokes_i_error=chunked(err),
-        stokes_i_snr_cut=0.0,
-        d_phi_radm2=D_PHI_RADM2,
-        weight_type="uniform",
-    )
-    assert np.isfinite(require(result.stokes_i_model_cube).compute()).all()
+    q, u, i_obs, err, freq = cube_with_faint_pixels([(0, 0)], noise=6e-4)
+    assert stokes_i_snr(i_obs[:, 0, 0], err[:, 0, 0]) < 5.0
+
+    def order_at_faint_pixel(cut: float) -> float:
+        result = rmsynth_3d(
+            chunked(q),
+            chunked(u),
+            freq,
+            stokes_i=chunked(i_obs),
+            stokes_i_error=chunked(err),
+            stokes_i_snr_cut=cut,
+            d_phi_radm2=D_PHI_RADM2,
+            weight_type="uniform",
+        )
+        return float(require(result.stokes_i_model_order_map).compute()[0, 0])
+
+    assert np.isnan(order_at_faint_pixel(5.0))
+    assert np.isfinite(order_at_faint_pixel(0.0))
 
 
 def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
@@ -890,13 +871,11 @@ def test_model_is_usable_rejects_models_that_cannot_divide(
     assert not model_is_usable(model)
 
 
-def test_unusable_model_takes_the_flat_fallback() -> None:
-    """A rejected pixel gets a flat model at its mean I, so no correction."""
+def test_unusable_model_blanks_the_pixel() -> None:
+    """A rejected pixel is blanked rather than left uncorrected."""
     rng = np.random.default_rng(20260823)
     n_freq, ny, nx = 125, 4, 6
     freq = np.arange(800e6, 1800e6, 8e6)[:n_freq]
-    # Just enough offset that every pixel mean stays positive, so the flat
-    # fallback is well defined, while the fits themselves still run away.
     stokes_i = rng.normal(0, 0.05, (n_freq, ny, nx)) + 0.01
     q = rng.normal(0, 0.02, (n_freq, ny, nx))
     u = rng.normal(0, 0.02, (n_freq, ny, nx))
@@ -911,16 +890,11 @@ def test_unusable_model_takes_the_flat_fallback() -> None:
         d_phi_radm2=D_PHI_RADM2,
         weight_type="uniform",
     )
-    model = np.asarray(require(result.stokes_i_model_cube).compute())
-    fdf = np.asarray(result.fdf_dirty_cube.compute())
-    assert np.all(np.isfinite(model))
-    assert np.all(model > 0)
-    assert np.all(np.isfinite(fdf))
-
-    mean_i = stokes_i.mean(axis=0)
-    flat = np.isclose(model.max(axis=0), model.min(axis=0))
-    assert flat.any(), "no pixel took the fallback, so it is not under test"
-    assert np.allclose(model[:, flat], mean_i[flat])
+    order = np.asarray(require(result.stokes_i_model_order_map).compute())
+    rejected = np.isnan(order)
+    assert rejected.any(), "no fit was rejected, so it is not under test"
+    assert rejected.sum() < rejected.size, "no fit was kept to compare against"
+    assert_only_blanked(result, list(zip(*np.nonzero(rejected), strict=True)))
 
 
 def artefact_cube(
@@ -956,14 +930,10 @@ def artefact_synth(feature_width: float, **kwargs: Any) -> RMSynth3DResults:
     )
 
 
-def test_artefact_spectrum_does_not_blow_up_the_fdf() -> None:
+def test_artefact_spectrum_is_blanked_not_blown_up() -> None:
     """The bug this floor is for: a runaway fit took a 2.5 mJy signal to 1e30."""
     synth = artefact_synth(0.006, stokes_i_weighting=None)
-    fdf = np.asarray(synth.fdf_dirty_cube.compute())
-    model = np.asarray(require(synth.stokes_i_model_cube).compute())
-
-    assert np.isclose(model.max(), model.min()), "fit was kept, so no floor applied"
-    assert np.abs(fdf).max() == pytest.approx(0.0025, rel=0.1)
+    assert np.isnan(np.asarray(synth.fdf_dirty_cube.compute())).all()
 
 
 def test_unfloored_artefact_fit_carries_its_amplification_into_the_noise() -> None:
@@ -973,11 +943,19 @@ def test_unfloored_artefact_fit_carries_its_amplification_into_the_noise() -> No
     noise = np.asarray(synth.theoretical_noise.fdf_error_noise).item()
     assert peak / 0.0025 > 1e3, "not the runaway regime this is testing"
 
-    floored = artefact_synth(0.006)
-    floored_peak = np.abs(np.asarray(floored.fdf_dirty_cube.compute())).max()
-    floored_noise = np.asarray(floored.theoretical_noise.fdf_error_noise).item()
+    freq, stokes_q, stokes_u, _ = artefact_cube(0.006)
+    raw = rmsynth_3d(
+        da.from_array(stokes_q, chunks=stokes_q.shape),
+        da.from_array(stokes_u, chunks=stokes_u.shape),
+        freq,
+        weight_arr=np.full(freq.size, 1.0 / 1e-4**2),
+        d_phi_radm2=D_PHI_RADM2,
+        phi_max_radm2=1000.0,
+    )
+    raw_peak = np.abs(np.asarray(raw.fdf_dirty_cube.compute())).max()
+    raw_noise = float(cast("float", raw.theoretical_noise.fdf_error_noise))
     # The noise outruns the peak, which averages the amplified channels down.
-    assert peak / noise < floored_peak / floored_noise
+    assert peak / noise < raw_peak / raw_noise
 
 
 def test_flat_stokes_i_leaves_the_theoretical_noise_alone() -> None:
@@ -1009,8 +987,8 @@ def test_flat_stokes_i_leaves_the_theoretical_noise_alone() -> None:
     )
 
 
-def test_pixel_with_no_finite_channels_gets_no_correction() -> None:
-    """A fully blanked Stokes I pixel goes uncorrected, and leaves its neighbours alone."""
+def test_pixel_with_no_finite_channels_is_blanked() -> None:
+    """A fully blanked Stokes I pixel is blanked, and leaves its neighbours alone."""
     rng = np.random.default_rng(20260824)
     n_freq, ny, nx = 64, 2, 3
     freq = np.linspace(800e6, 1800e6, n_freq)
@@ -1030,15 +1008,9 @@ def test_pixel_with_no_finite_channels_gets_no_correction() -> None:
         d_phi_radm2=D_PHI_RADM2,
         weight_type="uniform",
     )
-    model = np.asarray(require(result.stokes_i_model_cube).compute())
+    assert_only_blanked(result, [(0, 0)])
     alpha = np.asarray(require(result.stokes_i_alpha_map).compute())
-
-    # No mean to divide by, so a model of 1: Q/U pass through untouched.
-    np.testing.assert_allclose(model[:, 0, 0], 1.0)
     assert np.isnan(alpha[0, 0])
-    # Every other pixel is untouched by its blank neighbour.
-    assert np.isfinite(model[:, 0, 1:]).all()
-    assert np.isfinite(model[:, 1, :]).all()
     assert np.isfinite(alpha[0, 1:]).all()
     assert np.isfinite(alpha[1, :]).all()
 
@@ -1451,7 +1423,7 @@ def test_flat_model_value(mean_flux: float, expected: float) -> None:
 def test_unfitted_pixels_report_no_reference_flux(
     chunked: Callable[..., da.Array],
 ) -> None:
-    """A pixel below the SNR cut gets no flux to divide by."""
+    """A pixel below the SNR cut reports no flux."""
     faint = [(0, 0), (2, 3)]
     q, u, i_obs, err, freq = cube_with_faint_pixels(faint)
     common: dict[str, Any] = {
@@ -1468,11 +1440,7 @@ def test_unfitted_pixels_report_no_reference_flux(
         stokes_i_snr_cut=5.0,
         **common,
     )
-    raw = rmsynth_3d(chunked(q), chunked(u), freq, **common)
-
     ref_flux = np.asarray(require(result.stokes_i_ref_flux_map).compute())
-    fdf = result.fdf_dirty_cube.compute()
-    fdf_raw = raw.fdf_dirty_cube.compute()
 
     faint_mask = np.zeros(ref_flux.shape, dtype=bool)
     for j, i in faint:
@@ -1480,14 +1448,9 @@ def test_unfitted_pixels_report_no_reference_flux(
     assert np.isnan(ref_flux[faint_mask]).all()
     assert np.isfinite(ref_flux[~faint_mask]).all()
     assert (ref_flux[~faint_mask] > 0).all()
-    # The rescale still used the flat value, so the FDF is uncorrected, not NaN.
-    for j, i in faint:
-        np.testing.assert_allclose(fdf[:, j, i], fdf_raw[:, j, i], atol=1e-8)
 
 
-def test_negative_stokes_i_reports_no_flux_and_a_finite_fdf(
-    chunked: Callable[..., da.Array],
-) -> None:
+def test_negative_stokes_i_is_blanked(chunked: Callable[..., da.Array]) -> None:
     """A negative pixel must not export its mean as a flux."""
     cube = make_stokes_i_cube(ny=2, nx=2, alpha=-0.8, noise=0.01)
     stokes_i = cube.stokes_i.copy()
@@ -1503,11 +1466,6 @@ def test_negative_stokes_i_reports_no_flux_and_a_finite_fdf(
         weight_type="uniform",
     )
     ref_flux = np.asarray(require(result.stokes_i_ref_flux_map).compute())
-    model = np.asarray(require(result.stokes_i_model_cube).compute())
-    fdf = result.fdf_dirty_cube.compute()
-
     assert np.isnan(ref_flux[0, 0])
     assert np.isfinite(ref_flux[1:]).all()
-    # Nothing divides by zero or a negative, so the FDF stays finite everywhere.
-    assert (model > 0).all()
-    assert np.isfinite(fdf).all()
+    assert_only_blanked(result, [(0, 0)])

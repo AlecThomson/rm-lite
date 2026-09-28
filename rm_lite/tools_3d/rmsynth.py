@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, cast, get_args
@@ -127,7 +126,7 @@ class RMSynth3DResults(NamedTuple):
     """Per-pixel fitted polynomial order of the Stokes I model (`len(popt) - 1`),
     shape (ny, nx). With a negative `fit_order` this is the AIC-chosen order per
     pixel; with a fixed order it is uniform on fitted pixels. NaN where a pixel
-    was not fitted (below the SNR cut or flat fallback). None unless a Stokes I
+    was not fitted (below the SNR cut or an unusable model). None unless a Stokes I
     cube was fitted (a supplied model has no fitted order)."""
     stokes_i_coeff_cube: da.Array | None = None
     """Fitted Stokes I model terms, shape (n_coeff, ny, nx) with
@@ -168,8 +167,8 @@ class RMSynth3DResults(NamedTuple):
     stokes_i_weighting: StokesIWeighting | None = None
     """How the weights followed the Stokes I division; None if they did not."""
     stokes_i_weight_alpha: float | None = None
-    """Spectral index of the field-wide power law the weights and the fallback
-    used; None if the weights did not follow the Stokes I division."""
+    """Spectral index of the field-wide power law the weights used; None if the
+    weights did not follow the Stokes I division."""
 
 
 def _compute_global_params(
@@ -763,14 +762,16 @@ def rmsynth_3d(
         fit_function ("log", "linear", optional): "log" = power law, "linear" =
             polynomial. Defaults to "log".
         stokes_i_snr_cut (float | None, optional): Below this frequency-averaged
-            Stokes I SNR a pixel falls back to a flat model (no spectral
-            correction, not blanked). None fits every pixel. Fit path only.
+            Stokes I SNR a pixel is not fitted, and its FDF is NaN rather than
+            left uncorrected beside corrected pixels. None fits every pixel.
+            Fit path only.
             Needs a Stokes I error to measure SNR against, so raises unless one
             of `stokes_i_error` / `estimate_stokes_i_noise` is given.
             Defaults to 5.0.
         stokes_i_model_floor_sigma (float, optional): Reject a fitted model
             dipping this many sigma below the pixel's band-averaged Stokes I
-            noise, falling back to a flat one. 0 disables. Defaults to 0.01.
+            noise, blanking the pixel as below the SNR cut. 0 disables.
+            Defaults to 0.01.
         stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
             the Stokes I model, so one bad channel cannot drag the fit. "cauchy"
             (default), "soft_l1" or "huber"; "linear" is plain least squares.
@@ -784,10 +785,8 @@ def rmsynth_3d(
             field-wide power law for every pixel: one RMSF and one reference
             frequency for the whole map. "per_pixel" uses each pixel's own
             model: the most sensitive, but the RMSF then varies with the
-            spectral index. Either way pixels without a kept fit fall back to the
-            field-wide power law rather than a flat model. None keeps 1/sigma^2
-            and the flat fallback. No effect without Stokes I or with
-            weight_type="uniform". Defaults to "global".
+            spectral index. None keeps 1/sigma^2. No effect without Stokes I or
+            with weight_type="uniform". Defaults to "global".
         stokes_i_weight_alpha (float | "auto", optional): Spectral index of the
             field-wide power law, or "auto" to fit it to the Stokes I (or model)
             averaged over the field. Pin it to share one RMSF between fields.
@@ -872,7 +871,6 @@ def rmsynth_3d(
         weight_arr = _scale_channels(
             weight_arr, stokes_i_template(freq_arr_hz, weight_alpha) ** 2
         )
-        fit_options = replace(fit_options, fallback_alpha=weight_alpha)
     if weighting == "per_pixel" and not per_pixel_rmsf:
         logger.info(
             "stokes_i_weighting='per_pixel' weights each pixel by its own Stokes I "
@@ -1044,11 +1042,6 @@ def rmsynth_3d(
         fdf_dirty_cube = fdf_dirty_cube * ref_flux_map[np.newaxis, :, :].astype(
             real_dtype(fdf_dtype)
         )
-
-    if ref_flux_map is not None and order_map is not None:
-        # The rescale needs the flat fallback value, but on unfitted pixels
-        # it is a mean of noise, so don't report it as a flux.
-        ref_flux_map = da.where(da.isfinite(order_map), ref_flux_map, np.nan)
 
     if per_pixel_ref:
         # Synthesised at the cube's reference, then moved to each pixel's own.

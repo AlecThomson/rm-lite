@@ -40,7 +40,6 @@ from rm_lite.utils.fitting import (
     FitResult,
     StokesIFitOptions,
     check_snr_cut_has_error,
-    fallback_model,
     fit_fdf,
     fit_rmsf,
     fit_sampled_peak,
@@ -429,8 +428,9 @@ def calc_faraday_moments(
     Returns:
         FaradayMoments: mom0 (flux units), mom1 (rad/m^2), mom2
             (dispersion, rad/m^2), the polarised intensity and angle at the
-            reference lambda^2, and an error for each. Spectra with no valid
-            amplitude have mom0 = 0 and mom1 = mom2 = NaN.
+            reference lambda^2, and an error for each. Spectra with no
+            amplitude above the threshold have mom0 = 0 and mom1 = mom2 = NaN;
+            blank (all-NaN) spectra are NaN throughout.
 
     Errors propagate `fdf_error` to first order, scaled by
     `fwhm_rmsf_radm2 / delta_phi` since the noise is correlated over one RMSF
@@ -445,6 +445,7 @@ def calc_faraday_moments(
         raise ValueError(msg)
 
     phi_arr_radm2 = validate_phi_arr(complex_fdf_arr, phi_arr_radm2, axis)
+    blank = ~np.any(np.isfinite(complex_fdf_arr), axis=axis)
 
     if debias:
         if auto_threshold_sigma is not None:
@@ -584,7 +585,7 @@ def calc_faraday_moments(
         np.where(pi_lam_sq_0 > 0, pi_lam_sq_0, np.nan), pi_lam_sq_0_error
     )
 
-    return FaradayMoments(
+    moments = FaradayMoments(
         mom0=mom0,
         mom0_debias=mom0_debias,
         mom0_error=mom0_error,
@@ -598,6 +599,8 @@ def calc_faraday_moments(
         pa_lam_sq_0=pa_lam_sq_0,
         pa_lam_sq_0_error=pa_lam_sq_0_error,
     )
+    # A blank spectrum has no FDF at all, unlike one the threshold emptied.
+    return FaradayMoments(*(np.where(blank, np.nan, m) for m in moments))
 
 
 def debias_polarised_intensity(
@@ -1191,35 +1194,21 @@ def create_fractional_spectra(
     noise_floor = model_noise_floor(
         stokes_data.stokes_i_error_arr[no_nan_idx], fit_options.model_floor_sigma
     )
-    kept_fit: FitResult | None = fit_result
     if not model_is_usable(model_good, noise_floor):
         logger.warning(
             "The fitted Stokes I model cannot safely divide Q/U (see "
-            "`rm_lite.utils.fitting.model_is_usable`); falling back to "
-            "`rm_lite.utils.fitting.fallback_model`."
+            "`rm_lite.utils.fitting.model_is_usable`); falling back to a flat "
+            "model at the mean Stokes I, so Q/U get no spectral correction."
         )
-        kept_fit = None
-        if fit_options.fallback_alpha is None:
-            kept_fit = flat_fit_result(
-                flat_model_value(float(np.mean(i_good))),
-                len(np.asarray(fit_result.popt)) - 1,
-                fit_options.fit_function,
-            )
+        fit_result = flat_fit_result(
+            flat_model_value(float(np.mean(i_good))),
+            len(np.asarray(fit_result.popt)) - 1,
+            fit_options.fit_function,
+        )
 
-    if kept_fit is None:
-        stokes_i_model_arr = fallback_model(
-            stokes_data.freq_arr_hz,
-            ref_freq_hz,
-            float(np.mean(i_good)),
-            fit_options.fallback_alpha,
-        )
-        stokes_i_model_error = np.zeros_like(stokes_i_model_arr)
-    else:
-        stokes_i_model_arr, stokes_i_model_error = sample_model_error(
-            kept_fit,
-            stokes_data.freq_arr_hz / ref_freq_hz,
-            fit_options.n_error_samples,
-        )
+    stokes_i_model_arr, stokes_i_model_error = sample_model_error(
+        fit_result, stokes_data.freq_arr_hz / ref_freq_hz, fit_options.n_error_samples
+    )
     # The fit runs in double precision; taking the model back down to the data's
     # keeps dividing by it from promoting the fractional spectra.
     model_dtype = real_dtype(stokes_data.complex_pol_arr.dtype)
@@ -1255,7 +1244,7 @@ def create_fractional_spectra(
 
     return FractionalSpectra(
         stokes_data=fractional_stokes_data,
-        fit_result=kept_fit,
+        fit_result=fit_result,
         no_nan_idx=no_nan_idx,
     )
 
@@ -1303,10 +1292,15 @@ def compute_theoretical_noise(
     """
     weight_arr = zero_nonfinite(weight_arr)
     complex_pol_error_flagged = zero_nonfinite(complex_pol_error)
+    # A blank pixel has no weight; divide it by 1 and blank it after, since a
+    # complex divide by NaN warns and `np.errstate` never reaches a dask worker.
+    weight_sum = np.sum(weight_arr, axis=0)
+    has_weight = weight_sum > 0
     fdf_complex_noise = np.sqrt(
         np.nansum(weight_arr**2 * complex_pol_error_flagged**2, axis=0)
-        / (np.sum(weight_arr, axis=0)) ** 2
+        / np.where(has_weight, weight_sum, 1.0) ** 2
     )
+    fdf_complex_noise = np.where(has_weight, fdf_complex_noise, np.nan + 1j * np.nan)
 
     fdf_error_noise = (fdf_complex_noise.real + fdf_complex_noise.imag) / 2
     return TheoreticalNoise(
