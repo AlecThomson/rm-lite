@@ -140,9 +140,11 @@ FDFUnits: TypeAlias = Literal["per_rmsf", "integrated"]
 """Amplitude units of an FDF: RM-synthesis output is per RMSF, a CLEAN component
 model is already integrated (each component is a flux)."""
 
-WeightType: TypeAlias = Literal[
-    "variance", "natural", "uniform", "uniform_lsq", "briggs"
-]
+NoiseWeightType: TypeAlias = Literal["variance", "natural", "uniform_lsq", "briggs"]
+""" Weight types built on the Q/U noise, so the only ones the Stokes I
+weighting can change. """
+
+WeightType: TypeAlias = Literal[NoiseWeightType, "uniform"]
 """ RM-synthesis weighting: `variance`/`natural` (1/sigma^2, equivalent),
 `uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
 narrows the RMSF), `briggs` (robust interpolation between natural and
@@ -152,15 +154,6 @@ StokesIWeighting: TypeAlias = Literal["global", "per_pixel"]
 """ How the noise-based weights follow the Stokes I division: `global` scales
 every pixel's weights by one field-wide spectrum, `per_pixel` by each pixel's own
 model. """
-
-NOISE_WEIGHT_TYPES: tuple[WeightType, ...] = (
-    "variance",
-    "natural",
-    "uniform_lsq",
-    "briggs",
-)
-""" Weight types built on the Q/U noise, so the only ones the Stokes I
-weighting can change. """
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)

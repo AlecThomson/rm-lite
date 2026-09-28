@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, get_args
 
 import dask.array as da
 import numpy as np
@@ -22,9 +22,9 @@ from rm_lite.utils.fitting import (
 )
 from rm_lite.utils.logging import logger
 from rm_lite.utils.synthesis import (
-    NOISE_WEIGHT_TYPES,
     FDFOptions,
     LamSq0Mode,
+    NoiseWeightType,
     StokesData,
     StokesIWeighting,
     WeightType,
@@ -294,7 +294,7 @@ def _run_rmsynth(
 
     weighting = (
         fdf_options.stokes_i_weighting
-        if not ignore_stokes_i and fdf_options.weight_type in NOISE_WEIGHT_TYPES
+        if not ignore_stokes_i and fdf_options.weight_type in get_args(NoiseWeightType)
         else None
     )
     noise_error = stokes_data.complex_pol_error

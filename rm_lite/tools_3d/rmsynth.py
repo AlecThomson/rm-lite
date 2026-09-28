@@ -6,7 +6,7 @@ import logging
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast, get_args
 
 import dask.array as da
 import numpy as np
@@ -43,9 +43,9 @@ from rm_lite.utils.fitting import (
 )
 from rm_lite.utils.logging import logger, quiet_logs
 from rm_lite.utils.synthesis import (
-    NOISE_WEIGHT_TYPES,
     FDFOptions,
     LamSq0Mode,
+    NoiseWeightType,
     RMSynthParams,
     StokesIWeighting,
     TheoreticalNoise,
@@ -854,7 +854,7 @@ def rmsynth_3d(
     stokes_i_source = stokes_i_model if stokes_i_model is not None else stokes_i
     weighting = (
         fdf_options.stokes_i_weighting
-        if stokes_i_source is not None and weight_type in NOISE_WEIGHT_TYPES
+        if stokes_i_source is not None and weight_type in get_args(NoiseWeightType)
         else None
     )
     noise_weight_arr = weight_arr
@@ -1412,7 +1412,7 @@ def rmsynth_3d_from_fits(
 
     # Noise-based types use 1/sigma^2 as their base (uniform_lsq/briggs then apply
     # the geometric lambda^2 factor); per-channel `uniform` deliberately ignores noise.
-    if weight_arr is None and weight_type in NOISE_WEIGHT_TYPES:
+    if weight_arr is None and weight_type in get_args(NoiseWeightType):
         weight_arr = get_weight_arr_from_fits(
             stokes_q_file,
             stokes_u_file,
