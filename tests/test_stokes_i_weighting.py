@@ -81,17 +81,20 @@ def broadcast(spectrum: NDArray[np.float64], ny: int, nx: int) -> NDArray[np.flo
 
 
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "match"),
     [
-        {"stokes_i_weighting": "bogus"},
-        {"stokes_i_weighting": "per_pixel", "lam_sq_0_m2": "per_pixel"},
-        {"stokes_i_weight_alpha": np.nan},
-        {"stokes_i_weight_alpha": "bogus"},
+        ({"stokes_i_weighting": "bogus"}, "stokes_i_weighting must be one of"),
+        (
+            {"stokes_i_weighting": "per_pixel", "lam_sq_0_m2": "per_pixel"},
+            "cannot be combined",
+        ),
+        ({"stokes_i_weight_alpha": np.nan}, "stokes_i_weight_alpha must be"),
+        ({"stokes_i_weight_alpha": "bogus"}, "stokes_i_weight_alpha must be"),
     ],
 )
-def test_options_reject_bad_values(kwargs: dict[str, Any]) -> None:
+def test_options_reject_bad_values(kwargs: dict[str, Any], match: str) -> None:
     """Unknown modes, a non-finite alpha and per-pixel weights with a per-pixel reference raise."""
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=match):
         FDFOptions(n_samples=10.0, **kwargs)
 
 
@@ -131,7 +134,7 @@ def test_weights_raise_snr_where_the_model_falls() -> None:
 
 def test_global_weights_set_lam_sq_0() -> None:
     """The reference lambda^2 is the weighted mean of lambda^2 under template^2/sigma^2."""
-    model = broadcast(FREQ_ARR_HZ ** -1.5, 2, 2)
+    model = broadcast(FREQ_ARR_HZ**-1.5, 2, 2)
     sigma = np.linspace(0.01, 0.03, FREQ_ARR_HZ.size)
     stokes_q, stokes_u = thin_source(model, frac_pol=0.1, sigma=0.0)
     chunks = (-1, 2, 2)
@@ -174,7 +177,9 @@ def test_global_mode_gives_every_pixel_one_rmsf_and_fdf_shape() -> None:
         stokes_i_weight_alpha=-1.5,
         per_pixel_rmsf=True,
     )
-    rmsf = np.asarray(synth.rmsf_cube.compute()) if synth.rmsf_cube is not None else None
+    rmsf = (
+        np.asarray(synth.rmsf_cube.compute()) if synth.rmsf_cube is not None else None
+    )
     assert rmsf is not None
     np.testing.assert_allclose(rmsf[:, 0, 0], rmsf[:, 0, 1], atol=1e-10)
 
@@ -237,7 +242,8 @@ def test_fallback_keeps_pi_continuous_across_the_snr_cut(
         stokes_i_weight_alpha=alpha,
     )
     fitted = np.isfinite(np.asarray(synth.stokes_i_model_order_map))[0]
-    assert fitted.any() and (~fitted).any(), "the cut does not split the row"
+    assert fitted.any(), "no pixel is above the cut"
+    assert (~fitted).any(), "no pixel is below the cut"
 
     ref_hz = float(lambda2_to_freq(synth.lam_sq_0_m2))
     i_at_ref = np.array(
