@@ -139,13 +139,20 @@ FDFUnits: TypeAlias = Literal["per_rmsf", "integrated"]
 """Amplitude units of an FDF: RM-synthesis output is per RMSF, a CLEAN component
 model is already integrated (each component is a flux)."""
 
-WeightType: TypeAlias = Literal[
-    "variance", "natural", "uniform", "uniform_lsq", "briggs"
-]
+NoiseWeightType: TypeAlias = Literal["variance", "natural", "uniform_lsq", "briggs"]
+""" Weight types built on the Q/U noise, so the only ones the Stokes I
+weighting can change. """
+
+WeightType: TypeAlias = Literal[NoiseWeightType, "uniform"]
 """ RM-synthesis weighting: `variance`/`natural` (1/sigma^2, equivalent),
 `uniform` (equal per channel), `uniform_lsq` (equal per lambda^2 interval,
 narrows the RMSF), `briggs` (robust interpolation between natural and
 uniform_lsq, needs `robust`). """
+
+StokesIWeighting: TypeAlias = Literal["global", "per_pixel"]
+""" How the noise-based weights follow the Stokes I division: `global` scales
+every pixel's weights by one field-wide spectrum, `per_pixel` by each pixel's own
+model. """
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -170,6 +177,12 @@ class FDFOptions:
     """ Reference lambda^2 in m^2, or "auto"/"per_pixel" to derive one. The
     Stokes I reference frequency is derived from it, so the phase and flux
     references always match. """
+    stokes_i_weighting: StokesIWeighting | None = "global"
+    """ Inverse-variance weights for the Q/U that were divided by Stokes I:
+    "global" or "per_pixel" (see `StokesIWeighting`); None keeps 1/sigma^2 """
+    stokes_i_weight_alpha: float | Literal["auto"] = "auto"
+    """ Spectral index of the field-wide spectrum, or "auto" to fit it to the
+    summed Stokes I """
 
     def __post_init__(self) -> None:
         if isinstance(self.lam_sq_0_m2, str):
@@ -190,6 +203,30 @@ class FDFOptions:
             raise ValueError(msg)
         if self.weight_type == "briggs" and self.robust is None:
             msg = "weight_type='briggs' requires a `robust` parameter."
+            raise ValueError(msg)
+        if self.stokes_i_weighting not in (*get_args(StokesIWeighting), None):
+            msg = (
+                f"stokes_i_weighting must be one of {get_args(StokesIWeighting)} "
+                f"or None, got {self.stokes_i_weighting!r}."
+            )
+            raise ValueError(msg)
+        if self.stokes_i_weighting == "per_pixel" and self.lam_sq_0_m2 == "per_pixel":
+            # A per-pixel reference is taken from the weights before the Stokes I
+            # fit, so it could not follow weights that come from the fit.
+            msg = (
+                "stokes_i_weighting='per_pixel' cannot be combined with "
+                "lam_sq_0_m2='per_pixel'."
+            )
+            raise ValueError(msg)
+        alpha = self.stokes_i_weight_alpha
+        bad_alpha = (
+            alpha != "auto" if isinstance(alpha, str) else not np.isfinite(alpha)
+        )
+        if bad_alpha:
+            msg = (
+                "stokes_i_weight_alpha must be 'auto' or a finite value, "
+                f"got {self.stokes_i_weight_alpha!r}."
+            )
             raise ValueError(msg)
         if self.d_phi_radm2 is None and self.n_samples is None:
             msg = "Either d_phi_radm2 or n_samples must be provided."
@@ -391,8 +428,9 @@ def calc_faraday_moments(
     Returns:
         FaradayMoments: mom0 (flux units), mom1 (rad/m^2), mom2
             (dispersion, rad/m^2), the polarised intensity and angle at the
-            reference lambda^2, and an error for each. Spectra with no valid
-            amplitude have mom0 = 0 and mom1 = mom2 = NaN.
+            reference lambda^2, and an error for each. Spectra with no
+            amplitude above the threshold have mom0 = 0 and mom1 = mom2 = NaN;
+            blank (all-NaN) spectra are NaN throughout.
 
     Errors propagate `fdf_error` to first order, scaled by
     `fwhm_rmsf_radm2 / delta_phi` since the noise is correlated over one RMSF
@@ -407,6 +445,7 @@ def calc_faraday_moments(
         raise ValueError(msg)
 
     phi_arr_radm2 = validate_phi_arr(complex_fdf_arr, phi_arr_radm2, axis)
+    blank = ~np.any(np.isfinite(complex_fdf_arr), axis=axis)
 
     if debias:
         if auto_threshold_sigma is not None:
@@ -546,7 +585,7 @@ def calc_faraday_moments(
         np.where(pi_lam_sq_0 > 0, pi_lam_sq_0, np.nan), pi_lam_sq_0_error
     )
 
-    return FaradayMoments(
+    moments = FaradayMoments(
         mom0=mom0,
         mom0_debias=mom0_debias,
         mom0_error=mom0_error,
@@ -560,6 +599,8 @@ def calc_faraday_moments(
         pa_lam_sq_0=pa_lam_sq_0,
         pa_lam_sq_0_error=pa_lam_sq_0_error,
     )
+    # A blank spectrum has no FDF at all, unlike one the threshold emptied.
+    return FaradayMoments(*(np.where(blank, np.nan, m) for m in moments))
 
 
 def debias_polarised_intensity(
@@ -1251,10 +1292,15 @@ def compute_theoretical_noise(
     """
     weight_arr = zero_nonfinite(weight_arr)
     complex_pol_error_flagged = zero_nonfinite(complex_pol_error)
+    # A blank pixel has no weight; divide it by 1 and blank it after, since a
+    # complex divide by NaN warns and `np.errstate` never reaches a dask worker.
+    weight_sum = np.sum(weight_arr, axis=0)
+    has_weight = weight_sum > 0
     fdf_complex_noise = np.sqrt(
         np.nansum(weight_arr**2 * complex_pol_error_flagged**2, axis=0)
-        / (np.sum(weight_arr, axis=0)) ** 2
+        / np.where(has_weight, weight_sum, 1.0) ** 2
     )
+    fdf_complex_noise = np.where(has_weight, fdf_complex_noise, np.nan + 1j * np.nan)
 
     fdf_error_noise = (fdf_complex_noise.real + fdf_complex_noise.imag) / 2
     return TheoreticalNoise(
@@ -1575,6 +1621,14 @@ def apply_weight_type(
             )
 
     return np.where(_match_channel_mask(channel_mask, weight_arr), 0.0, weight_arr)
+
+
+def stokes_i_template(
+    freq_arr_hz: NDArray[np.float64], alpha: float
+) -> NDArray[np.float64]:
+    """Field-wide Stokes I spectrum `nu**alpha`, 1 at the band's log-centre."""
+    centre = np.exp(np.nanmean(np.log(freq_arr_hz)))
+    return np.asarray((freq_arr_hz / centre) ** alpha, dtype=np.float64)
 
 
 def weighted_lam_sq_0(

@@ -398,14 +398,18 @@ def test_stokes_i_terms_describe_the_fitted_model():
     terms = results.stokes_i_terms
     assert terms["term_name"].to_list() == ["flux", "alpha"]
     assert terms["fit_function"].to_list() == ["log", "log"]
+    # ref_freq_hz is the FDF's own reference frequency.
+    term_ref_freq = float(terms["ref_freq_hz"][0])
+    fdf_ref_freq = float(results.fdf_parameters["ref_freq_hz"][0])
+    assert np.isclose(term_ref_freq, fdf_ref_freq, rtol=1e-6)
     # A pure power law, so the fitted flux and index are the input ones.
-    np.testing.assert_allclose(terms["term_value"].to_numpy(), [flux, alpha], rtol=1e-4)
+    expected_flux = flux * (term_ref_freq / ref_freq_hz) ** alpha
+    np.testing.assert_allclose(
+        terms["term_value"].to_numpy(), [expected_flux, alpha], rtol=1e-4
+    )
     assert (terms["term_error"].to_numpy() >= 0).all()
 
-    # ref_freq_hz is the FDF's own reference frequency, and the terms rebuild the
-    # model the fractional spectra were divided by.
-    term_ref_freq = float(terms["ref_freq_hz"][0])
-    assert np.isclose(term_ref_freq, ref_freq_hz, rtol=1e-6)
+    # The terms rebuild the model the fractional spectra were divided by.
     rebuilt = power_law(len(terms) - 1)(
         freq_arr_hz / term_ref_freq, *terms["term_value"].to_numpy()
     )
