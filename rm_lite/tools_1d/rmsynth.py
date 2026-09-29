@@ -155,6 +155,7 @@ def run_rmsynth(
     lam_sq_0_m2: float | LamSq0Mode = "auto",
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real: bool = False,
+    rmsf_fitting_size: float = 1.25,
     fit_function: Literal["log", "linear"] = "log",
     fit_order: int = 2,
     stokes_i_robust_loss: RobustLoss = "cauchy",
@@ -188,6 +189,7 @@ def run_rmsynth(
         robust (float | None, optional): Briggs robust parameter, required for weight_type='briggs'. Defaults to None.
         do_fit_rmsf (bool, optional): Fit the RMSF main lobe. Defaults to False.
         do_fit_rmsf_real (bool, optional): Fit only the real part of the RMSF. Defaults to False.
+        rmsf_fitting_size (float, optional): RMSF fit window in analytic FWHMs, cut at the main lobe's first minimum. Defaults to 1.25.
         fit_function ("log" | "linear", optional): RMSF fit function. Defaults to "log".
         fit_order (int, optional): Polynomial fit order. Defaults to 2. Negative values will iterate until the fit is good.
         stokes_i_robust_loss (RobustLoss, optional): Downweight channels far from
@@ -235,6 +237,7 @@ def run_rmsynth(
         lam_sq_0_m2=lam_sq_0_m2,
         do_fit_rmsf=do_fit_rmsf,
         do_fit_rmsf_real=do_fit_rmsf_real,
+        rmsf_fitting_size=rmsf_fitting_size,
         stokes_i_weighting=stokes_i_weighting,
         stokes_i_weight_alpha=stokes_i_weight_alpha,
     )
@@ -379,6 +382,7 @@ def _run_rmsynth(
         mask_arr=~no_nan_idx,
         do_fit_rmsf=fdf_options.do_fit_rmsf,
         do_fit_rmsf_real=fdf_options.do_fit_rmsf_real,
+        rmsf_fitting_size=fdf_options.rmsf_fitting_size,
     )
 
     tock = time.time()

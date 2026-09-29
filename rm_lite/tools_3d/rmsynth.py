@@ -55,7 +55,6 @@ from rm_lite.utils.synthesis import (
     compute_theoretical_noise,
     derotate_to,
     error_from_weight,
-    get_fwhm_rmsf,
     get_rmsf_nufft,
     lam_sq_0_per_pixel,
     lambda2_to_freq,
@@ -81,7 +80,8 @@ class RMSynth3DResults(NamedTuple):
     phi_double_arr_radm2: NDArray[np.float64]
     """Double-length Faraday depth values in rad/m^2, for the RMSF."""
     fwhm_rmsf_radm2: float
-    """Analytic RMSF FWHM (per-pixel fitting is not performed in 3D)."""
+    """RMSF FWHM, one value for the cube: analytic, or fitted to `rmsf_arr` with
+    `do_fit_rmsf`."""
     lambda_sq_arr_m2: NDArray[np.float64]
     """Channel wavelength^2 values in m^2."""
     lam_sq_0_m2: float
@@ -309,11 +309,12 @@ def _summarise_weight(
 
 def _shared_rmsf(
     rmsynth_params: RMSynthParams,
+    fdf_options: FDFOptions,
     nthreads: int,
     log_level: int,
     dtype: np.dtype[np.complexfloating],
-) -> NDArray[np.complexfloating]:
-    """The single RMSF the whole cube shares, from the per-channel weights.
+) -> tuple[NDArray[np.complexfloating], float]:
+    """The single RMSF the whole cube shares, from the per-channel weights, and its FWHM.
 
     Every pixel whose flagged channels are the cube's flagged channels has this
     RMSF, and for the noise-based `weight_type`s a channel blank across the cube
@@ -328,12 +329,16 @@ def _shared_rmsf(
                 real_dtype(dtype), copy=False
             ),
             lam_sq_0_m2=rmsynth_params.lam_sq_0_m2,
-            do_fit_rmsf=False,
+            do_fit_rmsf=fdf_options.do_fit_rmsf,
+            rmsf_fitting_size=fdf_options.rmsf_fitting_size,
             nthreads=nthreads,
         )
     # RMSFResults.rmsf_cube is annotated NDArray[np.float64] but is complex at
     # runtime (built from a finufft complex output).
-    return np.asarray(rmsf_result.rmsf_cube, dtype=dtype)
+    return (
+        np.asarray(rmsf_result.rmsf_cube, dtype=dtype),
+        float(rmsf_result.fwhm_rmsf_arr),
+    )
 
 
 def target_chunk_mb_for_worker(
@@ -719,6 +724,8 @@ def rmsynth_3d(
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     per_pixel_rmsf: bool = False,
+    do_fit_rmsf: bool = False,
+    rmsf_fitting_size: float = 1.25,
     nufft_nthreads: int = 1,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     log_level: int = logging.WARNING,
@@ -802,6 +809,12 @@ def rmsynth_3d(
             per-channel `weight_arr` does not already say so; otherwise every
             pixel of it holds `rmsf_arr` at `2 * n_phi_double / n_phi` times the
             cost of the FDF cube. Defaults to False.
+        do_fit_rmsf (bool, optional): Take `fwhm_rmsf_radm2` from a Gaussian fit
+            to the main lobe of `rmsf_arr` rather than the analytic
+            3.8 / (lambda^2 range). One fit for the cube, per-pixel RMSFs or not.
+            Defaults to False.
+        rmsf_fitting_size (float, optional): Fit window in analytic FWHMs, cut
+            at the main lobe's first minimum. Defaults to 1.25.
         nufft_nthreads (int, optional): finufft OpenMP threads per chunk. Defaults
             to 1 so dask parallelises across chunks without oversubscribing finufft's
             own threads (the fast config on many chunks). Set to 0 (finufft default,
@@ -834,6 +847,8 @@ def rmsynth_3d(
         weight_type=weight_type,
         robust=robust,
         lam_sq_0_m2=lam_sq_0_m2,
+        do_fit_rmsf=do_fit_rmsf,
+        rmsf_fitting_size=rmsf_fitting_size,
         stokes_i_weighting=stokes_i_weighting,
         stokes_i_weight_alpha=stokes_i_weight_alpha,
     )
@@ -911,9 +926,10 @@ def rmsynth_3d(
     n_phi = rmsynth_params.phi_arr_radm2.shape[0]
     phi_double_arr_radm2 = make_double_phi_arr(rmsynth_params.phi_arr_radm2)
     n_phi_double = phi_double_arr_radm2.shape[0]
-    fwhm_rmsf_radm2 = get_fwhm_rmsf(rmsynth_params.lambda_sq_arr_m2).fwhm_rmsf_radm2
     fdf_dtype = complex_dtype(np.result_type(stokes_q.dtype, stokes_u.dtype))
-    rmsf_arr = _shared_rmsf(rmsynth_params, nufft_nthreads, log_level, fdf_dtype)
+    rmsf_arr, fwhm_rmsf_radm2 = _shared_rmsf(
+        rmsynth_params, fdf_options, nufft_nthreads, log_level, fdf_dtype
+    )
 
     stokes_q, stokes_u = _match_chunks_to_fdf(
         stokes_q, stokes_u, n_phi_double, fdf_dtype, target_chunk_mb
@@ -1265,6 +1281,8 @@ def rmsynth_3d_from_fits(
     compute_model_error: bool = False,
     n_error_samples: int = 1000,
     per_pixel_rmsf: bool = False,
+    do_fit_rmsf: bool = False,
+    rmsf_fitting_size: float = 1.25,
     nufft_nthreads: int = 1,
     target_chunk_mb: float = DEFAULT_TARGET_CHUNK_MB,
     convert_to_zarr: bool = False,
@@ -1317,6 +1335,8 @@ def rmsynth_3d_from_fits(
         compute_model_error (bool, optional): See `rmsynth_3d`. Defaults to False.
         n_error_samples (int, optional): See `rmsynth_3d`. Defaults to 1000.
         per_pixel_rmsf (bool, optional): See `rmsynth_3d`. Defaults to False.
+        do_fit_rmsf (bool, optional): See `rmsynth_3d`. Defaults to False.
+        rmsf_fitting_size (float, optional): See `rmsynth_3d`. Defaults to 1.25.
         nufft_nthreads (int, optional): See `rmsynth_3d`. Defaults to 1.
         target_chunk_mb (float, optional): Target per-chunk memory footprint
             in MB, see `read_cube_dask`. Defaults to 256.
@@ -1463,6 +1483,8 @@ def rmsynth_3d_from_fits(
         compute_model_error=compute_model_error,
         n_error_samples=n_error_samples,
         per_pixel_rmsf=per_pixel_rmsf,
+        do_fit_rmsf=do_fit_rmsf,
+        rmsf_fitting_size=rmsf_fitting_size,
         nufft_nthreads=nufft_nthreads,
         target_chunk_mb=target_chunk_mb,
         log_level=log_level,

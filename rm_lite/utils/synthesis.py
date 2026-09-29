@@ -173,6 +173,8 @@ class FDFOptions:
     """ Fit RMSF """
     do_fit_rmsf_real: bool = False
     """ Fit real part of the RMSF """
+    rmsf_fitting_size: float = 1.25
+    """ Width of the RMSF fit window in analytic FWHMs, cut at the main lobe """
     lam_sq_0_m2: float | LamSq0Mode = "auto"
     """ Reference lambda^2 in m^2, or "auto"/"per_pixel" to derive one. The
     Stokes I reference frequency is derived from it, so the phase and flux
@@ -231,7 +233,7 @@ class FDFOptions:
         if self.d_phi_radm2 is None and self.n_samples is None:
             msg = "Either d_phi_radm2 or n_samples must be provided."
             raise ValueError(msg)
-        for name in ("phi_max_radm2", "d_phi_radm2", "n_samples"):
+        for name in ("phi_max_radm2", "d_phi_radm2", "n_samples", "rmsf_fitting_size"):
             value = getattr(self, name)
             if value is not None and value <= 0:
                 msg = f"{name} must be positive, got {value}."
@@ -2090,6 +2092,7 @@ def get_rmsf_nufft(
     mask_arr: NDArray[np.bool_] | None = None,
     do_fit_rmsf: bool = False,
     do_fit_rmsf_real: bool = False,
+    rmsf_fitting_size: float = 1.25,
     eps: float = 1e-6,
     nthreads: int = 0,
     reuse_rmsf: bool = True,
@@ -2108,6 +2111,8 @@ def get_rmsf_nufft(
         mask_arr (Optional[NDArray[np.float64]], optional): Mask array. Defaults to None.
         do_fit_rmsf (bool, optional): Fit the RMSF with a Gaussian. Defaults to False.
         do_fit_rmsf_real (bool, optional): Fit the *real* part of the. Defaults to False.
+        rmsf_fitting_size (float, optional): Fit window in analytic FWHMs, cut at
+            the main lobe's first minimum. Defaults to 1.25.
         eps (float, optional): NUFFT tolerance. Defaults to 1e-6.
         nthreads (int, optional): finufft OpenMP threads. 0 uses finufft's default
             (all cores). Set to 1 when parallelising across chunks with dask, to
@@ -2282,6 +2287,7 @@ def get_rmsf_nufft(
                     ),
                     phi_double_arr_radm2=phi_double_arr_radm2,
                     fwhm_rmsf_radm2=fwhm_rmsf_radm2,
+                    fitting_size=rmsf_fitting_size,
                 )
                 fit_status = True
             except Exception as e:
