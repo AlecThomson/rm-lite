@@ -184,7 +184,7 @@ def fit_rmsf(
     """
     rmsf_to_fit_arr = rmsf_to_fit_arr / np.nanmax(rmsf_to_fit_arr)
     d_phi = phi_double_arr_radm2[1] - phi_double_arr_radm2[0]
-    peak = int(np.nanargmax(rmsf_to_fit_arr))
+    peak = int(np.argmax(rmsf_to_fit_arr))
     half_width = max(1, round(fitting_size * fwhm_rmsf_radm2 / 2 / d_phi))
     # Samples from the peak outwards until the profile stops falling.
     right = rmsf_to_fit_arr[peak:]
