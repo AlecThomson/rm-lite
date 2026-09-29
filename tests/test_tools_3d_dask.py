@@ -1827,6 +1827,35 @@ def test_shared_rmsf_is_what_the_per_pixel_cube_holds(
             np.testing.assert_allclose(cube[:, j, i], default.rmsf_arr, atol=1e-12)
 
 
+def test_rmsynth_3d_fits_the_shared_rmsf(
+    synthetic_cube: SyntheticCube, chunked: Callable[..., da.Array]
+):
+    """`do_fit_rmsf` swaps the analytic FWHM for a fit to `rmsf_arr`."""
+    q_dask = chunked(synthetic_cube.stokes_q, 3, 4)
+    u_dask = chunked(synthetic_cube.stokes_u, 3, 4)
+    analytic = rmsynth_3d(
+        q_dask, u_dask, synthetic_cube.freq_arr_hz, d_phi_radm2=D_PHI_RADM2
+    )
+    fitted = rmsynth_3d(
+        q_dask,
+        u_dask,
+        synthetic_cube.freq_arr_hz,
+        d_phi_radm2=D_PHI_RADM2,
+        do_fit_rmsf=True,
+        rmsf_fitting_size=1.0,
+    )
+    lambda_sq_range = np.ptp(analytic.lambda_sq_arr_m2)
+    assert analytic.fwhm_rmsf_radm2 == 3.8 / lambda_sq_range
+    expected = fitting_mod.fit_rmsf(
+        np.abs(fitted.rmsf_arr),
+        fitted.phi_double_arr_radm2,
+        analytic.fwhm_rmsf_radm2,
+        fitting_size=1.0,
+    )
+    assert np.isclose(fitted.fwhm_rmsf_radm2, expected)
+    assert fitted.fwhm_rmsf_radm2 != analytic.fwhm_rmsf_radm2
+
+
 @pytest.mark.filterwarnings("ignore: All channels masked")
 def test_rmclean_agrees_between_shared_and_per_pixel_rmsf(
     synthetic_cube: SyntheticCube,

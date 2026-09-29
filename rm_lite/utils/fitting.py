@@ -172,25 +172,32 @@ def fit_rmsf(
     rmsf_to_fit_arr: NDArray[np.float64],
     phi_double_arr_radm2: NDArray[np.float64],
     fwhm_rmsf_radm2: float,
+    fitting_size: float = 1.25,
 ) -> float:
-    rmsf_to_fit_arr = rmsf_to_fit_arr.copy()
-    rmsf_to_fit_arr /= np.nanmax(rmsf_to_fit_arr)
+    """FWHM of a Gaussian fitted to the RMSF main lobe.
+
+    The fit spans `fitting_size` times `fwhm_rmsf_radm2`, cut short at the
+    lobe's first minimum on each side so no sidelobe gets in (cf. WSClean's
+    `-beam-fitting-size`).
+    """
+    rmsf_to_fit_arr = rmsf_to_fit_arr / np.nanmax(rmsf_to_fit_arr)
     d_phi = phi_double_arr_radm2[1] - phi_double_arr_radm2[0]
-    mask = np.zeros_like(phi_double_arr_radm2, dtype=bool)
-    mask[np.argmax(rmsf_to_fit_arr)] = True
-    sigma_rmsf_radm2 = fwhm_to_sigma(fwhm_rmsf_radm2)
-    sigma_rmsf_arr_pix = sigma_rmsf_radm2 / d_phi
-    for i in np.where(mask)[0]:
-        # Clamped: a negative start wraps and empties the slice, leaving one
-        # point and a fit with no degrees of freedom.
-        start = max(0, int(i - sigma_rmsf_arr_pix / 2))
-        end = int(i + sigma_rmsf_arr_pix / 2)
-        mask[start : end + 2] = True
+    peak = int(np.nanargmax(rmsf_to_fit_arr))
+    half_width = max(1, round(fitting_size * fwhm_rmsf_radm2 / 2 / d_phi))
+    # Samples from the peak outwards until the profile stops falling.
+    right = rmsf_to_fit_arr[peak:]
+    left = rmsf_to_fit_arr[peak::-1]
+    to_right_min = int(np.argmax(np.append(np.diff(right) >= 0, True)))
+    to_left_min = int(np.argmax(np.append(np.diff(left) >= 0, True)))
+    # Stop one short of each minimum, but keep a point either side of the peak.
+    start = peak - max(1, min(half_width, to_left_min - 1))
+    end = peak + max(1, min(half_width, to_right_min - 1))
+    start, end = max(0, start), min(len(rmsf_to_fit_arr) - 1, end)
     popt, _ = optimize.curve_fit(
         unit_centred_gaussian,
-        phi_double_arr_radm2[mask],
-        rmsf_to_fit_arr[mask],
-        p0=[sigma_rmsf_radm2],
+        phi_double_arr_radm2[start : end + 1],
+        rmsf_to_fit_arr[start : end + 1],
+        p0=[fwhm_to_sigma(fwhm_rmsf_radm2)],
         bounds=([0], [np.inf]),
     )
     return sigma_to_fwhm(popt[0])

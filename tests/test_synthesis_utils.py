@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from rm_lite.utils.clean import restore_model
 from rm_lite.utils.fitting import (
     StokesIFitOptions,
+    fit_rmsf,
     fit_sampled_peak,
     gaussian,
     gaussian_integrand,
@@ -1098,3 +1099,54 @@ def test_moments_reject_unknown_units():
     fdf = gaussian(phi_arr, 1.0, 0.0, fwhm=20.0).astype(np.complex128)
     with pytest.raises(ValueError, match="fdf_units"):
         calc_faraday_moments(fdf, phi_arr, 20.0, fdf_units="jy/beam")  # type: ignore[arg-type]
+
+
+def _abs_rmsf(
+    lambda_sq_arr_m2: NDArray[np.float64],
+    weight_arr: NDArray[np.float64],
+    fwhm_radm2: float,
+    n_samples: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """|RMSF| on a double phi grid, summed directly."""
+    weight_arr = weight_arr / weight_arr.sum()
+    lam_sq_0_m2 = np.sum(weight_arr * lambda_sq_arr_m2)
+    phi_double = make_double_phi_arr(
+        make_phi_arr(20 * fwhm_radm2, fwhm_radm2 / n_samples)
+    )
+    kernel = np.exp(-2j * np.outer(phi_double, lambda_sq_arr_m2 - lam_sq_0_m2))
+    return phi_double, np.abs(kernel @ weight_arr)
+
+
+def test_fit_rmsf_is_exact_on_a_gaussian_rmsf():
+    # Gaussian weights in lambda^2 give exp(-2 phi^2 s^2): sigma_phi = 1 / (2 s).
+    lambda_sq = np.linspace(0.01, 0.2, 4000)
+    s = 0.02
+    weights = np.exp(-0.5 * ((lambda_sq - 0.1) / s) ** 2)
+    expected = 2 * np.sqrt(2 * np.log(2)) / (2 * s)
+    phi_double, rmsf = _abs_rmsf(lambda_sq, weights, expected, 10)
+    assert np.isclose(fit_rmsf(rmsf, phi_double, expected), expected, rtol=1e-3)
+
+
+@pytest.mark.parametrize("n_samples", [10, 100])
+def test_fit_rmsf_matches_the_boxcar_half_max(n_samples: int):
+    # A boxcar in lambda^2 gives |sinc|, which is at half max 3.791 / range apart.
+    lambda_sq = np.linspace(0.01, 0.2, 4000)
+    expected = 3.791 / np.ptp(lambda_sq)
+    phi_double, rmsf = _abs_rmsf(
+        lambda_sq, np.ones_like(lambda_sq), expected, n_samples
+    )
+    assert np.isclose(fit_rmsf(rmsf, phi_double, expected), expected, rtol=0.015)
+
+
+def test_fit_rmsf_window_stops_at_the_main_lobe():
+    # Past the first minimum the window cannot grow, so no sidelobe gets in.
+    lambda_sq = np.linspace(0.01, 0.2, 4000)
+    fwhm = 3.8 / np.ptp(lambda_sq)
+    phi_double, rmsf = _abs_rmsf(lambda_sq, np.ones_like(lambda_sq), fwhm, 10)
+    at_lobe = fit_rmsf(rmsf, phi_double, fwhm, fitting_size=2.0)
+    assert fit_rmsf(rmsf, phi_double, fwhm, fitting_size=50.0) == at_lobe
+
+
+def test_rmsf_fitting_size_must_be_positive():
+    with pytest.raises(ValueError, match="rmsf_fitting_size"):
+        FDFOptions(rmsf_fitting_size=0)
