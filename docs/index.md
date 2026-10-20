@@ -1,4 +1,4 @@
-# cutout-fits
+# RM-lite
 
 ```{toctree}
 :maxdepth: 2

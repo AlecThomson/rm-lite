@@ -3,7 +3,7 @@
 Mini reimplementation of RM-Tools. Fully typed Python, mypy strict on
 `rm_lite/*`.
 
-## Data (this repo only — overrides global caution)
+## Data (this repo only, overrides global caution)
 
 Root FITS cutouts and `scratch.ipynb` are dev/test fixtures, not SKA proprietary
 data. OK to read/run directly. Same for anything under `tests/` or
@@ -11,7 +11,7 @@ data. OK to read/run directly. Same for anything under `tests/` or
 
 ## Environment
 
-Use `uv run` for everything — never call `pytest`/`mypy`/`ruff` bare.
+Use `uv run` for everything. Never call `pytest`/`mypy`/`ruff` bare.
 
 ## Verify gate (run before calling any task done)
 
@@ -53,9 +53,17 @@ every code change.
   Results object. Reach for a class-with-methods only when state genuinely needs
   to persist across calls.
 
-## Documentation must be self-checking
+## Example notebooks demonstrate, they don't test
 
-Example notebooks and docs (`docs/`, `*.ipynb`) must actually run and assert
-their own claims, not just show code with commentary. If a doc says "returns X",
-it should execute and check X, not describe it and move on. Stale docs are worse
-than no docs.
+Notebooks in `docs/examples/` are for a radio astronomer reading them, not a
+test suite. They must run (CI executes them), and a claim in the prose should be
+backed by a plot or a printed number the reader can see. Do not stack up
+assertions or tolerance checks: those belong in `tests/`. At most, assert the
+one headline result a notebook exists to show. Never print "OK" for something
+that was not checked.
+
+Write the prose like the original 1D/2D notebooks: short, plain sentences in the
+terms an astronomer uses. No bold in prose, no sales language ("wins", "buys
+you", "safe to leave on"), no invented jargon ("floor", "support", "knob",
+"point-safe"), and no history of the code ("as before this option existed").
+Stale docs are worse than no docs.
