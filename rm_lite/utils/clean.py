@@ -255,14 +255,29 @@ def shift_rmsf(
     Returns:
         NDArray[np.complexfloating]: RMSF shifted to `fdf_index`, clipped to FDF length.
     """
-    # Gather only the clipped FDF window instead of np.roll copying the whole
-    # double-length array each call (np.roll was the single hottest op in the
-    # minor loop). take(mode="wrap") reproduces roll's wraparound exactly:
-    # roll(a, s)[n_phi_pad + j] == a[(n_phi_pad + j - s) mod len].
-    shift = fdf_index + n_phi_pad - max_rmsf_index
     fdf_len = len(rmsf_spectrum) - 2 * n_phi_pad
-    indices = np.arange(n_phi_pad, n_phi_pad + fdf_len) - shift
-    return np.asarray(rmsf_spectrum.take(indices, mode="wrap"))
+    return np.array(_rmsf_window(rmsf_spectrum, fdf_index, fdf_len, max_rmsf_index))
+
+
+def _rmsf_window(
+    rmsf_spectrum: NDArray[np.complexfloating],
+    fdf_index: int,
+    fdf_len: int,
+    max_rmsf_index: int,
+) -> NDArray[np.complexfloating]:
+    """`shift_rmsf` as a view of `rmsf_spectrum` where it does not wrap.
+
+    Rolling the RMSF by `fdf_index + n_phi_pad - max_rmsf_index` and clipping
+    `n_phi_pad` off each end leaves `rmsf[(j + max_rmsf_index - fdf_index) mod len]`,
+    a contiguous slice unless it runs off the end.
+    """
+    start = (max_rmsf_index - fdf_index) % len(rmsf_spectrum)
+    stop = start + fdf_len
+    if stop <= len(rmsf_spectrum):
+        return rmsf_spectrum[start:stop]
+    return np.concatenate(
+        (rmsf_spectrum[start:], rmsf_spectrum[: stop - len(rmsf_spectrum)])
+    )
 
 
 def minor_loop(
@@ -314,14 +329,26 @@ def minor_loop(
         / 2
     )
 
+    fdf_len = len(rmsf_spectrum) - 2 * n_phi_pad
+
     logger.info(f"Starting minor loop... {mask_arr.sum()} pixels in the mask")
     # A blank spectrum has no peak to watch, and cannot run away.
     guard_divergence = bool(np.isfinite(resid_fdf_spectrum).any())
+    # Reused every iteration: |residual| (current while `abs_is_current`) and the
+    # scaled RMSF being subtracted.
+    abs_resid = np.abs(resid_fdf_spectrum)
+    abs_is_current = True
+    subtract_arr = np.empty(
+        resid_fdf_spectrum.shape,
+        dtype=np.result_type(rmsf_spectrum, resid_fdf_spectrum),
+    )
     progress = CleanProgress(model_fdf_spectrum.copy(), resid_fdf_spectrum.copy())
+    # Only the fixed-threshold mask update can empty the mask again
+    mask_any = bool(mask_arr.any())
     for iter_count in range(
         minor_loop_options.start_iter, minor_loop_options.max_iter + 1
     ):
-        if not mask_arr.any():
+        if not mask_any:
             logger.warning(
                 f"All channels masked. Exiting loop...performed {iter_count} iterations"
             )
@@ -333,8 +360,10 @@ def minor_loop(
             break
         # Masked absolute residual (off-mask channels set to -inf); one pass gives
         # both the peak value and its index.
-        masked_abs = np.where(mask_arr, np.abs(resid_fdf_spectrum), -np.inf)
-        peak_fdf_index = int(np.argmax(masked_abs))
+        if not abs_is_current:
+            np.abs(resid_fdf_spectrum, out=abs_resid)
+        masked_abs = np.where(mask_arr, abs_resid, -np.inf)
+        peak_fdf_index = int(masked_abs.argmax())
         if masked_abs[peak_fdf_index] < minor_loop_options.stopping_threshold:
             # Region exhausted. In adaptive mode the main source (and its RMSF
             # sidelobes) are now subtracted, so any channel still above the mask
@@ -356,7 +385,8 @@ def minor_loop(
             break
         state = (
             progress.check(
-                float(np.nanmax(np.abs(resid_fdf_spectrum))),
+                # np.nanmax without its wrapper
+                float(np.fmax.reduce(abs_resid)),
                 model_fdf_spectrum,
                 resid_fdf_spectrum,
             )
@@ -381,12 +411,14 @@ def minor_loop(
         model_fdf_spectrum[peak_fdf_index] += clean_component
 
         # Shift the RMSF & clip so that its peak is centred above this clean_component
-        shifted_rmsf_spectrum = shift_rmsf(
-            rmsf_spectrum, int(peak_fdf_index), n_phi_pad, int(max_rmsf_index)
+        shifted_rmsf_spectrum = _rmsf_window(
+            rmsf_spectrum, peak_fdf_index, fdf_len, int(max_rmsf_index)
         )
 
         # Subtract the product of the clean_component shifted RMSF from the residual FDF
-        resid_fdf_spectrum -= clean_component * shifted_rmsf_spectrum
+        np.multiply(clean_component, shifted_rmsf_spectrum, out=subtract_arr)
+        resid_fdf_spectrum -= subtract_arr
+        abs_is_current = False
 
         # (The clean FDF is restored from the final model in one pass; see
         # `restore_model`, so no per-iteration Gaussian is built here.)
@@ -429,9 +461,12 @@ def minor_loop(
                         )
             else:
                 # Mask anything that was previously masked
+                np.abs(resid_fdf_spectrum, out=abs_resid)
+                abs_is_current = True
                 mask_arr = (
-                    np.abs(resid_fdf_spectrum) > minor_loop_options.mask_threshold
+                    abs_resid > minor_loop_options.mask_threshold
                 ) & mask_arr_original
+                mask_any = bool(mask_arr.any())
 
     return MinorLoopResults(
         resid_fdf_spectrum=resid_fdf_spectrum,
