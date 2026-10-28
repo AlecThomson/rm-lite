@@ -19,12 +19,13 @@ from scipy.ndimage import (
 )
 from tqdm.auto import tqdm
 
-from rm_lite.utils.arrays import nd_to_two_d, two_d_to_nd
+from rm_lite.utils.arrays import nb_nanargmax_abs, nd_to_two_d, two_d_to_nd
 from rm_lite.utils.fitting import (
     fit_rmsf,
     fwhm_to_sigma,
     unit_centred_gaussian,
 )
+from rm_lite.utils.hogbom import HogbomStop, minor_loop_spectrum
 from rm_lite.utils.logging import TqdmToLogger, logger
 
 TQDM_OUT = TqdmToLogger(logger, level=logging.INFO)
@@ -199,41 +200,6 @@ class MinorLoopOptions:
     """Iterations without progress before the adaptive mask adds the global peak"""
 
 
-def _offsource_rms(
-    resid_fdf_spectrum: NDArray[np.complexfloating],
-    mask_arr: NDArray[np.bool_],
-) -> float:
-    """Robust (MAD) RMS of the residual outside the current mask region.
-
-    Sidelobe-inflated while a bright source remains, falling to the noise floor
-    once it subtracts; this is what makes the auto-mask contract off the RMSF
-    sidelobes. Returns 0.0 when too few off-source channels remain (the caller
-    floors it at the FDF noise).
-    """
-    off = resid_fdf_spectrum[~mask_arr]
-    if off.size < 8:
-        return 0.0
-    pooled = np.concatenate([off.real, off.imag])
-    med = np.median(pooled)
-    return float(1.4826 * np.median(np.abs(pooled - med)))
-
-
-def _seed_mask(
-    resid_fdf_spectrum: NDArray[np.complexfloating],
-    cap_arr: NDArray[np.bool_],
-    floor: float,
-) -> NDArray[np.bool_]:
-    """Tight adaptive-mask seed: just the brightest allowed channel, if it clears
-    the mask floor. Below the floor (noise-only) the seed is empty, so nothing
-    cleans. The global peak is always real emission, so seeding it is safe."""
-    mask_arr = np.zeros(resid_fdf_spectrum.shape, dtype=bool)
-    allowed = np.where(cap_arr, np.abs(resid_fdf_spectrum), 0.0)
-    seed_idx = int(np.argmax(allowed))
-    if allowed[seed_idx] > floor:
-        mask_arr[seed_idx] = True
-    return mask_arr
-
-
 def shift_rmsf(
     rmsf_spectrum: NDArray[np.complexfloating],
     fdf_index: int,
@@ -291,33 +257,27 @@ def minor_loop(
         minor_loop_arrays (MinorLoopArrays): Masked residual, phi axes, RMSF, FWHM.
         minor_loop_options (MinorLoopOptions): Gain, mask, threshold, max_iter, mask update.
 
+    Raises:
+        ValueError: If the RMSF, clipped to the FDF axis, is not as long as the residual.
+
     Returns:
         MinorLoopResults: Clean, residual, model, masked residual, and iteration count.
     """
-    resid_fdf_spectrum = minor_loop_arrays.resid_fdf_spectrum_mask.data.copy()
-    model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
-    # Read-only here (peak index and `shift_rmsf` gathers), so no copy: this
-    # runs twice per cleaned pixel on a double-length complex array.
-    rmsf_spectrum = minor_loop_arrays.rmsf_spectrum
-    # Track the clean region as a plain boolean mask (True = active), not an
-    # np.ma.MaskedArray: rebuilding a masked array and taking np.ma.max/argmax
-    # each iteration was ~40% of minor_loop runtime. The peak is taken via
-    # np.where below instead.
-    mask_arr = ~np.ma.getmaskarray(minor_loop_arrays.resid_fdf_spectrum_mask).copy()
-    mask_arr_original = mask_arr.copy()
-    iter_count = int(minor_loop_options.start_iter)
-    thr_eff = minor_loop_options.mask_threshold
-    last_recompute_peak = np.inf
-    last_recompute_iter = int(minor_loop_options.start_iter)
-    if minor_loop_options.update_mask and minor_loop_options.noise is not None:
-        # Start tight (seed only) so the RMSF sidelobe ringing sits off-source and
-        # inflates the MAD; the incoming mask becomes the hard cap the mask grows in.
-        mask_arr = _seed_mask(
-            resid_fdf_spectrum, mask_arr_original, minor_loop_options.mask_threshold
-        )
-
+    # The compiled loop wants contiguous, native-byte-order arrays
+    resid_start = np.ascontiguousarray(
+        minor_loop_arrays.resid_fdf_spectrum_mask.data,
+        dtype=minor_loop_arrays.resid_fdf_spectrum_mask.dtype.newbyteorder("="),
+    )
+    resid_fdf_spectrum = resid_start.copy()
+    rmsf_spectrum = np.ascontiguousarray(
+        minor_loop_arrays.rmsf_spectrum,
+        dtype=minor_loop_arrays.rmsf_spectrum.dtype.newbyteorder("="),
+    )
     # Find the index of the peak of the RMSF
-    max_rmsf_index = np.nanargmax(np.abs(rmsf_spectrum))
+    max_rmsf_index = int(nb_nanargmax_abs(rmsf_spectrum)[0])
+    if max_rmsf_index < 0:
+        msg = "The RMSF is all NaN."
+        raise ValueError(msg)
 
     # Calculate the padding in the sampled RMSF
     # Assumes only integer shifts and symmetric RMSF
@@ -328,145 +288,54 @@ def minor_loop(
         )
         / 2
     )
-
     fdf_len = len(rmsf_spectrum) - 2 * n_phi_pad
+    if fdf_len != len(resid_fdf_spectrum):
+        msg = (
+            f"The RMSF clipped to the FDF axis has {fdf_len} channels, but the "
+            f"residual has {len(resid_fdf_spectrum)}."
+        )
+        raise ValueError(msg)
 
-    logger.info(f"Starting minor loop... {mask_arr.sum()} pixels in the mask")
-    # A blank spectrum has no peak to watch, and cannot run away.
-    guard_divergence = bool(np.isfinite(resid_fdf_spectrum).any())
-    # Reused every iteration: |residual| (current while `abs_is_current`) and the
-    # scaled RMSF being subtracted.
-    abs_resid = np.abs(resid_fdf_spectrum)
-    abs_is_current = True
-    subtract_arr = np.empty(
-        resid_fdf_spectrum.shape,
-        dtype=np.result_type(rmsf_spectrum, resid_fdf_spectrum),
+    noise = minor_loop_options.noise
+    model_fdf_spectrum, mask_arr, iter_count, stop, best_peak, n_initial = (
+        minor_loop_spectrum(
+            resid_fdf_spectrum,
+            resid_start,
+            ~np.ma.getmaskarray(minor_loop_arrays.resid_fdf_spectrum_mask),
+            rmsf_spectrum,
+            max_rmsf_index,
+            # gain * peak in the residual's own precision, as NumPy does it
+            resid_fdf_spectrum.real.dtype.type(minor_loop_options.gain),
+            minor_loop_options.stopping_threshold,
+            minor_loop_options.mask_threshold,
+            minor_loop_options.update_mask,
+            np.nan if noise is None else noise,
+            minor_loop_options.stall_iters,
+            minor_loop_options.start_iter,
+            minor_loop_options.max_iter,
+            CleanProgress.divergence_fraction,
+        )
     )
-    progress = CleanProgress(model_fdf_spectrum.copy(), resid_fdf_spectrum.copy())
-    # Only the fixed-threshold mask update can empty the mask again
-    mask_any = bool(mask_arr.any())
-    for iter_count in range(
-        minor_loop_options.start_iter, minor_loop_options.max_iter + 1
-    ):
-        if not mask_any:
-            logger.warning(
-                f"All channels masked. Exiting loop...performed {iter_count} iterations"
-            )
-            break
-        if iter_count == minor_loop_options.max_iter:
-            logger.warning(
-                f"Max iterations reached. Exiting loop...performed {iter_count} iterations"
-            )
-            break
-        # Masked absolute residual (off-mask channels set to -inf); one pass gives
-        # both the peak value and its index.
-        if not abs_is_current:
-            np.abs(resid_fdf_spectrum, out=abs_resid)
-        masked_abs = np.where(mask_arr, abs_resid, -np.inf)
-        peak_fdf_index = int(masked_abs.argmax())
-        if masked_abs[peak_fdf_index] < minor_loop_options.stopping_threshold:
-            # Region exhausted. In adaptive mode the main source (and its RMSF
-            # sidelobes) are now subtracted, so any channel still above the mask
-            # floor is real emission: start a new blob there instead of stopping.
-            if minor_loop_options.noise is not None:
-                new_seed = _seed_mask(
-                    resid_fdf_spectrum,
-                    mask_arr_original,
-                    minor_loop_options.mask_threshold,
-                )
-                if new_seed.any():
-                    mask_arr |= new_seed
-                    last_recompute_peak = np.inf
-                    last_recompute_iter = iter_count
-                    continue
-            logger.info(
-                f"Threshold reached. Exiting loop...performed {iter_count} iterations"
-            )
-            break
-        state = (
-            progress.check(
-                # np.nanmax without its wrapper
-                float(np.fmax.reduce(abs_resid)),
-                model_fdf_spectrum,
-                resid_fdf_spectrum,
-            )
-            if guard_divergence
-            else CleanState.CONVERGING
+
+    logger.info(f"Starting minor loop... {n_initial} pixels in the mask")
+    if stop == HogbomStop.EMPTY_MASK:
+        logger.warning(
+            f"All channels masked. Exiting loop...performed {iter_count} iterations"
         )
-        if state is not CleanState.CONVERGING:
-            logger.warning(
-                f"CLEAN {state} at iter {iter_count} (best peak "
-                f"{progress.best_peak:0.3g}); "
-                "stopping at best."
-            )
-            model_fdf_spectrum = progress.model_fdf_spectrum
-            resid_fdf_spectrum = progress.resid_fdf_spectrum
-            break
-
-        # Get the absolute peak channel, values and Faraday depth
-        peak_fdf = resid_fdf_spectrum[peak_fdf_index]
-
-        # A clean component is "loop-gain * peak_fdf
-        clean_component = minor_loop_options.gain * peak_fdf
-        model_fdf_spectrum[peak_fdf_index] += clean_component
-
-        # Shift the RMSF & clip so that its peak is centred above this clean_component
-        shifted_rmsf_spectrum = _rmsf_window(
-            rmsf_spectrum, peak_fdf_index, fdf_len, int(max_rmsf_index)
+    elif stop == HogbomStop.MAX_ITER:
+        logger.warning(
+            f"Max iterations reached. Exiting loop...performed {iter_count} iterations"
         )
-
-        # Subtract the product of the clean_component shifted RMSF from the residual FDF
-        np.multiply(clean_component, shifted_rmsf_spectrum, out=subtract_arr)
-        resid_fdf_spectrum -= subtract_arr
-        abs_is_current = False
-
-        # (The clean FDF is restored from the final model in one pass; see
-        # `restore_model`, so no per-iteration Gaussian is built here.)
-        # Remake masked residual FDF
-        if minor_loop_options.update_mask:
-            if minor_loop_options.noise is not None:
-                # Adaptive off-source auto-mask: the region ACCUMULATES and cleaning
-                # stays confined to it between recomputes, so it tracks the source
-                # instead of chasing RMSF sidelobes. On a peak drop (ponytail: O(n)
-                # MAD only then, ~tens/spectrum, matters for 3D) recompute the
-                # sidelobe-inflated threshold and grow the region off it. If the
-                # peak has stalled instead, also seed the global peak (always real
-                # emission), so a source cut off by a null still gets cleaned. The
-                # floor gate means a noise-like residual seeds nothing, so the loop
-                # converges and a noise-only spectrum cleans nothing.
-                peak = float(np.abs(peak_fdf))
-                stalled = (
-                    iter_count - last_recompute_iter >= minor_loop_options.stall_iters
-                )
-                if peak < 0.8 * last_recompute_peak or stalled:
-                    offsrc_rms = _offsource_rms(resid_fdf_spectrum, mask_arr)
-                    noise = minor_loop_options.noise
-                    ratio = offsrc_rms / noise if noise > 0 else 1.0
-                    thr_eff = minor_loop_options.mask_threshold * max(1.0, ratio)
-                    last_recompute_peak = peak
-                    last_recompute_iter = iter_count
-                    # Grow only into channels contiguous with the current region
-                    # (binary dilation) so the mask cannot jump the RMSF nulls onto
-                    # disconnected sidelobe islands.
-                    above = (np.abs(resid_fdf_spectrum) > thr_eff) & mask_arr_original
-                    mask_arr = mask_arr | (binary_dilation(mask_arr) & above)
-                    if stalled:
-                        # The peak left in the region has stopped falling: it is
-                        # held up by the sidelobes of a brighter source outside,
-                        # which the growth above cannot reach across a null.
-                        mask_arr |= _seed_mask(
-                            resid_fdf_spectrum,
-                            mask_arr_original,
-                            minor_loop_options.mask_threshold,
-                        )
-            else:
-                # Mask anything that was previously masked
-                np.abs(resid_fdf_spectrum, out=abs_resid)
-                abs_is_current = True
-                mask_arr = (
-                    abs_resid > minor_loop_options.mask_threshold
-                ) & mask_arr_original
-                mask_any = bool(mask_arr.any())
+    elif stop == HogbomStop.THRESHOLD:
+        logger.info(
+            f"Threshold reached. Exiting loop...performed {iter_count} iterations"
+        )
+    elif stop == HogbomStop.DIVERGED:
+        logger.warning(
+            f"CLEAN {CleanState.DIVERGING} at iter {iter_count} (best peak "
+            f"{best_peak:0.3g}); "
+            "stopping at best."
+        )
 
     return MinorLoopResults(
         resid_fdf_spectrum=resid_fdf_spectrum,
