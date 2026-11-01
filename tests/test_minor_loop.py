@@ -65,7 +65,8 @@ def python_offsource_rms(
 def python_minor_loop(
     arrays: MinorLoopArrays, options: MinorLoopOptions
 ) -> MinorLoopResults:
-    """The minor loop as it was written in NumPy, to check the compiled one by"""
+    """`minor_loop` as it was in NumPy (`rm_lite/utils/clean.py` at e97dbbc), to
+    check the compiled one by"""
     resid = arrays.resid_fdf_spectrum_mask.data.copy()
     model = np.zeros_like(resid)
     mask = ~np.ma.getmaskarray(arrays.resid_fdf_spectrum_mask).copy()
