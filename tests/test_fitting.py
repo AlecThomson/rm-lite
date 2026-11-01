@@ -207,7 +207,10 @@ def test_block_fit_matches_per_pixel_fit(
     i_block[rng.random(i_block.shape) < 0.02] = np.nan  # flagged channels
     i_block[:, 0, 0] = np.nan  # a blanked pixel
     i_block[rng.random(i_block.shape) < 0.01] += 0.05  # outliers
+    i_block[:, 0, 1] = rng.normal(0, 1e-3, n_freq)  # noise only
+    i_block[:, 1, 0] = 0.1 - 0.09 * freq_arr_hz / 900e6  # dips below zero
     err_block = np.full(i_block.shape, 1e-3)
+    err_block[:, 1, 1] = 0.0  # no errors given
     kwargs: dict[str, Any] = {
         "freq_arr_hz": freq_arr_hz,
         # A per-pixel reference frequency
