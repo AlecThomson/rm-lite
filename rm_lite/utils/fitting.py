@@ -497,11 +497,19 @@ def lm_fit(
     cost, sigma_resid, resid, jac = _robust_cost(
         params, x_arr, log_x, stokes_i_arr, sigma_arr, log_model, f_scale
     )
+    # Steps are measured against the errors, or against the data where that is
+    # smaller (an unweighted fit has sigma = 1, in flux units)
+    data_sq = min(1.0, float(np.mean((stokes_i_arr / sigma_arr) ** 2)))
     damping = 1e-3
     converged = False
     for _ in range(100):
-        hess = jac.T @ jac
-        grad = jac.T @ resid
+        # Columns scaled to unit norm, as scipy's x_scale="jac": the powers of
+        # log10(x) are nearly parallel over a band, and JᵀJ of the raw columns
+        # too ill-conditioned for pinv to keep every direction.
+        norm = np.sqrt(np.sum(jac**2, axis=0))
+        norm[norm == 0] = 1.0
+        hess = (jac / norm).T @ (jac / norm)
+        grad = (jac / norm).T @ resid
         if not np.isfinite(cost) or not np.all(np.isfinite(hess)):
             return params, pcov, False
         # Converged once a full Gauss-Newton step is under 1e-6 of the errors:
@@ -509,7 +517,7 @@ def lm_fit(
         # Tested before stepping, as at the optimum no step lowers it, in
         # floats. pinv (of at most 6x6) rather than solve, which can raise.
         predicted = 0.5 * grad @ np.linalg.pinv(hess) @ grad
-        if predicted <= max(0.5 * 1e-6**2, 1e-15 * cost):
+        if predicted <= max(0.5 * 1e-6**2 * data_sq, 1e-15 * cost):
             converged = True
             break
         # Marquardt: damp along the curvature, more after a step that failed
@@ -517,7 +525,7 @@ def lm_fit(
             damped = hess + damping * np.diag(np.diag(hess))
             if not np.all(np.isfinite(damped)):
                 return params, pcov, False
-            trial = params - np.linalg.pinv(damped) @ grad
+            trial = params - (np.linalg.pinv(damped) @ grad) / norm
             trial[0] = max(trial[0], 0.0)
             trial_cost, sigma_resid, trial_resid, trial_jac = _robust_cost(
                 trial, x_arr, log_x, stokes_i_arr, sigma_arr, log_model, f_scale
