@@ -318,9 +318,13 @@ def _eval_model_at(
     x: NDArray[np.float64],
     log_model: bool,
 ) -> NDArray[np.float64]:
-    """`eval_model` for the model functions, at an `x` of any shape"""
-    x_arr = np.asarray(x, dtype=np.float64)
-    model = eval_model(np.asarray(params, dtype=np.float64), x_arr.ravel(), log_model)
+    """`eval_model` for the model functions, broadcasting `x` and the params"""
+    x_arr, *param_arrs = np.broadcast_arrays(
+        np.asarray(x, dtype=np.float64),
+        *(np.asarray(p, dtype=np.float64) for p in params),
+    )
+    params_2d = np.stack([p.ravel() for p in param_arrs])
+    model = eval_model(params_2d, x_arr.ravel(), log_model)
     return np.asarray(model.reshape(x_arr.shape))
 
 
@@ -421,7 +425,8 @@ def eval_model(
     """A `power_law` or `polynomial` model, compiled.
 
     Args:
-        params (NDArray[np.float64]): Model parameters.
+        params (NDArray[np.float64]): Model parameters, or a row of them for
+            each point of `x_arr`.
         x_arr (NDArray[np.float64]): freq / ref_freq.
         log_model (bool): Power law rather than polynomial.
 
@@ -431,11 +436,11 @@ def eval_model(
     model: NDArray[np.float64] = np.zeros(x_arr.size)
     if log_model:
         log_x = np.log10(x_arr)
-        for i in range(1, params.size):
+        for i in range(1, len(params)):
             model += params[i] * log_x**i
         model = params[0] * 10.0**model
     else:
-        for i in range(params.size):
+        for i in range(len(params)):
             model += params[i] * x_arr**i
     return model
 

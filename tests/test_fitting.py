@@ -244,6 +244,21 @@ def test_real_spectra_fit_as_scipy(
     assert_within_sigma(compiled.popt, reference.popt, reference.pcov)
 
 
+def test_model_functions_take_parameter_planes() -> None:
+    """Coefficient planes broadcast against a frequency axis to give a cube"""
+    rng = np.random.default_rng(5)
+    x_arr = np.linspace(0.8, 1.2, 12)[:, None, None]
+    flux, alpha, beta = rng.uniform(0.1, 1, (4, 5)), *rng.normal(size=(2, 4, 5))
+    np.testing.assert_allclose(
+        fitting.power_law(2)(x_arr, flux, alpha, beta),
+        flux * x_arr ** (alpha + beta * np.log10(x_arr)),
+    )
+    np.testing.assert_allclose(
+        fitting.polynomial(2)(x_arr, flux, alpha, beta),
+        flux + alpha * x_arr + beta * x_arr**2,
+    )
+
+
 @pytest.mark.parametrize("fit_function", ["log", "linear"])
 def test_model_samples_match_one_at_a_time(
     fit_function: Literal["log", "linear"], monkeypatch: pytest.MonkeyPatch
