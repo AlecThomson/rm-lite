@@ -344,6 +344,15 @@ def test_minor_loop_takes_non_native_and_strided_arrays() -> None:
     np.testing.assert_array_equal(swapped.resid_fdf_spectrum_mask.data, dirty)
 
 
+def test_minor_loop_rejects_an_all_nan_rmsf() -> None:
+    arrays, options = options_for(simulated_arrays("point"), "adaptive", NOISE)
+    with pytest.raises(ValueError, match="all NaN"):
+        minor_loop(
+            arrays._replace(rmsf_spectrum=np.full_like(arrays.rmsf_spectrum, np.nan)),
+            options,
+        )
+
+
 def test_minor_loop_rejects_mismatched_axes() -> None:
     arrays, options = options_for(simulated_arrays("point"), "adaptive", NOISE)
     with pytest.raises(ValueError, match="clipped to the FDF axis"):
