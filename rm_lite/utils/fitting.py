@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, Protocol, TypeAlias, cast
 
 import dask.array as da
+import numba
 import numpy as np
 from astropy.stats import akaike_info_criterion_lsq
 from dask.base import compute
@@ -382,6 +383,171 @@ def _robust_aic(
     return aic_lsq(ssr=ssr, n_params=n_params, n_samples=int(np.size(scaled)))
 
 
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def _robust_cost(
+    params: NDArray[np.float64],
+    x_arr: NDArray[np.float64],
+    log_x: NDArray[np.float64],
+    stokes_i_arr: NDArray[np.float64],
+    sigma_arr: NDArray[np.float64],
+    log_model: bool,
+    f_scale: float,
+) -> tuple[float, NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Cost of a `power_law` (`log_model`) or `polynomial` fit at `params`, with
+    the residuals and Jacobian scaled for the loss as scipy's
+    `scale_for_robust_loss_function`, so a Gauss-Newton step and the covariance
+    match `least_squares`.
+
+    Args:
+        params (NDArray[np.float64]): Model parameters.
+        x_arr (NDArray[np.float64]): freq / ref_freq.
+        log_x (NDArray[np.float64]): log10(x_arr).
+        stokes_i_arr (NDArray[np.float64]): Stokes I.
+        sigma_arr (NDArray[np.float64]): 1-sigma errors.
+        log_model (bool): Power law rather than polynomial.
+        f_scale (float): Cauchy loss scale in sigma; 0 for a linear loss.
+
+    Returns:
+        tuple[float, NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+            Cost, residuals in sigma, and the scaled residuals and Jacobian.
+    """
+    n_param = params.size
+    ln10 = np.log(10.0)
+    eps = np.finfo(np.float64).eps
+    resid = np.empty(x_arr.size)
+    scaled_resid = np.empty(x_arr.size)
+    jac = np.empty((x_arr.size, n_param))
+    cost = 0.0
+    # One pass per channel: the model and its Jacobian row, then the loss
+    for chan in range(x_arr.size):
+        if log_model:
+            # p0 * 10**(sum p_i L**i), L = log10(x): d/dp0 = 10**(...), and
+            # d/dp_i = model * ln(10) * L**i
+            power, log_x_i = 0.0, 1.0
+            for i in range(1, n_param):
+                log_x_i *= log_x[chan]
+                power += params[i] * log_x_i
+            jac[chan, 0] = np.exp(ln10 * power)
+            model = params[0] * jac[chan, 0]
+            log_x_i = 1.0
+            for i in range(1, n_param):
+                log_x_i *= log_x[chan]
+                jac[chan, i] = model * ln10 * log_x_i
+        else:
+            model, x_i = 0.0, 1.0
+            for i in range(n_param):
+                jac[chan, i] = x_i
+                model += params[i] * x_i
+                x_i *= x_arr[chan]
+        resid[chan] = (model - stokes_i_arr[chan]) / sigma_arr[chan]
+        if f_scale > 0:
+            # Cauchy: rho(z) = f**2 log(1 + z/f**2), on z = resid**2
+            z = (resid[chan] / f_scale) ** 2
+            rho1 = 1 / (1 + z)
+            rho2 = -(rho1**2) / f_scale**2
+            scale = np.sqrt(max(rho1 + 2 * rho2 * resid[chan] ** 2, eps))
+            cost += 0.5 * f_scale**2 * np.log1p(z)
+            scaled_resid[chan] = resid[chan] * rho1 / scale
+        else:
+            scale = 1.0
+            cost += 0.5 * resid[chan] ** 2
+            scaled_resid[chan] = resid[chan]
+        for i in range(n_param):
+            jac[chan, i] *= scale / sigma_arr[chan]
+    return cost, resid, scaled_resid, jac
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def lm_fit(
+    x_arr: NDArray[np.float64],
+    stokes_i_arr: NDArray[np.float64],
+    sigma_arr: NDArray[np.float64],
+    initial_guess: NDArray[np.float64],
+    log_model: bool,
+    f_scale: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], bool]:
+    """Levenberg-Marquardt fit of a Stokes I model, compiled so threads can run it.
+
+    Finds the optimum `static_fit`'s `curve_fit` call does: residuals divided by
+    `sigma_arr`, the Cauchy loss with scipy's robust scaling, and the covariance
+    as curve_fit's (pseudo-inverse of the loss-scaled Jacobian, absolute sigma).
+    Anything else is left to scipy by returning not converged: no convergence,
+    a non-finite value, or `p0` starting or ending on its >= 0 bound.
+
+    Args:
+        x_arr (NDArray[np.float64]): freq / ref_freq.
+        stokes_i_arr (NDArray[np.float64]): Stokes I.
+        sigma_arr (NDArray[np.float64]): 1-sigma errors; ones for an unweighted fit.
+        initial_guess (NDArray[np.float64]): Starting parameters.
+        log_model (bool): Fit `power_law` rather than `polynomial`.
+        f_scale (float): Cauchy loss scale in sigma; 0 for a linear loss.
+
+    Returns:
+        tuple[NDArray[np.float64], NDArray[np.float64], bool]: popt, pcov, and
+            whether it converged.
+    """
+    n_param = initial_guess.size
+    params = initial_guess.copy()
+    pcov = np.full((n_param, n_param), np.nan)
+    if x_arr.size < n_param or params[0] <= 0:
+        return params, pcov, False
+    eps = np.finfo(np.float64).eps
+    log_x = np.log10(x_arr)
+    cost, sigma_resid, resid, jac = _robust_cost(
+        params, x_arr, log_x, stokes_i_arr, sigma_arr, log_model, f_scale
+    )
+    damping = 1e-3
+    converged = False
+    for _ in range(100):
+        hess = jac.T @ jac
+        grad = jac.T @ resid
+        if not np.isfinite(cost) or not np.all(np.isfinite(grad)):
+            return params, pcov, False
+        # Marquardt: damp along the curvature, more after a step that failed
+        while True:
+            try:
+                step = np.linalg.solve(hess + damping * np.diag(np.diag(hess)), -grad)
+            except Exception:
+                return params, pcov, False
+            trial = params + step
+            trial[0] = max(trial[0], 0.0)
+            trial_cost, sigma_resid, trial_resid, trial_jac = _robust_cost(
+                trial, x_arr, log_x, stokes_i_arr, sigma_arr, log_model, f_scale
+            )
+            if np.isfinite(trial_cost) and trial_cost <= cost:
+                break
+            damping *= 10
+            if damping > 1e16:
+                return params, pcov, False
+        decrease = cost - trial_cost
+        step_size = np.sqrt(np.sum((trial - params) ** 2))
+        undamped = damping <= 1e-3
+        params, cost, resid, jac = trial, trial_cost, trial_resid, trial_jac
+        damping = max(damping / 10, 1e-15)
+        # A tiny step only means convergence when it was (near) a Gauss-Newton
+        # step; a heavily damped step is tiny because of the damping
+        if undamped and (
+            decrease <= 1e-10 * cost
+            or step_size <= 1e-9 * (np.sqrt(np.sum(params**2)) + 1e-12)
+        ):
+            converged = True
+            break
+    if not converged or params[0] <= 0:
+        return params, pcov, False
+    # Many channels past f_scale: the loss is far from quadratic and has other
+    # minima, where solvers part ways. Leave those to scipy.
+    if f_scale > 0 and np.mean(np.abs(sigma_resid) > f_scale) > 0.1:
+        return params, pcov, False
+    # As curve_fit: Moore-Penrose inverse of JᵀJ, dropping tiny singular values
+    _, sing, vt = np.linalg.svd(jac, full_matrices=False)
+    keep = sing > eps * max(jac.shape) * sing[0]
+    vt = vt[keep]
+    pcov = (vt.T / sing[keep] ** 2) @ vt
+    if not np.all(np.isfinite(pcov)):
+        return params, pcov, False
+    return params, pcov, True
+
+
 def static_fit(
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
@@ -433,18 +599,27 @@ def static_fit(
         {} if robust_loss == "linear" else {"loss": robust_loss, "f_scale": f_scale}
     )
     fitted = True
-
+    # Compiled first, so threads can run it; scipy for any fit it leaves
+    popt, pcov, converged = lm_fit(
+        np.asarray(x_arr, dtype=np.float64),
+        np.asarray(stokes_i_arr, dtype=np.float64),
+        np.ones(x_arr.size) if sigma_arr is None else sigma_arr.astype(np.float64),
+        initial_guess,
+        fit_function == "log",
+        f_scale if robust_loss == "cauchy" else 0.0,
+    )
     try:
-        popt, pcov = optimize.curve_fit(
-            fit_func,
-            x_arr,
-            stokes_i_arr,
-            sigma=sigma_arr,
-            absolute_sigma=True,
-            p0=initial_guess,
-            bounds=bounds,
-            **loss_kwargs,
-        )
+        if not converged:
+            popt, pcov = optimize.curve_fit(
+                fit_func,
+                x_arr,
+                stokes_i_arr,
+                sigma=sigma_arr,
+                absolute_sigma=True,
+                p0=initial_guess,
+                bounds=bounds,
+                **loss_kwargs,
+            )
     except (ValueError, RuntimeError) as e:
         logger.warning(f"Stokes I fit with errors failed ({e}); retrying unweighted.")
         try:

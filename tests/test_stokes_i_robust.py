@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from astropy.stats import akaike_info_criterion_lsq
 from numpy.typing import NDArray
+from rm_lite.utils import fitting
 from rm_lite.utils.fitting import (
     RobustLoss,
     StokesIFitOptions,
@@ -351,6 +352,8 @@ def test_a_failed_fit_is_unscoreable(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(optimize, "curve_fit", always_fails)
+    # and the compiled fit that runs first
+    monkeypatch.setattr(fitting, "lm_fit", lambda *args: (args[3], None, False))
     fit = static_fit(
         spectrum.freq_arr_hz,
         spectrum.ref_freq_hz,
