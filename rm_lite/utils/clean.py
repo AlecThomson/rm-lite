@@ -1281,19 +1281,6 @@ def rmclean(
             phi_max_scale_radm2=phi_max_scale_radm2,
         )
         logger.info(f"Multiscale scales (RMSF FWHM units): {scales}")
-        # The scale kernels come from the RMSF, FWHM, scales and kernel shape, which
-        # are all block-constant with a shared RMSF, so it needs them once
-        ms_kernels = (
-            compute_scale_kernels(
-                scales,
-                rmsf_arr_2d[:, 0],
-                rmsf_fwhm,
-                rm_synth_arrays.phi_double_arr_radm2,
-                ms_options.kernel,
-            )
-            if shared_rmsf
-            else None
-        )
 
     # Only pixels that can actually clean need the per-pixel loop; the rest are
     # already in their final state (see `_null_clean_pixels`). Non-adaptive
@@ -1320,6 +1307,20 @@ def rmclean(
     pixel_groups: Sequence[int | NDArray[np.intp]]
     if multiscale:
         pixel_groups = todo.tolist()
+        # The scale kernels come from the RMSF, FWHM, phi axis, scales and kernel
+        # shape, all block-constant with a shared RMSF, so the block needs them
+        # once, and only if a pixel cleans
+        ms_kernels = (
+            compute_scale_kernels(
+                scales,
+                rmsf_arr_2d[:, 0],
+                rmsf_fwhm,
+                rm_synth_arrays.phi_double_arr_radm2,
+                ms_options.kernel,
+            )
+            if shared_rmsf and todo.size
+            else None
+        )
     else:
         pixel_groups = [todo[i : i + 256] for i in range(0, todo.size, 256)]
     fdf_mask_arr_2d = (
