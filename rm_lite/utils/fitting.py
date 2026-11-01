@@ -10,7 +10,6 @@ from typing import Any, Literal, NamedTuple, Protocol, TypeAlias, cast
 import dask.array as da
 import numba
 import numpy as np
-from astropy.stats import akaike_info_criterion_lsq
 from dask.base import compute
 from numpy.typing import ArrayLike, NDArray
 from scipy import optimize, stats
@@ -297,10 +296,7 @@ def polynomial(order: int) -> StokesIModel:
         if len(params) != order + 1:
             msg = f"Polynomial function of order {order} requires {order + 1} parameters, {len(params)} given."
             raise ValueError(msg)
-        result = np.zeros_like(x)
-        for i in range(order + 1):
-            result = result + params[i] * x**i
-        return result
+        return _eval_model_at(params, x, log_model=False)
 
     return poly_func
 
@@ -312,81 +308,32 @@ def power_law(order: int) -> StokesIModel:
         if len(params) != order + 1:
             msg = f"Power law function of order {order} requires {order + 1} parameters, {len(params)} given."
             raise ValueError(msg)
-        power = np.zeros_like(x)
-        for i in range(1, order + 1):
-            power = power + params[i] * np.log10(x) ** i
-        return np.asarray(params[0] * 10**power)
+        return _eval_model_at(params, x, log_model=True)
 
     return power_func
+
+
+def _eval_model_at(
+    params: tuple[float | NDArray[np.float64], ...],
+    x: NDArray[np.float64],
+    log_model: bool,
+) -> NDArray[np.float64]:
+    """`eval_model` for the model functions, at an `x` of any shape"""
+    x_arr = np.asarray(x, dtype=np.float64)
+    model = eval_model(np.asarray(params, dtype=np.float64), x_arr.ravel(), log_model)
+    return np.asarray(model.reshape(x_arr.shape))
 
 
 def best_aic_func(
     aics: NDArray[np.float64], n_param: NDArray[np.integer[Any]]
 ) -> tuple[float, int, int]:
     """Find the best AIC for a set of AICs using Occam's razor."""
-    # Find the best AIC
-    best_aic_idx = int(np.nanargmin(aics))
-    best_aic = float(aics[best_aic_idx])
-    best_n = int(n_param[best_aic_idx])
-    logger.debug(f"Lowest AIC is {best_aic}, with {best_n} params.")
-    if not np.isfinite(best_aic):
-        # Every model is unscoreable (`aic_lsq` returns inf where the AICc
-        # correction diverges), so the comparison below is meaningless and
-        # `inf - inf` would warn. Occam's razor: take the fewest parameters.
-        fewest_idx = int(np.argmin(n_param))
-        return float(aics[fewest_idx]), int(n_param[fewest_idx]), fewest_idx
-    # Check if lower have diff < 2 in AIC
-    aic_abs_diff = np.abs(aics - best_aic)
-    bool_min_idx = np.zeros_like(aics).astype(bool)
-    bool_min_idx[best_aic_idx] = True
-    potential_idx = (aic_abs_diff[~bool_min_idx] < 2) & (
-        n_param[~bool_min_idx] < best_n
+    best_aic_idx = best_aic_index(
+        np.asarray(aics, dtype=np.float64), np.asarray(n_param, dtype=np.int64)
     )
-    if not any(potential_idx):
-        return best_aic, best_n, best_aic_idx
-
-    bestest_n = int(np.min(n_param[~bool_min_idx][potential_idx]))
-    bestest_aic_idx = int(np.where(n_param == bestest_n)[0][0])
-    bestest_aic = float(aics[bestest_aic_idx])
-    logger.debug(
-        f"Model within 2 of lowest AIC found. Occam says to take AIC of {bestest_aic}, with {bestest_n} params."
-    )
-    return bestest_aic, bestest_n, bestest_aic_idx
-
-
-def aic_lsq(ssr: float, n_params: int, n_samples: int) -> float:
-    """AIC of a least-squares fit; inf where the AICc correction blows up."""
-    if n_samples - n_params - 1 <= 0:
-        return float(np.inf)
-    with np.errstate(divide="ignore"):
-        return float(
-            akaike_info_criterion_lsq(ssr=ssr, n_params=n_params, n_samples=n_samples)
-        )
-
-
-def _robust_aic(
-    resid: NDArray[np.float64],
-    sigma_arr: NDArray[np.float64] | None,
-    n_params: int,
-    robust_loss: RobustLoss,
-    f_scale: float,
-) -> float:
-    """AIC with each residual capped at `f_scale`, so one bad channel cannot
-    pick the order.
-
-    Uncapped, a bad channel inflates every order's residual by about the same
-    amount; the scores land within 2 of each other and `dynamic_fit` takes the
-    fewest parameters, i.e. a flat model. `n_samples` stays the channel count,
-    which is the same for every order and so cannot tilt the comparison.
-
-    Not capped for "linear", where the whole point is the plain fit, and where a
-    missing error would leave `f_scale` in flux units rather than sigma.
-    """
-    scaled = resid if sigma_arr is None else resid / sigma_arr
-    if robust_loss != "linear":
-        scaled = np.clip(np.abs(scaled), None, f_scale)
-    ssr = float(np.sum(scaled**2))
-    return aic_lsq(ssr=ssr, n_params=n_params, n_samples=int(np.size(scaled)))
+    best_aic, best_n = float(aics[best_aic_idx]), int(n_param[best_aic_idx])
+    logger.debug(f"Best AIC is {best_aic}, with {best_n} params.")
+    return best_aic, best_n, best_aic_idx
 
 
 class ModelSettings(NamedTuple):
@@ -445,7 +392,7 @@ class SpectraFitOptions(NamedTuple):
     model: ModelSettings
     """Model and loss"""
     snr_cut: float
-    """`stokes_i_snr` below which a spectrum is skipped; NaN for no cut"""
+    """`stokes_i_snr` below which a spectrum is skipped; -inf for no cut"""
     model_floor_sigma: float
     """`model_noise_floor` sigma"""
 
@@ -656,104 +603,93 @@ def lm_fit(
 
 
 @numba.njit(cache=True, nogil=True)  # type: ignore[misc]
-def _compiled_aic(
+def robust_aic(
     sigma_resid: NDArray[np.float64], n_params: int, f_scale: float
 ) -> float:
-    """`_robust_aic`: residuals capped at `f_scale` for a robust loss, into
-    astropy's least-squares AIC, corrected below 40 samples per parameter.
+    """AIC of a least-squares fit, as astropy's `akaike_info_criterion_lsq`, with
+    each residual capped at `f_scale` so one bad channel cannot pick the order.
+
+    Uncapped, a bad channel inflates every order's residual by about the same
+    amount, the scores land within 2 of each other, and the fewest parameters
+    (a flat model) win. Not capped for a linear loss (`f_scale` 0), where a
+    missing error would leave `f_scale` in flux units rather than sigma.
 
     Args:
-        sigma_resid (NDArray[np.float64]): Residuals in sigma.
+        sigma_resid (NDArray[np.float64]): Residuals in sigma (or flux, unweighted).
         n_params (int): Parameters fitted.
         f_scale (float): Cauchy loss scale in sigma; 0 for a linear loss.
 
     Returns:
-        float: AIC, inf where the correction diverges.
+        float: AIC, corrected below 40 samples per parameter; inf where the
+            correction diverges.
     """
     n_samples = sigma_resid.size
     if n_samples - n_params - 1 <= 0:
         return np.inf
     if f_scale > 0:
         sigma_resid = np.minimum(np.abs(sigma_resid), f_scale)
-    aic = 2.0 * n_params + n_samples * np.log(np.sum(sigma_resid**2) / n_samples)
+    log_likelihood = -0.5 * n_samples * np.log(np.sum(sigma_resid**2) / n_samples)
+    aic = 2.0 * (n_params - log_likelihood)
     if n_samples / n_params < 40.0:
         aic += 2.0 * n_params * (n_params + 1.0) / (n_samples - n_params - 1.0)
     return float(aic)
 
 
 @numba.njit(cache=True, nogil=True)  # type: ignore[misc]
-def _compiled_best_order(aics: NDArray[np.float64]) -> int:
-    """`best_aic_func` over orders 0 up: the lowest AIC, then the fewest
-    parameters within 2 of it, or the fewest if none can be scored.
+def best_aic_index(aics: NDArray[np.float64], n_param: NDArray[np.int64]) -> int:
+    """Occam's razor on AIC: the lowest, then the fewest parameters within 2 of
+    it; the fewest parameters if none can be scored.
 
     Args:
-        aics (NDArray[np.float64]): AIC of each order.
+        aics (NDArray[np.float64]): AIC of each model.
+        n_param (NDArray[np.int64]): Parameters of each model.
 
     Returns:
-        int: The order to keep.
+        int: Index of the model to keep.
     """
-    best = int(np.argmin(aics))
+    best = int(np.nanargmin(aics))
     if not np.isfinite(aics[best]):
-        return 0
-    for order in range(best):
-        if abs(aics[order] - aics[best]) < 2:
-            return order
-    return best
+        return int(np.argmin(n_param))
+    fewer = (np.abs(aics - aics[best]) < 2) & (n_param < n_param[best])
+    if not fewer.any():
+        return best
+    candidates = np.flatnonzero(fewer)
+    return int(candidates[np.argmin(n_param[candidates])])
 
 
 @numba.njit(cache=True, nogil=True)  # type: ignore[misc]
-def _compiled_spectral_index(
-    model: NDArray[np.float64], freq_arr_hz: NDArray[np.float64], ref_freq_hz: float
-) -> float:
-    """`_alpha_at_ref` for one model: d ln I / d ln nu at the reference frequency.
+def spectral_index(
+    models: NDArray[np.float64], freq_arr_hz: NDArray[np.float64], ref_freq_hz: float
+) -> NDArray[np.float64]:
+    """Spectral index (d ln I / d ln nu) of each model (row) at the reference
+    frequency, as `np.gradient` and `np.interp` on ascending frequency.
 
     Args:
-        model (NDArray[np.float64]): Model spectrum.
+        models (NDArray[np.float64]): Model spectra, one per row.
         freq_arr_hz (NDArray[np.float64]): Channel frequencies, in any order.
         ref_freq_hz (float): Reference frequency.
 
     Returns:
-        float: Spectral index.
+        NDArray[np.float64]: Spectral index of each model.
     """
     sort = np.argsort(freq_arr_hz)
     ln_freq = np.log(freq_arr_hz[sort])
-    ln_model = np.log(np.abs(model[sort]))
+    ln_ref = np.log(ref_freq_hz)
     # np.gradient: second order inside, one-sided at the ends
     dx1, dx2 = np.diff(ln_freq)[:-1], np.diff(ln_freq)[1:]
+    alpha = np.empty(models.shape[0])
     slope = np.empty(ln_freq.size)
-    slope[0] = (ln_model[1] - ln_model[0]) / (ln_freq[1] - ln_freq[0])
-    slope[-1] = (ln_model[-1] - ln_model[-2]) / (ln_freq[-1] - ln_freq[-2])
-    slope[1:-1] = (
-        -dx2 / (dx1 * (dx1 + dx2)) * ln_model[:-2]
-        + (dx2 - dx1) / (dx1 * dx2) * ln_model[1:-1]
-        + dx1 / (dx2 * (dx1 + dx2)) * ln_model[2:]
-    )
-    return float(np.interp(np.log(ref_freq_hz), ln_freq, slope))
-
-
-@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
-def _compiled_model_is_usable(
-    model: NDArray[np.float64], e_spec: NDArray[np.float64], floor_sigma: float
-) -> bool:
-    """`model_is_usable` against `model_noise_floor`, on the whole band.
-
-    Args:
-        model (NDArray[np.float64]): Model spectrum.
-        e_spec (NDArray[np.float64]): Error spectrum.
-        floor_sigma (float): `model_noise_floor` sigma.
-
-    Returns:
-        bool: Whether the model can divide Q/U.
-    """
-    floor = np.finfo(np.float32).tiny
-    positive = e_spec[np.isfinite(e_spec) & (e_spec > 0)]
-    if floor_sigma > 0 and positive.size:
-        floor = max(floor_sigma * nb_median(positive) / np.sqrt(positive.size), floor)
-    return bool(
-        np.all(np.isfinite(model))
-        and np.min(model) > floor
-        and np.max(model) <= np.finfo(np.float32).max
-    )
+    for row in range(models.shape[0]):
+        ln_model = np.log(np.abs(models[row][sort]))
+        slope[0] = (ln_model[1] - ln_model[0]) / (ln_freq[1] - ln_freq[0])
+        slope[-1] = (ln_model[-1] - ln_model[-2]) / (ln_freq[-1] - ln_freq[-2])
+        slope[1:-1] = (
+            -dx2 / (dx1 * (dx1 + dx2)) * ln_model[:-2]
+            + (dx2 - dx1) / (dx1 * dx2) * ln_model[1:-1]
+            + dx1 / (dx2 * (dx1 + dx2)) * ln_model[2:]
+        )
+        alpha[row] = np.interp(ln_ref, ln_freq, slope)
+    return alpha
 
 
 @numba.njit(cache=True, nogil=True)  # type: ignore[misc]
@@ -787,12 +723,8 @@ def _compiled_fit_spectrum(
         return FitStatus.SKIPPED, no_popt, no_pcov
     i_good, e_good, x_good = i_spec[good], e_spec[good], x_arr[good]
     usable = e_good > 0
-    if not np.isnan(options.snr_cut) and usable.any():
-        # `stokes_i_snr`, on the channels with a usable error
-        n_usable = np.count_nonzero(usable)
-        snr = nb_median(i_good[usable]) * np.sqrt(n_usable) / nb_median(e_good[usable])
-        if snr < options.snr_cut:
-            return FitStatus.SKIPPED, no_popt, no_pcov
+    if stokes_i_snr(i_good, e_good) < options.snr_cut:
+        return FitStatus.SKIPPED, no_popt, no_pcov
     # Without errors, an unweighted fit with a linear loss
     weighted = usable.all()
     sigma = e_good if weighted else np.ones(i_good.size)
@@ -821,8 +753,9 @@ def _compiled_fit_spectrum(
         if not converged[order] and popt[0] <= 0:
             return FitStatus.NEEDS_SCIPY, no_popt, no_pcov
         sigma_resid = (eval_model(popt, x_good, settings.log_model) - i_good) / sigma
-        aics[order] = _compiled_aic(sigma_resid, order + 1, settings.f_scale)
-    best = _compiled_best_order(aics) if options.fit_order < 0 else first
+        aics[order] = robust_aic(sigma_resid, order + 1, settings.f_scale)
+    n_param = np.arange(1, n_coeff + 1)
+    best = best_aic_index(aics, n_param) if options.fit_order < 0 else first
     if not converged[best]:
         return FitStatus.NEEDS_SCIPY, no_popt, no_pcov
     popt, pcov = fits[best]
@@ -866,13 +799,14 @@ def fit_stokes_i_spectra(
         if status != FitStatus.FITTED:
             continue
         model = eval_model(popt, x_arr, options.model.log_model)
-        if not _compiled_model_is_usable(model, e_spec, options.model_floor_sigma):
+        floor = noise_floor(e_spec, options.model_floor_sigma)
+        if not model_is_usable(model, floor):
             fit.status[spec] = FitStatus.UNUSABLE
             continue
         fit.model[spec] = model
-        fit.alpha[spec] = _compiled_spectral_index(
-            model, spectra.freq_arr_hz, spectra.ref_freq_hz[spec]
-        )
+        fit.alpha[spec] = spectral_index(
+            model.reshape(1, -1), spectra.freq_arr_hz, spectra.ref_freq_hz[spec]
+        )[0]
         fit.order[spec] = popt.size - 1
         fit.coeff[spec] = 0.0
         fit.coeff[spec, : popt.size] = popt
@@ -978,13 +912,12 @@ def static_fit(
             fitted = False
     stokes_i_model_arr = fit_func(x_arr, *popt)
     # Nothing converged, so there is no fit for `dynamic_fit` to rank.
+    resid = stokes_i_arr - stokes_i_model_arr
     aic = (
-        _robust_aic(
-            resid=stokes_i_arr - stokes_i_model_arr,
-            sigma_arr=sigma_arr,
-            n_params=fit_order + 1,
-            robust_loss=robust_loss,
-            f_scale=f_scale,
+        robust_aic(
+            np.asarray(resid if sigma_arr is None else resid / sigma_arr, dtype=float),
+            fit_order + 1,
+            f_scale if robust_loss != "linear" else 0.0,
         )
         if fitted
         else float(np.inf)
@@ -1042,6 +975,7 @@ def dynamic_fit(
     return fit_results[bestest_aic_idx]
 
 
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
 def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> float:
     """Frequency-averaged Stokes I SNR: `median(I) * sqrt(n) / median(error)`.
 
@@ -1053,16 +987,14 @@ def stokes_i_snr(i_spec: NDArray[np.float64], e_spec: NDArray[np.float64]) -> fl
     from 1200 to 1.4 and skipped a good pixel, and one negative flux spike made
     it negative. Only usable channels count, as in the fit.
     """
-    i_arr = np.asarray(i_spec, dtype=np.float64)
-    e_arr = np.asarray(e_spec, dtype=np.float64)
-    usable = np.isfinite(i_arr) & np.isfinite(e_arr) & (e_arr > 0)
-    n = int(usable.sum())
+    usable = np.isfinite(i_spec) & np.isfinite(e_spec) & (e_spec > 0)
+    n = np.count_nonzero(usable)
     if not n:
         return np.inf
-    median_err = float(np.median(e_arr[usable]))
+    median_err = nb_median(e_spec[usable])
     if not np.isfinite(median_err) or median_err <= 0:
         return np.inf
-    return float(np.median(i_arr[usable]) * np.sqrt(n) / median_err)
+    return float(nb_median(i_spec[usable]) * np.sqrt(n) / median_err)
 
 
 def check_snr_cut_has_error(
@@ -1093,21 +1025,27 @@ def check_snr_cut_has_error(
 def model_noise_floor(
     stokes_i_error_arr: NDArray[np.float64] | None, sigma: float
 ) -> float:
+    """`noise_floor`, or 0.0 without an error spectrum"""
+    if stokes_i_error_arr is None:
+        return 0.0
+    return float(noise_floor(np.asarray(stokes_i_error_arr, dtype=np.float64), sigma))
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def noise_floor(stokes_i_error_arr: NDArray[np.float64], sigma: float) -> float:
     """Flux `sigma` times the band-averaged noise, `median(error)/sqrt(n)`.
 
     Same noise as `stokes_i_snr`, so this and `snr_cut` share units. 0.0 without
     a usable error.
     """
-    if stokes_i_error_arr is None or sigma <= 0:
+    usable = np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0)
+    n = np.count_nonzero(usable)
+    if sigma <= 0 or not n:
         return 0.0
-    err_arr = np.asarray(stokes_i_error_arr, dtype=np.float64)
-    usable = np.isfinite(err_arr) & (err_arr > 0)
-    n = int(usable.sum())
-    if not n:
-        return 0.0
-    return float(sigma * np.median(err_arr[usable]) / np.sqrt(n))
+    return float(sigma * nb_median(stokes_i_error_arr[usable]) / np.sqrt(n))
 
 
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
 def model_is_usable(model: NDArray[np.float64], noise_floor: float = 0.0) -> bool:
     """Whether a Stokes I model can safely divide Q/U: finite, and never below
     `noise_floor` or outside what float32 can hold.
@@ -1119,12 +1057,11 @@ def model_is_usable(model: NDArray[np.float64], noise_floor: float = 0.0) -> boo
     float32's range is inf by the time the reference flux is read off it, which
     blanks that pixel's whole FDF spectrum.
     """
-    floor = max(float(noise_floor), float(np.finfo(np.float32).tiny))
-    ceiling = float(np.finfo(np.float32).max)
+    floor = max(noise_floor, float(np.finfo(np.float32).tiny))
     return bool(
         np.all(np.isfinite(model))
         and np.min(model) > floor
-        and np.max(model) <= ceiling
+        and np.max(model) <= np.finfo(np.float32).max
     )
 
 
@@ -1214,8 +1151,7 @@ def draw_model_samples(
     # reshape (not atleast_2d): a length-1 popt gives rvs shape (n,), which must
     # become (n, 1) rather than (1, n).
     samples = np.asarray(dist.rvs(n_error_samples)).reshape(n_error_samples, -1)
-    # Each parameter as a column, so one call evaluates every sample
-    return np.asarray(fit.stokes_i_model_func(x_arr, *samples.T[:, :, np.newaxis]))
+    return np.stack([fit.stokes_i_model_func(x_arr, *sample) for sample in samples])
 
 
 def sample_model_error(
@@ -1254,7 +1190,7 @@ def fit_stokes_i_model(
     frequency-averaged SNR is below it, so the caller leaves the pixel out. A
     fit that cannot converge does not raise: `static_fit` falls back to a flat
     (mean) model. Right at the minimum channel count the fit is real but its AIC
-    is inf (see `aic_lsq`), so a negative `fit_order` settles on a lower order
+    is inf (see `robust_aic`), so a negative `fit_order` settles on a lower order
     there. A bad flux is left to `options.robust_loss` in `static_fit`.
     """
     fit_order = options.fit_order
@@ -1448,20 +1384,10 @@ def _alpha_at_ref(
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
 ) -> NDArray[np.float64]:
-    """Spectral index (d ln I / d ln nu) of `spec`, or of each of its rows, at
-    the reference frequency.
-
-    Sorts by frequency first: `np.interp`/`np.gradient` need an ascending axis,
-    and a descending-frequency cube (negative CDELT3) otherwise gives garbage.
-    """
-    order = np.argsort(freq_arr_hz)
-    ln_freq = np.log(freq_arr_hz[order])
-    with np.errstate(divide="ignore", invalid="ignore"):
-        slope = np.gradient(np.log(np.abs(spec[..., order])), ln_freq, axis=-1)
-    alpha = [
-        np.interp(np.log(ref_freq_hz), ln_freq, row) for row in np.atleast_2d(slope)
-    ]
-    return np.reshape(alpha, spec.shape[:-1])
+    """`spectral_index` of `spec`, or of each of its rows"""
+    rows = np.asarray(spec, dtype=np.float64).reshape(-1, spec.shape[-1])
+    alpha = spectral_index(rows, np.asarray(freq_arr_hz, dtype=np.float64), ref_freq_hz)
+    return np.asarray(alpha.reshape(spec.shape[:-1]))
 
 
 class PixelFit(NamedTuple):
@@ -1655,7 +1581,7 @@ def _fit_block_compiled(
                 if fit_options.robust_loss == "cauchy"
                 else 0.0,
             ),
-            snr_cut=np.nan if fit_options.snr_cut is None else fit_options.snr_cut,
+            snr_cut=-np.inf if fit_options.snr_cut is None else fit_options.snr_cut,
             model_floor_sigma=fit_options.model_floor_sigma,
         ),
     )

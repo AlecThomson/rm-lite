@@ -196,7 +196,7 @@ def test_dynamic_orders_stay_compiled() -> None:
         SpectraFitOptions(
             fit_order=-3,
             model=ModelSettings(log_model=True, f_scale=3.0),
-            snr_cut=np.nan,
+            snr_cut=-np.inf,
             model_floor_sigma=1.0,
         ),
     )
