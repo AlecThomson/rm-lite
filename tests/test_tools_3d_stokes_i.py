@@ -10,7 +10,6 @@ import pytest
 from numpy.typing import NDArray
 from rm_lite.tools_1d.rmsynth import run_rmsynth
 from rm_lite.tools_3d.rmsynth import RMSynth3DResults, rmsynth_3d
-from rm_lite.utils import fitting
 from rm_lite.utils.dask_io import estimate_single_stokes_channel_noise
 from rm_lite.utils.fitting import (
     StokesIFitOptions,
@@ -44,20 +43,6 @@ def raise_curve_fit(*_args: Any, **_kwargs: Any) -> None:
     """A curve_fit that always fails, for the fallback paths."""
     msg = "curve_fit forced to fail"
     raise RuntimeError(msg)
-
-
-def unconverged_lm_fit(*args: Any) -> tuple[NDArray[np.float64], None, bool]:
-    """An `lm_fit` that never converges, so the scipy path runs."""
-    return args[3], None, False
-
-
-def unconverged_spectra(i_rows: NDArray[np.float64], *args: Any) -> tuple[Any, ...]:
-    """A `fit_stokes_i_spectra` that leaves every spectrum to scipy."""
-    n_spec, n_freq = i_rows.shape
-    n_coeff = abs(args[3]) + 1
-    coeff = np.full((n_spec, n_coeff), np.nan)
-    model = np.full((n_spec, n_freq), np.nan)
-    return model, model[:, 0], model[:, 0], coeff, coeff, np.full(n_spec, 3)
 
 
 D_PHI_RADM2 = 1.0
@@ -657,10 +642,10 @@ def test_stokes_i_snr_cut_zero_fits_all_pixels(chunked: Callable[..., da.Array])
     assert np.isfinite(order_at_faint_pixel(0.0))
 
 
-def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
+def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch, scipy_fits_only):
     """A fit that cannot converge returns a flat model instead of raising."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
-    monkeypatch.setattr(fitting, "lm_fit", unconverged_lm_fit)
+    scipy_fits_only(monkeypatch)
 
     freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
     ref_freq_hz = float(np.median(freq_arr_hz))
@@ -682,12 +667,11 @@ def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
 
 
 def test_stokes_i_fit_failure_is_graceful(
-    monkeypatch, chunked: Callable[..., da.Array]
+    monkeypatch, chunked: Callable[..., da.Array], scipy_fits_only
 ):
     """If every fit fails, the cube still completes on flat models."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
-    monkeypatch.setattr(fitting, "lm_fit", unconverged_lm_fit)
-    monkeypatch.setattr(fitting, "fit_stokes_i_spectra", unconverged_spectra)
+    scipy_fits_only(monkeypatch)
 
     cube = make_stokes_i_cube(alpha=-1.0)
     i_err = np.full_like(cube.stokes_i, 1e-3)

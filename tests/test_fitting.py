@@ -1,25 +1,40 @@
-"""Tests for the compiled Stokes I fit (`lm_fit`), against scipy's curve_fit."""
+"""Tests for the compiled Stokes I fit, against scipy's curve_fit and the
+per-pixel Python fit."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from importlib import resources
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import pytest
+from numpy.typing import ArrayLike
 from rm_lite.utils import fitting
 from rm_lite.utils.fitting import (
+    FitStatus,
+    ModelSettings,
+    SpectraFitOptions,
     StokesIFitOptions,
+    StokesISpectra,
     dynamic_fit,
     fit_stokes_i_model,
+    fit_stokes_i_spectra,
     lm_fit,
     static_fit,
 )
 from scipy import stats
 
-pytestmark = pytest.mark.filterwarnings("ignore::scipy.optimize.OptimizeWarning")
+pytestmark = [
+    pytest.mark.filterwarnings("ignore::scipy.optimize.OptimizeWarning"),
+    # Uncompiled (NUMBA_DISABLE_JIT), NumPy warns where a trial step overflows
+    # (and then multiplies inf by 0), which compiled code does silently and
+    # lm_fit then rejects
+    pytest.mark.filterwarnings("ignore:overflow encountered:RuntimeWarning"),
+    pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning"),
+]
 
 
 def random_spectrum(
@@ -44,9 +59,18 @@ def random_spectrum(
     return freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr
 
 
-def scipy_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make `static_fit` skip the compiled fit and use curve_fit"""
-    monkeypatch.setattr(fitting, "lm_fit", lambda *args: (args[3], None, False))
+ScipyFitsOnly: TypeAlias = Callable[[pytest.MonkeyPatch], None]
+
+
+def assert_within_sigma(
+    got: ArrayLike, expected: ArrayLike, pcov: ArrayLike, err_msg: str = ""
+) -> None:
+    """Parameters within 1e-2 of each reference parameter's error"""
+    np.testing.assert_array_less(
+        np.abs(np.asarray(got) - np.asarray(expected)),
+        1e-2 * np.sqrt(np.diag(pcov)) + 1e-300,
+        err_msg=err_msg,
+    )
 
 
 @pytest.mark.parametrize("fit_function", ["log", "linear"])
@@ -55,11 +79,12 @@ def test_compiled_fit_matches_scipy(
     fit_function: Literal["log", "linear"],
     robust_loss: Literal["cauchy", "linear"],
     monkeypatch: pytest.MonkeyPatch,
+    scipy_fits_only: ScipyFitsOnly,
 ) -> None:
     """Same optimum and errors as curve_fit, to well within each parameter's
     uncertainty (or scipy's own fit, where the compiled one leaves it)."""
-    rng = np.random.default_rng(len(fit_function) + len(robust_loss))
-    for _ in range(100):
+    rng = np.random.default_rng([ord(c) for c in fit_function + robust_loss])
+    for spec in range(100):
         freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr = random_spectrum(rng)
         args = (freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr)
         # Above order 3 scipy's own polynomial fit strays from the optimum (see
@@ -67,45 +92,52 @@ def test_compiled_fit_matches_scipy(
         order = int(rng.integers(0, 6 if fit_function == "log" else 4))
         compiled = static_fit(*args, order, fit_function, robust_loss)
         with monkeypatch.context() as patch:
-            scipy_only(patch)
+            scipy_fits_only(patch)
             reference = static_fit(*args, order, fit_function, robust_loss)
-        sigma = np.sqrt(np.diag(reference.pcov))
-        np.testing.assert_array_less(
-            np.abs(np.asarray(compiled.popt) - np.asarray(reference.popt)),
-            1e-2 * sigma + 1e-300,
-        )
+        msg = f"spectrum {spec}"
+        assert_within_sigma(compiled.popt, reference.popt, reference.pcov, msg)
         np.testing.assert_allclose(
-            np.sqrt(np.diag(compiled.pcov)), sigma, rtol=1e-3, atol=1e-300
+            np.sqrt(np.diag(compiled.pcov)),
+            np.sqrt(np.diag(reference.pcov)),
+            rtol=1e-3,
+            atol=1e-300,
+            err_msg=msg,
         )
-        assert compiled.aic == pytest.approx(reference.aic, abs=1e-3)
+        assert compiled.aic == pytest.approx(reference.aic, abs=1e-3), msg
 
 
 def test_compiled_polynomial_fit_is_the_least_squares_solution() -> None:
     """With a linear loss the polynomial fit is linear least squares, so its
     optimum is exact, up to order 5 where curve_fit misses it by up to 0.6 sigma"""
     rng = np.random.default_rng(13)
-    n_compiled = 0
-    for _ in range(100):
+    n_unbounded = n_compiled = 0
+    for spec in range(100):
         freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr = random_spectrum(rng)
         x_arr = freq_arr_hz / ref_freq_hz
         order = int(rng.integers(0, 6))
         design = np.vander(x_arr, order + 1, increasing=True) / error_arr[:, None]
         norm = np.linalg.norm(design, axis=0)
         exact = np.linalg.lstsq(design / norm, stokes_i_arr / error_arr, rcond=None)[0]
+        if exact[0] <= 0:
+            continue  # beyond the c0 >= 0 bound, so scipy's to fit
+        n_unbounded += 1
         popt, pcov, converged = lm_fit(
             x_arr,
             stokes_i_arr,
             error_arr,
             np.r_[max(stokes_i_arr.mean(), 0.0), np.zeros(order)],
-            False,
-            0.0,
+            ModelSettings(log_model=False, f_scale=0.0),
         )
         if converged:
             n_compiled += 1
             np.testing.assert_array_less(
-                np.abs(popt - exact / norm), 1e-4 * np.sqrt(np.diag(pcov))
+                np.abs(popt - exact / norm),
+                1e-4 * np.sqrt(np.diag(pcov)),
+                err_msg=f"spectrum {spec}",
             )
-    assert n_compiled > 50
+    # The rest are high orders whose path crosses the bound on the way to an
+    # optimum inside it, which scipy's bounded solver handles
+    assert n_compiled >= 0.85 * n_unbounded
 
 
 def test_compiled_fit_handles_the_default_fit() -> None:
@@ -120,32 +152,66 @@ def test_compiled_fit_handles_the_default_fit() -> None:
             stokes_i_arr,
             error_arr,
             np.array([max(stokes_i_arr.mean(), 0.0), 0.0, 0.0]),
-            True,
-            3.0,
+            ModelSettings(log_model=True, f_scale=3.0),
         )[2]
     assert n_compiled >= 0.98 * n_spectra
 
 
-def test_dynamic_fit_picks_the_same_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_dynamic_fit_picks_the_same_order(
+    monkeypatch: pytest.MonkeyPatch, scipy_fits_only: ScipyFitsOnly
+) -> None:
     rng = np.random.default_rng(7)
-    for _ in range(40):
+    for spec in range(40):
         args = random_spectrum(rng)
         compiled = dynamic_fit(*args, fit_order=3)
         with monkeypatch.context() as patch:
-            scipy_only(patch)
+            scipy_fits_only(patch)
             reference = dynamic_fit(*args, fit_order=3)
-        assert np.size(compiled.popt) == np.size(reference.popt)
-        np.testing.assert_array_less(
-            np.abs(np.asarray(compiled.popt) - np.asarray(reference.popt)),
-            1e-2 * np.sqrt(np.diag(reference.pcov)) + 1e-300,
+        assert np.size(compiled.popt) == np.size(reference.popt), f"spectrum {spec}"
+        assert_within_sigma(
+            compiled.popt, reference.popt, reference.pcov, f"spectrum {spec}"
         )
+
+
+def test_dynamic_orders_stay_compiled() -> None:
+    """A dynamic-order fit stays compiled even where a low order does not
+    converge (a flat model of a curved spectrum leaves many channels past
+    f_scale), as long as that order loses"""
+    rng = np.random.default_rng(17)
+    n_freq, n_spec = 96, 100
+    freq_arr_hz = np.linspace(0.8e9, 1.088e9, n_freq)
+    x_arr = freq_arr_hz / np.mean(freq_arr_hz)
+    flux = 10 ** rng.uniform(-2, 0, (n_spec, 1))
+    alpha, beta = rng.normal(-0.7, 0.3, (n_spec, 1)), rng.normal(0, 0.5, (n_spec, 1))
+    error = flux / 10 ** rng.uniform(1, 2.5, (n_spec, 1))
+    i_rows = flux * x_arr ** (alpha + beta * np.log10(x_arr))
+    i_rows += rng.normal(size=i_rows.shape) * error
+    fit = fit_stokes_i_spectra(
+        StokesISpectra(
+            i_rows=i_rows,
+            err_rows=np.broadcast_to(error, i_rows.shape),
+            freq_arr_hz=freq_arr_hz,
+            ref_freq_hz=np.full(n_spec, np.mean(freq_arr_hz)),
+        ),
+        SpectraFitOptions(
+            fit_order=-3,
+            model=ModelSettings(log_model=True, f_scale=3.0),
+            snr_cut=np.nan,
+            model_floor_sigma=1.0,
+        ),
+    )
+    assert np.mean(fit.status == FitStatus.FITTED) >= 0.95
 
 
 def test_compiled_fit_leaves_a_bounded_fit_to_scipy() -> None:
     """A negative spectrum puts p0 on its >= 0 bound: scipy's to handle"""
     x_arr = np.linspace(0.8, 1.2, 50)
     popt, _, converged = lm_fit(
-        x_arr, -np.ones(50), np.full(50, 0.1), np.zeros(3), True, 3.0
+        x_arr,
+        -np.ones(50),
+        np.full(50, 0.1),
+        np.zeros(3),
+        ModelSettings(log_model=True, f_scale=3.0),
     )
     assert not converged
     assert popt[0] == 0.0
@@ -153,7 +219,9 @@ def test_compiled_fit_leaves_a_bounded_fit_to_scipy() -> None:
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 @pytest.mark.parametrize("name", ["bad_fit", "overflow"])
-def test_real_spectra_fit_as_scipy(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_real_spectra_fit_as_scipy(
+    name: str, monkeypatch: pytest.MonkeyPatch, scipy_fits_only: ScipyFitsOnly
+) -> None:
     """Real Stokes I spectra that once broke the fit"""
     data_path = Path(str(resources.files("rm_lite.data.tests")))
     stokes_i_arr = np.load(data_path / f"stokes_i_arr_{name}.npy")
@@ -168,16 +236,12 @@ def test_real_spectra_fit_as_scipy(name: str, monkeypatch: pytest.MonkeyPatch) -
     options = StokesIFitOptions(fit_order=-5, snr_cut=None)
     compiled = fit_stokes_i_model(*args, options=options)
     with monkeypatch.context() as patch:
-        scipy_only(patch)
+        scipy_fits_only(patch)
         reference = fit_stokes_i_model(*args, options=options)
     assert compiled is not None
     assert reference is not None
     assert np.size(compiled.popt) == np.size(reference.popt)
-    sigma = np.sqrt(np.diag(reference.pcov))
-    np.testing.assert_array_less(
-        np.abs(np.asarray(compiled.popt) - np.asarray(reference.popt)),
-        1e-2 * sigma + 1e-300,
-    )
+    assert_within_sigma(compiled.popt, reference.popt, reference.pcov)
 
 
 @pytest.mark.parametrize("fit_function", ["log", "linear"])
@@ -209,15 +273,6 @@ def test_model_samples_match_one_at_a_time(
     )
 
 
-def scipy_spectra(i_rows: np.ndarray, *args: object) -> tuple[np.ndarray, ...]:
-    """A `fit_stokes_i_spectra` that leaves every spectrum to the per-pixel path"""
-    n_spec, n_freq = i_rows.shape
-    n_coeff = abs(int(args[3])) + 1  # type: ignore[call-overload]
-    coeff = np.full((n_spec, n_coeff), np.nan)
-    model = np.full((n_spec, n_freq), np.nan)
-    return model, model[:, 0], model[:, 0], coeff, coeff, np.full(n_spec, 3)
-
-
 @pytest.mark.parametrize(
     "options",
     [
@@ -230,7 +285,10 @@ def scipy_spectra(i_rows: np.ndarray, *args: object) -> tuple[np.ndarray, ...]:
 )
 @pytest.mark.parametrize("dtype", [np.float64, np.float32])
 def test_block_fit_matches_per_pixel_fit(
-    options: StokesIFitOptions, dtype: type, monkeypatch: pytest.MonkeyPatch
+    options: StokesIFitOptions,
+    dtype: type,
+    monkeypatch: pytest.MonkeyPatch,
+    scipy_fits_only: ScipyFitsOnly,
 ) -> None:
     """The compiled block fit gives what fitting each pixel in Python does"""
     rng = np.random.default_rng(5)
@@ -246,20 +304,28 @@ def test_block_fit_matches_per_pixel_fit(
     i_block[rng.random(i_block.shape) < 0.01] += 0.05  # outliers
     i_block[:, 0, 1] = rng.normal(0, 1e-3, n_freq)  # noise only
     i_block[:, 1, 0] = 0.1 - 0.09 * freq_arr_hz / 900e6  # dips below zero
+    i_block[::3, 1, 2] += 0.05  # a third of channels out: lm_fit leaves to scipy
     err_block = np.full(i_block.shape, 1e-3)
     err_block[:, 1, 1] = 0.0  # no errors given
     kwargs: dict[str, Any] = {
         "freq_arr_hz": freq_arr_hz,
-        # A per-pixel reference frequency
-        "ref_freq_hz": rng.uniform(800e6, 950e6, (cy, cx)),
+        "ref_freq_hz": float(np.median(freq_arr_hz)),
         "err_1d": None,
         "fit_options": options,
         "log_level": logging.ERROR,
+        "has_ref_block": True,
     }
-    blocks: tuple[np.ndarray, ...] = (i_block.astype(dtype), err_block.astype(dtype))
+    # A per-pixel reference frequency, as rmsynth_3d passes it
+    blocks: tuple[np.ndarray, ...] = (
+        i_block.astype(dtype),
+        err_block.astype(dtype),
+        rng.uniform(800e6, 950e6, (cy, cx)),
+    )
     compiled = fitting._fit_stokes_i_block(*blocks, **kwargs)
     with monkeypatch.context() as patch:
-        patch.setattr(fitting, "fit_stokes_i_spectra", scipy_spectra)
+        # Every pixel through the Python path, which still runs lm_fit first
+        scipy_fits_only(patch)
+        patch.setattr(fitting, "lm_fit", lm_fit)
         reference = fitting._fit_stokes_i_block(*blocks, **kwargs)
     np.testing.assert_array_equal(np.isnan(compiled), np.isnan(reference))
     assert np.isfinite(compiled).any()

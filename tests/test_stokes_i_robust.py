@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 from astropy.stats import akaike_info_criterion_lsq
 from numpy.typing import NDArray
-from rm_lite.utils import fitting
 from rm_lite.utils.fitting import (
     RobustLoss,
     StokesIFitOptions,
@@ -342,7 +341,9 @@ def test_no_error_falls_back_to_plain_least_squares(spectrum: Spectrum) -> None:
 
 
 def test_a_failed_fit_is_unscoreable(
-    spectrum: Spectrum, monkeypatch: pytest.MonkeyPatch
+    spectrum: Spectrum,
+    monkeypatch: pytest.MonkeyPatch,
+    scipy_fits_only: Callable[[pytest.MonkeyPatch], None],
 ) -> None:
     """A flat model nothing converged to scores inf rather than competing."""
     # Otherwise it competes on AIC once the weighting has shrunk its residuals.
@@ -353,7 +354,7 @@ def test_a_failed_fit_is_unscoreable(
 
     monkeypatch.setattr(optimize, "curve_fit", always_fails)
     # and the compiled fit that runs first
-    monkeypatch.setattr(fitting, "lm_fit", lambda *args: (args[3], None, False))
+    scipy_fits_only(monkeypatch)
     fit = static_fit(
         spectrum.freq_arr_hz,
         spectrum.ref_freq_hz,
