@@ -307,9 +307,11 @@ def nb_median(arr: NDArray[np.floating]) -> float:
         return np.nan
     # Floyd-Rivest samples the values around kth, so give it them in a
     # scrambled order: smooth, structured input (sidelobes) slows it right down.
-    # Stepping by a prime larger than any array visits every index once.
+    # A large step coprime to the size visits every index once.
     work = np.empty(arr.size, dtype=np.float64)
     step = 1_000_003 % arr.size
+    while math.gcd(step, arr.size) != 1:
+        step += 1
     index = 0
     for scrambled in range(arr.size):
         work[scrambled] = arr[index]

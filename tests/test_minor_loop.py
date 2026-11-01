@@ -15,6 +15,7 @@ from rm_lite.utils.clean import (
     MinorLoopOptions,
     MinorLoopResults,
     minor_loop,
+    offsource_rms,
     shift_rmsf,
 )
 from rm_lite.utils.logging import quiet_logs
@@ -111,7 +112,8 @@ def python_minor_loop(
             continue
         stalled = iter_count - last_recompute_iter >= options.stall_iters
         if peak < 0.8 * last_recompute_peak or stalled:
-            ratio = python_offsource_rms(resid, mask) / options.noise
+            noise = options.noise
+            ratio = python_offsource_rms(resid, mask) / noise if noise > 0 else 1.0
             threshold = options.mask_threshold * max(1.0, ratio)
             last_recompute_peak, last_recompute_iter = peak, iter_count
             above = (np.abs(resid) > threshold) & mask_original
@@ -277,6 +279,39 @@ def test_compiled_loop_matches_python_on_a_blank_spectrum(mask_mode: MaskMode) -
     with quiet_logs():
         compiled = minor_loop(arrays, options)
     assert_same_clean(compiled, python_minor_loop(arrays, options))
+
+
+@pytest.mark.parametrize("mask_mode", ["adaptive", "threshold", "fixed"])
+@pytest.mark.parametrize(
+    "nan_options",
+    [
+        ("mask_threshold",),
+        ("stopping_threshold",),
+        ("noise",),
+        ("mask_threshold", "stopping_threshold", "noise"),
+    ],
+    ids=["mask_threshold", "stopping_threshold", "noise", "all"],
+)
+def test_compiled_loop_matches_python_with_nan_options(
+    mask_mode: MaskMode, nan_options: tuple[str, ...]
+) -> None:
+    """NaN thresholds and noise, as from a blanked pixel of a map"""
+    arrays, options = options_for(
+        simulated_arrays("pair"), mask_mode, NOISE, max_iter=300
+    )
+    nans: dict[str, Any] = dict.fromkeys(nan_options, np.nan)
+    options = dataclasses.replace(options, **nans)
+    with quiet_logs():
+        compiled = minor_loop(arrays, options)
+    assert_same_clean(compiled, python_minor_loop(arrays, options))
+
+
+def test_offsource_rms_needs_eight_channels() -> None:
+    resid = np.random.default_rng(0).normal(size=10).astype(complex)
+    mask = np.arange(10) < 3
+    assert offsource_rms(resid, mask) == 0.0
+    assert offsource_rms(resid, ~mask) == 0.0
+    assert offsource_rms(resid, np.arange(10) < 2) > 0.0
 
 
 def test_compiled_loop_matches_python_when_reseeding_changes_nothing() -> None:

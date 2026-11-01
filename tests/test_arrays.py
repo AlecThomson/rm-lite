@@ -106,6 +106,12 @@ def test_nb_median_matches_numpy(order: str, size: int) -> None:
     assert nb_median(values.astype(np.float32)) == np.median(values.astype(np.float32))
 
 
+@pytest.mark.parametrize("size", [1_000_003, 2_000_006])
+def test_nb_median_when_the_size_shares_a_factor_with_the_step(size: int) -> None:
+    values = np.random.default_rng(size).normal(size=size)
+    assert nb_median(values) == np.median(values)
+
+
 def test_nb_median_of_nan_and_empty() -> None:
     assert np.isnan(nb_median(np.array([1.0, np.nan, 2.0])))
     assert np.isnan(nb_median(np.array([], dtype=float)))

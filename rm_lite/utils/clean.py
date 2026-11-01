@@ -20,6 +20,8 @@ from scipy.ndimage import (
 )
 from tqdm.auto import tqdm
 
+# numba's cache tracks this file only: clear __pycache__ after editing the nb_
+# kernels in arrays.py
 from rm_lite.utils.arrays import (
     nb_median,
     nb_nanargmax_abs,
@@ -277,8 +279,10 @@ class HogbomOptions(NamedTuple):
     """Amplitude below which a channel is not cleaned"""
     update_mask: bool
     """Update the mask as the loop goes"""
+    adaptive: bool
+    """Grow the mask from a seed against the off-source noise"""
     noise: float
-    """FDF noise for the adaptive mask; NaN for a fixed one"""
+    """FDF noise for the adaptive mask"""
     stall_iters: int
     """Iterations without progress before the adaptive mask seeds the global peak"""
     start_iter: int
@@ -466,10 +470,11 @@ def hogbom_minor_loop(
         options.mask_threshold,
     )
     noise, stall_iters = options.noise, options.stall_iters
-    adaptive = not np.isnan(noise)
+    adaptive = options.adaptive
     adaptive_mask_update = options.update_mask and adaptive
     threshold_mask_update = options.update_mask and not adaptive
-    threshold_sq = mask_threshold * mask_threshold if mask_threshold >= 0 else -1.0
+    # A NaN threshold stays NaN, so no channel clears it, as in NumPy
+    threshold_sq = -1.0 if mask_threshold < 0 else mask_threshold * mask_threshold
     model = np.zeros_like(resid)
     iter_count = options.start_iter
     stop = HogbomStop.NOT_STARTED
@@ -599,7 +604,7 @@ def minor_loop_spectrum(
             peak, and channels in the starting mask. On divergence the residual
             and model are those at the lowest peak.
     """
-    if options.update_mask and not np.isnan(options.noise):
+    if options.update_mask and options.adaptive:
         # Start tight (seed only) so the RMSF sidelobe ringing sits off-source
         # and inflates the MAD; the incoming mask is the cap the mask grows in.
         mask = np.zeros(resid.size, dtype=np.bool_)
@@ -706,7 +711,8 @@ def minor_loop(
                 stopping_threshold=float(minor_loop_options.stopping_threshold),
                 mask_threshold=float(minor_loop_options.mask_threshold),
                 update_mask=minor_loop_options.update_mask,
-                noise=np.nan if noise is None else float(noise),
+                adaptive=noise is not None,
+                noise=0.0 if noise is None else float(noise),
                 stall_iters=minor_loop_options.stall_iters,
                 start_iter=minor_loop_options.start_iter,
                 max_iter=minor_loop_options.max_iter,

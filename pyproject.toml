@@ -186,7 +186,4 @@ run.source = ["rm_lite"]
 report.exclude_also = [
     '\.\.\.',
     'if typing.TYPE_CHECKING:',
-    # coverage cannot trace numba-compiled functions; tests compare them with
-    # NumPy instead
-    '@numba\.njit',
 ]
