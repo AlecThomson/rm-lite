@@ -501,15 +501,22 @@ def lm_fit(
     for _ in range(100):
         hess = jac.T @ jac
         grad = jac.T @ resid
-        if not np.isfinite(cost) or not np.all(np.isfinite(grad)):
+        if not np.isfinite(cost) or not np.all(np.isfinite(hess)):
             return params, pcov, False
+        # Converged once a full Gauss-Newton step is under 1e-6 of the errors:
+        # it lowers the cost by 0.5 dp.H.dp, and H is the inverse covariance.
+        # Tested before stepping, as at the optimum no step lowers it, in
+        # floats. pinv (of at most 6x6) rather than solve, which can raise.
+        predicted = 0.5 * grad @ np.linalg.pinv(hess) @ grad
+        if predicted <= max(0.5 * 1e-6**2, 1e-15 * cost):
+            converged = True
+            break
         # Marquardt: damp along the curvature, more after a step that failed
         while True:
-            try:
-                step = np.linalg.solve(hess + damping * np.diag(np.diag(hess)), -grad)
-            except Exception:
+            damped = hess + damping * np.diag(np.diag(hess))
+            if not np.all(np.isfinite(damped)):
                 return params, pcov, False
-            trial = params + step
+            trial = params - np.linalg.pinv(damped) @ grad
             trial[0] = max(trial[0], 0.0)
             trial_cost, sigma_resid, trial_resid, trial_jac = _robust_cost(
                 trial, x_arr, log_x, stokes_i_arr, sigma_arr, log_model, f_scale
@@ -519,19 +526,8 @@ def lm_fit(
             damping *= 10
             if damping > 1e16:
                 return params, pcov, False
-        decrease = cost - trial_cost
-        step_size = np.sqrt(np.sum((trial - params) ** 2))
-        undamped = damping <= 1e-3
         params, cost, resid, jac = trial, trial_cost, trial_resid, trial_jac
         damping = max(damping / 10, 1e-15)
-        # A tiny step only means convergence when it was (near) a Gauss-Newton
-        # step; a heavily damped step is tiny because of the damping
-        if undamped and (
-            decrease <= 1e-10 * cost
-            or step_size <= 1e-9 * (np.sqrt(np.sum(params**2)) + 1e-12)
-        ):
-            converged = True
-            break
     if not converged or params[0] <= 0:
         return params, pcov, False
     # Many channels past f_scale: the loss is far from quadratic and has other
