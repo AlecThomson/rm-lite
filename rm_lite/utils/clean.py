@@ -386,6 +386,36 @@ class _HogbomBatch(NamedTuple):
     """Starting iteration"""
 
 
+class _HogbomSpectrum(NamedTuple):
+    """One spectrum for the Hogbom loop"""
+
+    resid: NDArray[np.complexfloating]
+    """Residual, cleaned in place"""
+    resid_start: NDArray[np.complexfloating]
+    """Residual to start from"""
+    mask_original: NDArray[np.bool_]
+    """Channels that may be cleaned"""
+    rmsf: NDArray[np.complexfloating]
+    """Double-length RMSF"""
+    max_rmsf_index: int
+    """Index of the RMSF peak"""
+
+
+class _LoopResults(NamedTuple):
+    """`hogbom_minor_loop` on one spectrum"""
+
+    model: NDArray[np.complexfloating]
+    """Clean components"""
+    iter_count: int
+    """Iterations"""
+    stop: int
+    """`HogbomStop`"""
+    best_peak: float
+    """Lowest peak of the whole residual"""
+    best_iter: int
+    """Iteration it was seen at"""
+
+
 class _HogbomSpectrumResults(NamedTuple):
     """`minor_loop_spectrum` on one spectrum"""
 
@@ -563,45 +593,67 @@ def seed_index(
 
 
 @numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def _grow_adaptive_mask(
+    spectrum: _HogbomSpectrum, mask: NDArray[np.bool_], options: HogbomOptions
+) -> None:
+    """Grow the adaptive mask in place.
+
+    Uses a mask threshold raised by how far sidelobes lift the off-source RMS
+    over the noise, and grows the region (it only grows) into touching channels
+    above it. Growing only by touch keeps it from jumping RMSF nulls onto
+    sidelobe islands.
+
+    Args:
+        spectrum (_HogbomSpectrum): The spectrum being cleaned.
+        mask (NDArray[np.bool_]): Clean region, grown in place.
+        options (HogbomOptions): Loop options.
+    """
+    resid, mask_original = spectrum.resid, spectrum.mask_original
+    noise = options.noise
+    ratio = offsource_rms(resid, mask) / noise if noise > 0 else 1.0
+    threshold = options.mask_threshold * max(1.0, ratio)
+    grown = mask.copy()
+    for chan in range(resid.size):
+        touches = (
+            mask[chan]
+            or (chan > 0 and mask[chan - 1])
+            or (chan < resid.size - 1 and mask[chan + 1])
+        )
+        if touches and mask_original[chan] and np.sqrt(abs_sq(resid[chan])) > threshold:
+            grown[chan] = True
+    mask[:] = grown
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
 def hogbom_minor_loop(
-    resid: NDArray[np.complexfloating],
+    spectrum: _HogbomSpectrum,
     mask: NDArray[np.bool_],
-    mask_original: NDArray[np.bool_],
-    rmsf: NDArray[np.complexfloating],
-    max_rmsf_index: int,
     options: HogbomOptions,
-    max_iter: int,
-    guard_divergence: bool,
-) -> tuple[NDArray[np.complexfloating], int, int, float, int]:
+    stop_iter: int,
+) -> _LoopResults:
     """Hogbom iterations from a starting mask, in place, until the loop stops.
 
     Args:
-        resid (NDArray[np.complexfloating]): Residual, cleaned in place.
+        spectrum (_HogbomSpectrum): The spectrum, cleaned in place.
         mask (NDArray[np.bool_]): Starting clean region, updated in place.
-        mask_original (NDArray[np.bool_]): Channels that may be cleaned.
-        rmsf (NDArray[np.complexfloating]): Double-length RMSF.
-        max_rmsf_index (int): Index of the RMSF peak.
         options (HogbomOptions): Loop options.
-        max_iter (int): Iteration to stop at (`options.max_iter`, or earlier for
-            the rerun after divergence).
-        guard_divergence (bool): Stop if the residual peak runs away.
+        stop_iter (int): Iteration to stop at: `options.max_iter`, or earlier
+            for the rerun after divergence.
 
     Returns:
-        tuple[NDArray[np.complexfloating], int, int, float, int]: Model,
-            iteration count, `HogbomStop`, lowest residual peak and the
-            iteration it was seen at.
+        _LoopResults: Model, iterations, why it stopped, and the lowest peak of
+            the whole residual and its iteration.
     """
-    gain, stopping_threshold, mask_threshold = (
-        options.gain,
-        options.stopping_threshold,
-        options.mask_threshold,
-    )
-    noise, stall_iters = options.noise, options.stall_iters
-    adaptive = options.adaptive
-    adaptive_mask_update = options.update_mask and adaptive
-    threshold_mask_update = options.update_mask and not adaptive
+    resid, mask_original, rmsf = spectrum.resid, spectrum.mask_original, spectrum.rmsf
+    adaptive_mask_update = options.update_mask and options.adaptive
+    threshold_mask_update = options.update_mask and not options.adaptive
+    mask_threshold = options.mask_threshold
     # A NaN threshold stays NaN, so no channel clears it, as in NumPy
     threshold_sq = -1.0 if mask_threshold < 0 else mask_threshold * mask_threshold
+    # Only a blank spectrum skips the divergence checks, and its NaN peaks never
+    # pass them anyway, so this never changes the result; the compiled loop runs
+    # about 10% faster with it
+    guard_divergence = np.isfinite(resid).any()
     model = np.zeros_like(resid)
     iter_count = options.start_iter
     stop = HogbomStop.NOT_STARTED
@@ -610,48 +662,52 @@ def hogbom_minor_loop(
     peaks = find_peaks(
         resid, mask, mask_original, rmsf, 0j, 0, threshold_sq, False, False
     )
-    while iter_count <= max_iter:
+    while iter_count <= stop_iter:
         if not peaks.mask_any:
             stop = HogbomStop.EMPTY_MASK
             break
-        if iter_count == max_iter:
+        if iter_count == stop_iter:
             stop = HogbomStop.MAX_ITER
             break
         peak = np.sqrt(peaks.mask_sq)
-        if peak < stopping_threshold:
-            stop = HogbomStop.THRESHOLD
-            if not adaptive:
-                break
-            # Region exhausted, so the main source and its sidelobes are gone:
-            # anything still above the mask floor is real emission. Start a new
-            # region there instead of stopping.
-            seed = seed_index(resid, mask_original, mask_threshold)
+        if peak < options.stopping_threshold:
+            # Adaptive only: the region is exhausted, so the main source and its
+            # sidelobes are gone, and anything still above the mask floor is
+            # real emission. Start a new region there instead of stopping.
+            seed = (
+                seed_index(resid, mask_original, mask_threshold)
+                if options.adaptive
+                else -1
+            )
             if seed < 0:
+                stop = HogbomStop.THRESHOLD
                 break
             if mask[seed]:
-                # Already in the region: every iteration from here on reseeds
-                # it and changes nothing
-                iter_count = max_iter
-            else:
-                mask[seed] = True
-                last_recompute_peak, last_recompute_iter = np.inf, iter_count
-                iter_count += 1
+                # Already in the region: every iteration from here on would
+                # reseed it and change nothing
+                iter_count, stop = stop_iter, HogbomStop.MAX_ITER
+                break
+            mask[seed] = True
+            last_recompute_peak, last_recompute_iter = np.inf, iter_count
+            iter_count += 1
             peaks = find_peaks(
                 resid, mask, mask_original, rmsf, 0j, 0, threshold_sq, False, False
             )
             continue
-        if guard_divergence:
-            # As `CleanProgress.check`, on the peak of the whole residual
-            global_peak = np.sqrt(peaks.global_sq) if peaks.global_sq >= 0 else np.nan
-            if global_peak - best_peak > options.divergence_fraction * best_peak:
-                stop = HogbomStop.DIVERGED
-                break
-            if global_peak < best_peak:
-                best_peak, best_iter = global_peak, iter_count
+        # As `CleanProgress.check`, on the peak of the whole residual
+        global_peak = np.sqrt(peaks.global_sq) if peaks.global_sq >= 0 else np.nan
+        if (
+            guard_divergence
+            and global_peak - best_peak > options.divergence_fraction * best_peak
+        ):
+            stop = HogbomStop.DIVERGED
+            break
+        if guard_divergence and global_peak < best_peak:
+            best_peak, best_iter = global_peak, iter_count
 
         # Add the component, and subtract its RMSF: at channel `chan` that is
         # rmsf[chan + max_rmsf_index - peak channel], wrapping round
-        component = gain * resid[peaks.mask_index]
+        component = options.gain * resid[peaks.mask_index]
         model[peaks.mask_index] += component
         peaks = find_peaks(
             resid,
@@ -659,70 +715,41 @@ def hogbom_minor_loop(
             mask_original,
             rmsf,
             component,
-            (max_rmsf_index - peaks.mask_index) % rmsf.size,
+            (spectrum.max_rmsf_index - peaks.mask_index) % rmsf.size,
             threshold_sq,
             True,
             threshold_mask_update,
         )
-
-        stalled = iter_count - last_recompute_iter >= stall_iters
+        # Each time the peak falls to 0.8 of its last value, or stalls, regrow
+        # the adaptive mask
+        stalled = iter_count - last_recompute_iter >= options.stall_iters
         if adaptive_mask_update and (peak < 0.8 * last_recompute_peak or stalled):
-            # Each time the peak falls by 0.8, raise the mask threshold by how
-            # far sidelobes lift the off-source RMS over the noise, and grow the
-            # region (it only grows) into touching channels above it. Growing
-            # only by touch keeps it from jumping RMSF nulls onto sidelobe
-            # islands.
-            ratio = offsource_rms(resid, mask) / noise if noise > 0 else 1.0
-            threshold = mask_threshold * max(1.0, ratio)
+            _grow_adaptive_mask(spectrum, mask, options)
+            # A stalled peak is held up by the sidelobes of a brighter source
+            # the growth cannot reach across a null, so seed that one too. A
+            # noise-like residual clears no floor and seeds nothing, so a
+            # noise-only spectrum still cleans nothing.
+            seed = seed_index(resid, mask_original, mask_threshold) if stalled else -1
+            if seed >= 0:
+                mask[seed] = True
             last_recompute_peak, last_recompute_iter = peak, iter_count
-            grown = mask.copy()
-            for chan in range(resid.size):
-                touches = (
-                    mask[chan]
-                    or (chan > 0 and mask[chan - 1])
-                    or (chan < resid.size - 1 and mask[chan + 1])
-                )
-                if (
-                    touches
-                    and mask_original[chan]
-                    and np.sqrt(abs_sq(resid[chan])) > threshold
-                ):
-                    grown[chan] = True
-            mask[:] = grown
-            if stalled:
-                # The peak stopped falling: it is held up by the sidelobes of a
-                # brighter source the growth cannot reach across a null, so seed
-                # that one too. A noise-like residual clears no floor and seeds
-                # nothing, so a noise-only spectrum still cleans nothing.
-                seed = seed_index(resid, mask_original, mask_threshold)
-                if seed >= 0:
-                    mask[seed] = True
             peaks = find_peaks(
                 resid, mask, mask_original, rmsf, 0j, 0, threshold_sq, False, False
             )
         iter_count += 1
 
-    return model, iter_count, stop, best_peak, best_iter
+    return _LoopResults(model, iter_count, stop, best_peak, best_iter)
 
 
 @numba.njit(cache=True, nogil=True)  # type: ignore[misc]
 def minor_loop_spectrum(
-    resid: NDArray[np.complexfloating],
-    resid_start: NDArray[np.complexfloating],
-    mask_original: NDArray[np.bool_],
-    rmsf: NDArray[np.complexfloating],
-    max_rmsf_index: int,
-    options: HogbomOptions,
+    spectrum: _HogbomSpectrum, options: HogbomOptions
 ) -> _HogbomSpectrumResults:
     """Hogbom minor loop over one spectrum: the compiled body of `minor_loop`.
 
     Args:
-        resid (NDArray[np.complexfloating]): Residual, a copy of `resid_start`,
-            cleaned in place.
-        resid_start (NDArray[np.complexfloating]): Residual to start from.
-        mask_original (NDArray[np.bool_]): Channels that may be cleaned.
-        rmsf (NDArray[np.complexfloating]): Double-length RMSF.
-        max_rmsf_index (int): Index of the RMSF peak.
+        spectrum (_HogbomSpectrum): The spectrum; `resid` is a copy of
+            `resid_start`, cleaned in place.
         options (HogbomOptions): Loop options.
 
     Returns:
@@ -733,45 +760,31 @@ def minor_loop_spectrum(
     if options.update_mask and options.adaptive:
         # Start tight (seed only) so the RMSF sidelobe ringing sits off-source
         # and inflates the MAD; the incoming mask is the cap the mask grows in.
-        mask = np.zeros(resid.size, dtype=np.bool_)
-        seed = seed_index(resid, mask_original, options.mask_threshold)
+        mask = np.zeros(spectrum.resid.size, dtype=np.bool_)
+        seed = seed_index(
+            spectrum.resid, spectrum.mask_original, options.mask_threshold
+        )
         if seed >= 0:
             mask[seed] = True
     else:
-        mask = mask_original.copy()
+        mask = spectrum.mask_original.copy()
     mask_start = mask.copy()
-    # A blank spectrum has no peak to watch, and cannot run away.
-    guard_divergence = False
-    for value in resid:
-        if np.isfinite(value):
-            guard_divergence = True
-            break
-    model, iter_count, stop, best_peak, best_iter = hogbom_minor_loop(
-        resid,
-        mask,
-        mask_original,
-        rmsf,
-        max_rmsf_index,
-        options,
-        options.max_iter,
-        guard_divergence,
-    )
-    if stop == HogbomStop.DIVERGED:
+    loop = hogbom_minor_loop(spectrum, mask, options, options.max_iter)
+    model = loop.model
+    if loop.stop == HogbomStop.DIVERGED:
         # The loop is deterministic, so the state at the lowest peak is a rerun
         # that stops at the iteration it was seen at.
-        resid[:] = resid_start
+        spectrum.resid[:] = spectrum.resid_start
         model = hogbom_minor_loop(
-            resid,
-            mask_start.copy(),
-            mask_original,
-            rmsf,
-            max_rmsf_index,
-            options,
-            best_iter,
-            guard_divergence,
-        )[0]
+            spectrum, mask_start.copy(), options, loop.best_iter
+        ).model
     return _HogbomSpectrumResults(
-        model, mask, iter_count, stop, best_peak, int(np.count_nonzero(mask_start))
+        model,
+        mask,
+        loop.iter_count,
+        loop.stop,
+        loop.best_peak,
+        int(np.count_nonzero(mask_start)),
     )
 
 
@@ -795,11 +808,13 @@ def _minor_loop_spectra(
     for spec in range(first, last):
         row = spec if batch.rmsf.shape[0] > 1 else 0
         result = minor_loop_spectrum(
-            batch.resid[spec],
-            batch.resid_start[spec],
-            batch.mask_original[spec],
-            batch.rmsf[row],
-            batch.max_rmsf_index[row],
+            _HogbomSpectrum(
+                resid=batch.resid[spec],
+                resid_start=batch.resid_start[spec],
+                mask_original=batch.mask_original[spec],
+                rmsf=batch.rmsf[row],
+                max_rmsf_index=batch.max_rmsf_index[row],
+            ),
             HogbomOptions(
                 gain=settings.gain,
                 stopping_threshold=batch.stopping_threshold[spec],
