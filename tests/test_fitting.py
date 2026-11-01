@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from importlib import resources
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -169,3 +170,67 @@ def test_model_samples_match_one_at_a_time(
         fitting._alpha_at_ref(samples, freq_arr_hz, ref_freq_hz),
         [fitting._alpha_at_ref(s, freq_arr_hz, ref_freq_hz) for s in samples],
     )
+
+
+def scipy_spectra(i_rows: np.ndarray, *args: object) -> tuple[np.ndarray, ...]:
+    """A `fit_stokes_i_spectra` that leaves every spectrum to the per-pixel path"""
+    n_spec, n_freq = i_rows.shape
+    n_coeff = abs(int(args[3])) + 1  # type: ignore[call-overload]
+    coeff = np.full((n_spec, n_coeff), np.nan)
+    model = np.full((n_spec, n_freq), np.nan)
+    return model, model[:, 0], model[:, 0], coeff, coeff, np.full(n_spec, 3)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        StokesIFitOptions(),
+        StokesIFitOptions(fit_order=-3),
+        StokesIFitOptions(fit_function="linear", robust_loss="linear"),
+        StokesIFitOptions(fit_order=1, snr_cut=None, model_floor_sigma=0.0),
+    ],
+    ids=["default", "dynamic", "linear", "no-cut"],
+)
+@pytest.mark.parametrize("dtype", [np.float64, np.float32])
+def test_block_fit_matches_per_pixel_fit(
+    options: StokesIFitOptions, dtype: type, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The compiled block fit gives what fitting each pixel in Python does"""
+    rng = np.random.default_rng(5)
+    n_freq, cy, cx = 96, 6, 7
+    freq_arr_hz = np.linspace(744e6, 1032e6, n_freq)
+    x_arr = (freq_arr_hz / np.median(freq_arr_hz))[:, None, None]
+    flux = 10 ** rng.uniform(-3, 0, (cy, cx))
+    alpha, beta = rng.normal(-0.7, 0.3, (cy, cx)), rng.normal(0, 0.5, (cy, cx))
+    i_block = flux * x_arr ** (alpha + beta * np.log10(x_arr))
+    i_block += rng.normal(0, 1e-3, i_block.shape)
+    i_block[rng.random(i_block.shape) < 0.02] = np.nan  # flagged channels
+    i_block[:, 0, 0] = np.nan  # a blanked pixel
+    i_block[rng.random(i_block.shape) < 0.01] += 0.05  # outliers
+    err_block = np.full(i_block.shape, 1e-3)
+    kwargs: dict[str, Any] = {
+        "freq_arr_hz": freq_arr_hz,
+        # A per-pixel reference frequency
+        "ref_freq_hz": rng.uniform(800e6, 950e6, (cy, cx)),
+        "err_1d": None,
+        "fit_options": options,
+        "log_level": logging.ERROR,
+    }
+    blocks: tuple[np.ndarray, ...] = (i_block.astype(dtype), err_block.astype(dtype))
+    compiled = fitting._fit_stokes_i_block(*blocks, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(fitting, "fit_stokes_i_spectra", scipy_spectra)
+        reference = fitting._fit_stokes_i_block(*blocks, **kwargs)
+    np.testing.assert_array_equal(np.isnan(compiled), np.isnan(reference))
+    assert np.isfinite(compiled).any()
+    planes = fitting._block_planes(n_freq, abs(options.fit_order) + 1, False)
+    np.testing.assert_array_equal(compiled[planes.order], reference[planes.order])
+    for plane, rtol in (
+        (planes.model, 1e-5),
+        (planes.alpha, 1e-4),
+        (planes.coeff, 1e-4),
+        (planes.coeff_error, 1e-3),
+    ):
+        np.testing.assert_allclose(
+            compiled[plane], reference[plane], rtol=rtol, atol=1e-6, equal_nan=True
+        )

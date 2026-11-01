@@ -51,6 +51,15 @@ def unconverged_lm_fit(*args: Any) -> tuple[NDArray[np.float64], None, bool]:
     return args[3], None, False
 
 
+def unconverged_spectra(i_rows: NDArray[np.float64], *args: Any) -> tuple[Any, ...]:
+    """A `fit_stokes_i_spectra` that leaves every spectrum to scipy."""
+    n_spec, n_freq = i_rows.shape
+    n_coeff = abs(args[3]) + 1
+    coeff = np.full((n_spec, n_coeff), np.nan)
+    model = np.full((n_spec, n_freq), np.nan)
+    return model, model[:, 0], model[:, 0], coeff, coeff, np.full(n_spec, 3)
+
+
 D_PHI_RADM2 = 1.0
 
 
@@ -678,6 +687,7 @@ def test_stokes_i_fit_failure_is_graceful(
     """If every fit fails, the cube still completes on flat models."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
     monkeypatch.setattr(fitting, "lm_fit", unconverged_lm_fit)
+    monkeypatch.setattr(fitting, "fit_stokes_i_spectra", unconverged_spectra)
 
     cube = make_stokes_i_cube(alpha=-1.0)
     i_err = np.full_like(cube.stokes_i, 1e-3)

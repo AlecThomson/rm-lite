@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, NamedTuple, Protocol, TypeAlias, cast
 
@@ -14,6 +14,7 @@ from dask.base import compute
 from numpy.typing import ArrayLike, NDArray
 from scipy import optimize, stats
 
+from rm_lite.utils.arrays import nb_median
 from rm_lite.utils.logging import logger, quiet_logs
 
 GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
@@ -542,6 +543,185 @@ def lm_fit(
     if not np.all(np.isfinite(pcov)):
         return params, pcov, False
     return params, pcov, True
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def fit_stokes_i_spectra(
+    i_rows: NDArray[np.float64],
+    err_rows: NDArray[np.float64],
+    freq_arr_hz: NDArray[np.float64],
+    ref_freq_hz: NDArray[np.float64],
+    fit_order: int,
+    log_model: bool,
+    f_scale: float,
+    snr_cut: float,
+    model_floor_sigma: float,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.int64],
+]:
+    """`_fit_stokes_i_block`'s per-pixel fit, compiled, for every spectrum.
+
+    Mirrors `fit_stokes_i_model`, `static_fit`/`dynamic_fit` with `lm_fit`, the
+    noise floor and usability checks, and `_write_model_planes`. A spectrum
+    `lm_fit` leaves to scipy gets status 3 and nothing else, for the caller to
+    fit the Python way.
+
+    Args:
+        i_rows (NDArray[np.float64]): Stokes I, one spectrum per row.
+        err_rows (NDArray[np.float64]): Errors, one row per spectrum or one row
+            for all; zeros for none.
+        freq_arr_hz (NDArray[np.float64]): Channel frequencies.
+        ref_freq_hz (NDArray[np.float64]): Reference frequency per spectrum.
+        fit_order (int): Model order; negative for every order up to it, by AIC.
+        log_model (bool): Fit `power_law` rather than `polynomial`.
+        f_scale (float): Cauchy loss scale in sigma; 0 for a linear loss.
+        snr_cut (float): `stokes_i_snr` below which a spectrum is skipped; NaN
+            for no cut.
+        model_floor_sigma (float): `model_noise_floor` sigma.
+
+    Returns:
+        tuple: Model (n_spec, n_freq), alpha, order, coefficients and their
+            errors (n_spec, n_coeff), and status per spectrum: 0 fitted, 1 not
+            fitted (too few channels or SNR), 2 unusable model, 3 needs scipy.
+    """
+    n_spec, n_freq = i_rows.shape
+    n_coeff = abs(fit_order) + 1
+    model_out = np.full((n_spec, n_freq), np.nan)
+    alpha_out = np.full(n_spec, np.nan)
+    order_out = np.full(n_spec, np.nan)
+    coeff_out = np.full((n_spec, n_coeff), np.nan)
+    coeff_error_out = np.full((n_spec, n_coeff), np.nan)
+    status = np.zeros(n_spec, dtype=np.int64)
+    # For alpha, as `_alpha_at_ref`: ln(freq) ascending, and np.gradient's
+    # weights for uneven spacing
+    sort = np.argsort(freq_arr_hz)
+    ln_freq = np.log(freq_arr_hz[sort])
+    dx1, dx2 = np.diff(ln_freq)[:-1], np.diff(ln_freq)[1:]
+    grad_a = -dx2 / (dx1 * (dx1 + dx2))
+    grad_b = (dx2 - dx1) / (dx1 * dx2)
+    grad_c = dx1 / (dx2 * (dx1 + dx2))
+    for spec in range(n_spec):
+        i_spec = i_rows[spec]
+        e_spec = err_rows[spec if err_rows.shape[0] > 1 else 0]
+        # As `fit_stokes_i_model`: no positive error anywhere means none given
+        weightable = np.isfinite(e_spec) & (e_spec > 0)
+        if not weightable.any():
+            weightable = np.isfinite(e_spec)
+        good = np.isfinite(i_spec) & weightable
+        if np.count_nonzero(good) < n_coeff + 1:
+            status[spec] = 1
+            continue
+        i_good, e_good = i_spec[good], e_spec[good]
+        x_good = freq_arr_hz[good] / ref_freq_hz[spec]
+        usable = e_good > 0
+        if not np.isnan(snr_cut) and usable.any():
+            # `stokes_i_snr`, on the channels with a usable error
+            snr = (
+                nb_median(i_good[usable])
+                * np.sqrt(np.count_nonzero(usable))
+                / nb_median(e_good[usable])
+            )
+            if snr < snr_cut:
+                status[spec] = 1
+                continue
+        # As `static_fit`: without errors, an unweighted fit with a linear loss
+        weighted = usable.all()
+        sigma = e_good if weighted else np.ones(i_good.size)
+        loss_scale = f_scale if weighted else 0.0
+        # Every order up to |fit_order| when it is negative (`dynamic_fit`)
+        first = 0 if fit_order < 0 else fit_order
+        aics = np.full(n_coeff, np.inf)
+        popts = []
+        pcovs = []
+        converged = True
+        for order in range(first, n_coeff):
+            initial_guess = np.zeros(order + 1)
+            initial_guess[0] = max(np.mean(i_good), 0.0)
+            popt, pcov, converged = lm_fit(
+                x_good, i_good, sigma, initial_guess, log_model, loss_scale
+            )
+            if not converged:
+                status[spec] = 3
+                break
+            # `_robust_aic`: residuals in sigma, capped at f_scale for a robust
+            # loss, into astropy's least-squares AIC (corrected below 40
+            # samples per parameter)
+            model_good = _robust_cost(
+                popt, x_good, np.log10(x_good), i_good, sigma, log_model, 0.0
+            )[1]
+            if loss_scale > 0:
+                model_good = np.minimum(np.abs(model_good), loss_scale)
+            n_samples, n_params = model_good.size, order + 1
+            if n_samples - n_params - 1 > 0:
+                aic = 2.0 * n_params + n_samples * np.log(
+                    np.sum(model_good**2) / n_samples
+                )
+                if n_samples / n_params < 40.0:
+                    aic += (
+                        2.0 * n_params * (n_params + 1.0) / (n_samples - n_params - 1.0)
+                    )
+                aics[order] = aic
+            popts.append(popt)
+            pcovs.append(pcov)
+        if not converged:
+            continue
+        best = 0
+        if fit_order < 0:
+            # `best_aic_func`: lowest AIC, then the fewest parameters within 2
+            # of it; the fewest parameters if none can be scored
+            best = int(np.argmin(aics))
+            if not np.isfinite(aics[best]):
+                best = 0
+            for order in range(best):
+                if abs(aics[order] - aics[best]) < 2:
+                    best = order
+                    break
+        best_popt, best_pcov = popts[best], pcovs[best]
+        x_arr = freq_arr_hz / ref_freq_hz[spec]
+        model = np.zeros(n_freq)
+        log_x = np.log10(x_arr)
+        if log_model:
+            for i in range(1, best_popt.size):
+                model += best_popt[i] * log_x**i
+            model = best_popt[0] * 10**model
+        else:
+            for i in range(best_popt.size):
+                model += best_popt[i] * x_arr**i
+        # `model_noise_floor` and `model_is_usable`, on the pixel's whole band
+        floor = np.finfo(np.float32).tiny
+        positive = e_spec[np.isfinite(e_spec) & (e_spec > 0)]
+        if model_floor_sigma > 0 and positive.size:
+            floor = max(
+                model_floor_sigma * nb_median(positive) / np.sqrt(positive.size), floor
+            )
+        if (
+            not np.all(np.isfinite(model))
+            or np.min(model) <= floor
+            or np.max(model) > np.finfo(np.float32).max
+        ):
+            status[spec] = 2
+            continue
+        model_out[spec] = model
+        # `_alpha_at_ref`: d ln I / d ln nu at the reference frequency
+        ln_model = np.log(np.abs(model[sort]))
+        slope = np.empty(n_freq)
+        slope[0] = (ln_model[1] - ln_model[0]) / (ln_freq[1] - ln_freq[0])
+        slope[-1] = (ln_model[-1] - ln_model[-2]) / (ln_freq[-1] - ln_freq[-2])
+        slope[1:-1] = (
+            grad_a * ln_model[:-2] + grad_b * ln_model[1:-1] + grad_c * ln_model[2:]
+        )
+        alpha_out[spec] = np.interp(np.log(ref_freq_hz[spec]), ln_freq, slope)
+        order_out[spec] = best_popt.size - 1
+        coeff_out[spec] = 0.0
+        coeff_out[spec, : best_popt.size] = best_popt
+        coeff_error_out[spec] = 0.0
+        coeff_error_out[spec, : best_popt.size] = np.sqrt(np.diag(best_pcov))
+    return model_out, alpha_out, order_out, coeff_out, coeff_error_out, status
 
 
 def static_fit(
@@ -1138,8 +1318,10 @@ def _iter_pixel_fits(
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: RefFreqHz,
     fit_options: StokesIFitOptions,
+    pixels: Iterable[tuple[int, int]] | None = None,
 ) -> Iterator[PixelFit]:
-    """Yield a `PixelFit` for every pixel in a chunk.
+    """Yield a `PixelFit` for every pixel in a chunk, or for each (y, x) in
+    `pixels`.
 
     `fit` is None for a skipped pixel (`fit_stokes_i_model` returns None when
     there are too few finite channels or the SNR is below `fit_options.snr_cut`).
@@ -1147,18 +1329,17 @@ def _iter_pixel_fits(
     once.
     """
     n_freq, cy, cx = i_block.shape
-    for y in range(cy):
-        for x in range(cx):
-            i_spec = i_block[:, y, x]
-            e_spec = _pixel_stokes_i_error(err_block, err_1d, n_freq, y, x)
-            fit = fit_stokes_i_model(
-                freq_arr_hz=freq_arr_hz,
-                ref_freq_hz=ref_freq_for_pixel(ref_freq_hz, y, x),
-                stokes_i_arr=i_spec,
-                stokes_i_error_arr=e_spec,
-                options=fit_options,
-            )
-            yield PixelFit(y, x, e_spec, fit)
+    for y, x in np.ndindex(cy, cx) if pixels is None else pixels:
+        i_spec = i_block[:, y, x]
+        e_spec = _pixel_stokes_i_error(err_block, err_1d, n_freq, y, x)
+        fit = fit_stokes_i_model(
+            freq_arr_hz=freq_arr_hz,
+            ref_freq_hz=ref_freq_for_pixel(ref_freq_hz, y, x),
+            stokes_i_arr=i_spec,
+            stokes_i_error_arr=e_spec,
+            options=fit_options,
+        )
+        yield PixelFit(y, x, e_spec, fit)
 
 
 class BlockPlanes(NamedTuple):
@@ -1300,11 +1481,40 @@ def _fit_stokes_i_block(
     )
     out = np.full((planes.n_out, cy, cx), np.nan, dtype=np.float64)
     n_rejected = 0
+    # The model errors need each fit's covariance, so they take the per-pixel
+    # path below. Otherwise every pixel is fitted in one compiled call, and only
+    # those it leaves to scipy go that way.
+    pixels = None
+    if not fit_options.compute_model_error:
+        if err_block is not None:
+            err_rows = err_block.reshape(n_freq, -1).T
+        else:
+            err_rows = np.zeros((1, n_freq)) if err_1d is None else err_1d[None]
+        model, alpha, order, coeff, coeff_error, status = fit_stokes_i_spectra(
+            np.ascontiguousarray(i_block.reshape(n_freq, -1).T, dtype=np.float64),
+            np.ascontiguousarray(err_rows, dtype=np.float64),
+            np.asarray(freq_arr_hz, dtype=np.float64),
+            np.broadcast_to(np.asarray(ref_freq_hz, dtype=np.float64), (cy, cx))
+            .reshape(-1)
+            .copy(),
+            fit_options.fit_order,
+            fit_options.fit_function == "log",
+            fit_options.f_scale if fit_options.robust_loss == "cauchy" else 0.0,
+            np.nan if fit_options.snr_cut is None else fit_options.snr_cut,
+            fit_options.model_floor_sigma,
+        )
+        out[planes.model] = model.T.reshape(n_freq, cy, cx)
+        out[planes.alpha] = alpha.reshape(cy, cx)
+        out[planes.order] = order.reshape(cy, cx)
+        out[planes.coeff] = coeff.T.reshape(-1, cy, cx)
+        out[planes.coeff_error] = coeff_error.T.reshape(-1, cy, cx)
+        n_rejected = int(np.count_nonzero(status == 2))
+        pixels = [divmod(int(pixel), cx) for pixel in np.flatnonzero(status == 3)]
     # The 1D fitter logs per fit and per failure. At cube scale that floods, so
     # quiet it to at least ERROR whatever the caller's log_level.
     with quiet_logs(max(log_level, logging.ERROR)):
         for y, x, e_spec, fit in _iter_pixel_fits(
-            i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options
+            i_block, err_block, err_1d, freq_arr_hz, ref_freq_hz, fit_options, pixels
         ):
             if fit is None:
                 continue
