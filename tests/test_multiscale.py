@@ -20,6 +20,7 @@ from rm_lite.utils.clean import (
     compute_scale_kernels,
     convolve_fdf_scale,
     default_scales,
+    multiscale_clean_spectrum,
     rmclean,
 )
 from rm_lite.utils.logging import quiet_logs
@@ -612,9 +613,11 @@ def test_multiscale_options_reject_unknown_selection():
         MultiscaleOptions(selection="bogus")  # type: ignore[arg-type]
 
 
-def test_shared_rmsf_kernels_clean_as_per_pixel_kernels() -> None:
-    """A shared RMSF's scale kernels, computed once per block, clean each pixel
-    as kernels computed for that pixel do"""
+def multiscale_block(
+    fdf_noise: bool, rmsf_scale: NDArray[np.float64] | None = None
+) -> tuple[RMSynthArrays, RMCleanOptions]:
+    """A 2 x 2 block of Faraday-thick sources, with a shared RMSF (or one per
+    pixel, scaled by `rmsf_scale`)"""
     rng = np.random.default_rng(7)
     freq_hz = np.linspace(0.8e9, 2.2e9, 400)
     lsq = freq_to_lambda2(freq_hz)
@@ -638,26 +641,73 @@ def test_shared_rmsf_kernels_clean_as_per_pixel_kernels() -> None:
     ).reshape(-1, 2, 2)
     synth = synths[0]
     rmsf = synth.rmsf_arrs["rmsf_complex_arr"].to_numpy().astype(complex)
-    shared = np.broadcast_to(rmsf[:, None, None], (rmsf.size, 2, 2))
+    rmsf_arr = np.broadcast_to(rmsf[:, None, None], (rmsf.size, 2, 2))
+    if rmsf_scale is not None:
+        rmsf_arr = rmsf_arr * rmsf_scale
     noise = float(synth.fdf_parameters["fdf_error_noise"][0])
-    results = [
-        rmclean(
-            RMSynthArrays(
-                dirty_fdf_arr=dirty,
-                phi_arr_radm2=synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float),
-                rmsf_arr=rmsf_arr,
-                phi_double_arr_radm2=synth.rmsf_arrs["phi2_arr_radm2"]
-                .to_numpy()
-                .astype(float),
-                fwhm_rmsf_arr=np.array(
-                    float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
-                ),
-            ),
-            RMCleanOptions(mask=8 * noise, threshold=3 * noise, fdf_noise=noise),
-            multiscale_options=MultiscaleOptions(),
-        )
-        for rmsf_arr in (shared, shared.copy())
-    ]
+    arrays = RMSynthArrays(
+        dirty_fdf_arr=dirty,
+        phi_arr_radm2=synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float),
+        rmsf_arr=rmsf_arr,
+        phi_double_arr_radm2=synth.rmsf_arrs["phi2_arr_radm2"].to_numpy().astype(float),
+        fwhm_rmsf_arr=np.array(float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])),
+    )
+    options = RMCleanOptions(
+        mask=8 * noise, threshold=3 * noise, fdf_noise=noise if fdf_noise else None
+    )
+    return arrays, options
+
+
+@pytest.mark.parametrize("fdf_noise", [True, False])
+def test_shared_rmsf_kernels_clean_as_per_pixel_kernels(fdf_noise: bool) -> None:
+    """A shared RMSF's scale kernels, computed once per block, clean each pixel
+    as kernels computed for that pixel do"""
+    arrays, options = multiscale_block(fdf_noise)
+    with quiet_logs(logging.ERROR):
+        results = [
+            rmclean(arrays._replace(rmsf_arr=rmsf_arr), options, MultiscaleOptions())
+            for rmsf_arr in (arrays.rmsf_arr, arrays.rmsf_arr.copy())
+        ]
     assert (results[0].clean_iter_arr > 0).all()
     for got, expected in zip(results[0], results[1], strict=True):
         np.testing.assert_array_equal(got, expected)
+
+
+def test_per_pixel_rmsfs_get_their_own_kernels() -> None:
+    """With an RMSF per pixel, each pixel cleans as it does on its own"""
+    scale = 1 + 0.05 * np.arange(4, dtype=np.float64).reshape(2, 2)
+    arrays, options = multiscale_block(True, scale)
+    with quiet_logs(logging.ERROR):
+        block = rmclean(arrays, options, MultiscaleOptions())
+        for y, x in np.ndindex(2, 2):
+            pixel = rmclean(
+                arrays._replace(
+                    dirty_fdf_arr=arrays.dirty_fdf_arr[:, y : y + 1, x : x + 1],
+                    rmsf_arr=arrays.rmsf_arr[:, y : y + 1, x : x + 1],
+                ),
+                options,
+                MultiscaleOptions(),
+            )
+            for got, expected in zip(block, pixel, strict=True):
+                np.testing.assert_array_equal(got[..., y, x], expected[..., 0, 0])
+
+
+def test_multiscale_rejects_kernels_for_other_scales() -> None:
+    arrays, options = multiscale_block(True)
+    rmsf = arrays.rmsf_arr[:, 0, 0]
+    fwhm = float(arrays.fwhm_rmsf_arr)
+    kernels = compute_scale_kernels(
+        np.array([0.0, 1.0]), rmsf, fwhm, arrays.phi_double_arr_radm2, "tapered_quad"
+    )
+    with pytest.raises(ValueError, match="are for scales"):
+        multiscale_clean_spectrum(
+            arrays.dirty_fdf_arr[:, 0, 0],
+            arrays.phi_arr_radm2,
+            arrays.phi_double_arr_radm2,
+            rmsf,
+            fwhm,
+            np.array([0.0, 2.0]),
+            options,
+            MultiscaleOptions(),
+            kernels,
+        )

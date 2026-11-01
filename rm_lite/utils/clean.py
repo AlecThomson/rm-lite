@@ -1281,7 +1281,8 @@ def rmclean(
             phi_max_scale_radm2=phi_max_scale_radm2,
         )
         logger.info(f"Multiscale scales (RMSF FWHM units): {scales}")
-        # The scale kernels depend only on the RMSF, so a shared one needs them once
+        # The scale kernels come from the RMSF, FWHM, scales and kernel shape, which
+        # are all block-constant with a shared RMSF, so it needs them once
         ms_kernels = (
             compute_scale_kernels(
                 scales,
@@ -2401,8 +2402,12 @@ def multiscale_clean_spectrum(
         scales (NDArray[np.float64]): Scales in RMSF FWHM units.
         clean_options (RMCleanOptions): Mask, threshold, gain, max_iter.
         multiscale_options (MultiscaleOptions): Kernel, selector, sub-minor settings.
-        kernels (ScaleKernels | None): `compute_scale_kernels` for this RMSF,
-            scales and kernel, to share between spectra; computed here if None.
+        kernels (ScaleKernels | None): `compute_scale_kernels` of this RMSF,
+            FWHM, phi axis, scales and kernel shape, to share between spectra;
+            computed here if None.
+
+    Raises:
+        ValueError: If `kernels` were computed for other scales.
 
     Returns:
         (clean, resid, model, minor_iters, sub_minor_iters): minor_iters counts
@@ -2435,6 +2440,9 @@ def multiscale_clean_spectrum(
     kernel = multiscale_options.kernel
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
+    if kernels is not None and not np.array_equal(kernels.scales, scales):
+        msg = f"`kernels` are for scales {kernels.scales}, not {scales}."
+        raise ValueError(msg)
     if kernels is None:
         kernels = compute_scale_kernels(
             scales,
