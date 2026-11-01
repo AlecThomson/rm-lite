@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, TypeVar, cast
 
 import dask.array as da
+import numba
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray
@@ -222,3 +224,129 @@ def arange(
     elif np.isclose(arr[-1], stop, rtol=rtol, atol=atol):
         arr = np.delete(arr, -1)
     return arr
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def nb_partition(arr: NDArray[np.floating], kth: int) -> None:
+    """In-place `arr.partition(kth)`, by Floyd-Rivest selection.
+
+    numba's own np.partition and np.median pivot on the median of three, which
+    goes quadratic on smooth, structured data such as RMSF sidelobes.
+
+    Args:
+        arr (NDArray[np.floating]): 1D array to partition, without NaN.
+        kth (int): Index that ends up holding its sorted value.
+
+    Returns:
+        None: `arr` is partitioned in place.
+    """
+    # Ranges still to partition around arr[kth], innermost last. A range over
+    # 600 long first pushes a sample range around kth (selection on that puts a
+    # good pivot at kth); `sampled` marks it as done. Each sample is about
+    # n**(2/3) long, so the stack stays shallow.
+    lefts = np.zeros(64, dtype=np.int64)
+    rights = np.zeros(64, dtype=np.int64)
+    sampled = np.zeros(64, dtype=np.bool_)
+    lefts[0], rights[0], depth = 0, arr.size - 1, 1
+    while depth:
+        left, right = lefts[depth - 1], rights[depth - 1]
+        if right <= left:
+            depth -= 1
+            continue
+        if right - left > 600 and not sampled[depth - 1]:
+            n = right - left + 1
+            i = kth - left + 1
+            z = math.log(n)
+            s = 0.5 * math.exp(2 * z / 3)
+            sd = 0.5 * math.sqrt(z * s * (n - s) / n) * (-1.0 if i < n / 2 else 1.0)
+            sampled[depth - 1] = True
+            lefts[depth] = max(left, math.floor(kth - i * s / n + sd))
+            rights[depth] = min(right, math.floor(kth + (n - i) * s / n + sd))
+            sampled[depth] = False
+            depth += 1
+            continue
+        # Partition around pivot = arr[kth], parked at `left` (or `right`)
+        pivot = arr[kth]
+        i, j = left, right
+        arr[left], arr[kth] = arr[kth], arr[left]
+        if arr[right] > pivot:
+            arr[right], arr[left] = arr[left], arr[right]
+        while i < j:
+            arr[i], arr[j] = arr[j], arr[i]
+            i += 1
+            j -= 1
+            while arr[i] < pivot:
+                i += 1
+            while arr[j] > pivot:
+                j -= 1
+        if arr[left] == pivot:
+            arr[left], arr[j] = arr[j], arr[left]
+        else:
+            j += 1
+            arr[j], arr[right] = arr[right], arr[j]
+        # The pivot is now at j: carry on in the side holding kth
+        if j <= kth:
+            left = j + 1
+        if kth <= j:
+            right = j - 1
+        lefts[depth - 1], rights[depth - 1] = left, right
+        sampled[depth - 1] = False
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def nb_median(arr: NDArray[np.floating]) -> float:
+    """`np.median` of a 1D array.
+
+    Args:
+        arr (NDArray[np.floating]): Values.
+
+    Returns:
+        float: Median, NaN if any value is NaN or there are none.
+    """
+    if arr.size == 0 or np.isnan(arr).any():
+        return np.nan
+    # Floyd-Rivest samples the values around kth, so give it them in a
+    # scrambled order: smooth, structured input (sidelobes) slows it right down.
+    # A large step coprime to the size visits every index once.
+    work = np.empty(arr.size, dtype=np.float64)
+    step = 1_000_003 % arr.size
+    while math.gcd(step, arr.size) != 1:
+        step += 1
+    index = 0
+    for scrambled in range(arr.size):
+        work[scrambled] = arr[index]
+        index += step
+        if index >= arr.size:
+            index -= arr.size
+    half = work.size // 2
+    nb_partition(work, half)
+    if work.size % 2:
+        return float(work[half])
+    # Everything below `half` is now <= work[half]; its max is the other middle
+    return float((work[:half].max() + work[half]) / 2)
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def nb_nanargmax_abs(arr: NDArray[np.complexfloating]) -> NDArray[np.int64]:
+    """`np.nanargmax(np.abs(arr), axis=-1)`, one row at a time.
+
+    Args:
+        arr (NDArray[np.complexfloating]): Values, C-contiguous; 1D is one row.
+
+    Returns:
+        NDArray[np.int64]: First index of each row's largest amplitude, or -1
+            for a row that is all NaN.
+    """
+    rows = arr.reshape(-1, arr.shape[-1])
+    peak_index = np.full(rows.shape[0], -1, dtype=np.int64)
+    for row in range(rows.shape[0]):
+        peak_sq = -1.0
+        for index in range(rows.shape[1]):
+            # |value|**2 in float64, which cannot overflow for complex64
+            re, im = (
+                np.float64(rows[row, index].real),
+                np.float64(rows[row, index].imag),
+            )
+            if re * re + im * im > peak_sq:
+                peak_sq, peak_index[row] = re * re + im * im, index
+    return peak_index

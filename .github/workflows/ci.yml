@@ -54,10 +54,20 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
 
+      # Coverage cannot trace compiled code, so run the kernels' own tests as
+      # plain Python once
+      - name: Test numba kernels uncompiled
+        env:
+          NUMBA_DISABLE_JIT: 1
+        run: >-
+          uv run --extra dev pytest -ra --cov --cov-report=
+          tests/test_minor_loop.py tests/test_arrays.py
+
       - name: Test package
         run: >-
-          uv run --extra dev pytest -ra --cov --cov-report=xml --cov-report=term
-          --durations=20 --junitxml=junit.xml -o junit_family=legacy
+          uv run --extra dev pytest -ra --cov --cov-append --cov-report=xml
+          --cov-report=term --durations=20 --junitxml=junit.xml -o
+          junit_family=legacy
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7
