@@ -610,3 +610,54 @@ def test_multiscale_options_reject_unknown_selection():
     # selector exists precisely to avoid.
     with pytest.raises(ValueError, match="selection"):
         MultiscaleOptions(selection="bogus")  # type: ignore[arg-type]
+
+
+def test_shared_rmsf_kernels_clean_as_per_pixel_kernels() -> None:
+    """A shared RMSF's scale kernels, computed once per block, clean each pixel
+    as kernels computed for that pixel do"""
+    rng = np.random.default_rng(7)
+    freq_hz = np.linspace(0.8e9, 2.2e9, 400)
+    lsq = freq_to_lambda2(freq_hz)
+    synths = [
+        run_synth(
+            (
+                burn_slab(lsq, 0.5, 20, rm_radm2, 12.0)
+                + rng.normal(0, 0.02, freq_hz.size)
+                + 1j * rng.normal(0, 0.02, freq_hz.size)
+            ).astype(np.complex128),
+            freq_hz,
+        )
+        for rm_radm2 in (-30.0, 0.0, 30.0, 60.0)
+    ]
+    dirty = np.stack(
+        [
+            s.fdf_arrs["fdf_dirty_complex_arr"].to_numpy().astype(complex)
+            for s in synths
+        ],
+        axis=1,
+    ).reshape(-1, 2, 2)
+    synth = synths[0]
+    rmsf = synth.rmsf_arrs["rmsf_complex_arr"].to_numpy().astype(complex)
+    shared = np.broadcast_to(rmsf[:, None, None], (rmsf.size, 2, 2))
+    noise = float(synth.fdf_parameters["fdf_error_noise"][0])
+    results = [
+        rmclean(
+            RMSynthArrays(
+                dirty_fdf_arr=dirty,
+                phi_arr_radm2=synth.fdf_arrs["phi_arr_radm2"].to_numpy().astype(float),
+                rmsf_arr=rmsf_arr,
+                phi_double_arr_radm2=synth.rmsf_arrs["phi2_arr_radm2"]
+                .to_numpy()
+                .astype(float),
+                fwhm_rmsf_arr=np.array(
+                    float(synth.fdf_parameters["fwhm_rmsf_radm2"][0])
+                ),
+            ),
+            RMCleanOptions(mask=8 * noise, threshold=3 * noise, fdf_noise=noise),
+            multiscale_options=MultiscaleOptions(),
+        )
+        for rmsf_arr in (shared, shared.copy())
+    ]
+    assert (results[0].clean_iter_arr > 0).all()
+    for got, expected in zip(results[0], results[1], strict=True):
+        np.testing.assert_array_equal(got, expected)
