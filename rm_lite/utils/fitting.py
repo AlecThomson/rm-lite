@@ -878,7 +878,8 @@ def draw_model_samples(
     # reshape (not atleast_2d): a length-1 popt gives rvs shape (n,), which must
     # become (n, 1) rather than (1, n).
     samples = np.asarray(dist.rvs(n_error_samples)).reshape(n_error_samples, -1)
-    return np.array([fit.stokes_i_model_func(x_arr, *s) for s in samples])
+    # Each parameter as a column, so one call evaluates every sample
+    return np.asarray(fit.stokes_i_model_func(x_arr, *samples.T[:, :, np.newaxis]))
 
 
 def sample_model_error(
@@ -889,7 +890,9 @@ def sample_model_error(
     """Median model and 1-sigma (16th/84th-percentile) error via Monte-Carlo
     over the fit covariance, evaluated at `x_arr = freq / ref_freq`."""
     model_samples = draw_model_samples(fit, x_arr, n_error_samples)
-    low, median, high = np.nanpercentile(model_samples, [16, 50, 84], axis=0)
+    # nanpercentile goes column by column; percentile is the same without NaN
+    percentile = np.nanpercentile if np.isnan(model_samples).any() else np.percentile
+    low, median, high = percentile(model_samples, [16, 50, 84], axis=0)
     error = np.abs(high - low)
     error[error > 1e99] = np.nan  # guard numerical overflow
     return median, error
@@ -1102,8 +1105,9 @@ def _alpha_at_ref(
     spec: NDArray[np.float64],
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
-) -> float:
-    """Spectral index (d ln I / d ln nu) of `spec` at the reference frequency.
+) -> NDArray[np.float64]:
+    """Spectral index (d ln I / d ln nu) of `spec`, or of each of its rows, at
+    the reference frequency.
 
     Sorts by frequency first: `np.interp`/`np.gradient` need an ascending axis,
     and a descending-frequency cube (negative CDELT3) otherwise gives garbage.
@@ -1111,8 +1115,11 @@ def _alpha_at_ref(
     order = np.argsort(freq_arr_hz)
     ln_freq = np.log(freq_arr_hz[order])
     with np.errstate(divide="ignore", invalid="ignore"):
-        slope = np.gradient(np.log(np.abs(spec[order])), ln_freq)
-    return float(np.interp(np.log(ref_freq_hz), ln_freq, slope))
+        slope = np.gradient(np.log(np.abs(spec[..., order])), ln_freq, axis=-1)
+    alpha = [
+        np.interp(np.log(ref_freq_hz), ln_freq, row) for row in np.atleast_2d(slope)
+    ]
+    return np.reshape(alpha, spec.shape[:-1])
 
 
 class PixelFit(NamedTuple):
@@ -1232,13 +1239,13 @@ def _write_error_planes(
     assert planes.model_error is not None
     assert planes.alpha_error is not None
     samples = draw_model_samples(fit, freq_arr_hz / ref_freq_hz, n_error_samples)
-    low, high = np.nanpercentile(samples, [16, 84], axis=0)
+    # nanpercentile goes column by column; percentile is the same without NaN
+    percentile = np.nanpercentile if np.isnan(samples).any() else np.percentile
+    low, high = percentile(samples, [16, 84], axis=0)
     model_error = np.abs(high - low)
     model_error[model_error > 1e99] = np.nan
     out[planes.model_error, y, x] = model_error
-    alpha_samples = np.array(
-        [_alpha_at_ref(m, freq_arr_hz, ref_freq_hz) for m in samples]
-    )
+    alpha_samples = _alpha_at_ref(samples, freq_arr_hz, ref_freq_hz)
     a_low, a_high = np.nanpercentile(alpha_samples, [16, 84])
     out[planes.alpha_error, y, x] = abs(a_high - a_low)
 
@@ -1381,8 +1388,8 @@ def alpha_from_model_block(
             spec = model_block[:, y, x]
             if not np.isfinite(spec).all():
                 continue
-            value = _alpha_at_ref(
-                spec, freq_arr_hz, ref_freq_for_pixel(ref_freq_hz, y, x)
+            value = float(
+                _alpha_at_ref(spec, freq_arr_hz, ref_freq_for_pixel(ref_freq_hz, y, x))
             )
             alpha[y, x] = value if np.isfinite(value) else 0.0
     return alpha

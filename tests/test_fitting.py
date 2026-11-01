@@ -16,6 +16,7 @@ from rm_lite.utils.fitting import (
     lm_fit,
     static_fit,
 )
+from scipy import stats
 
 pytestmark = pytest.mark.filterwarnings("ignore::scipy.optimize.OptimizeWarning")
 
@@ -138,4 +139,33 @@ def test_real_spectra_fit_as_scipy(name: str, monkeypatch: pytest.MonkeyPatch) -
     np.testing.assert_array_less(
         np.abs(np.asarray(compiled.popt) - np.asarray(reference.popt)),
         1e-2 * sigma + 1e-300,
+    )
+
+
+@pytest.mark.parametrize("fit_function", ["log", "linear"])
+def test_model_samples_match_one_at_a_time(
+    fit_function: Literal["log", "linear"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Models and alphas for all samples at once are those of each sample"""
+    rng = np.random.default_rng(11)
+    freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr = random_spectrum(rng)
+    fit = static_fit(freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr, 2, fit_function)
+    x_arr = freq_arr_hz / ref_freq_hz
+    params = rng.multivariate_normal(np.asarray(fit.popt), np.asarray(fit.pcov), 200)
+
+    class FixedDraws:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def rvs(self, _size: int) -> np.ndarray:
+            return params
+
+    monkeypatch.setattr(stats, "multivariate_normal", FixedDraws)
+    samples = fitting.draw_model_samples(fit, x_arr, 200)
+    np.testing.assert_array_equal(
+        samples, [fit.stokes_i_model_func(x_arr, *p) for p in params]
+    )
+    np.testing.assert_array_equal(
+        fitting._alpha_at_ref(samples, freq_arr_hz, ref_freq_hz),
+        [fitting._alpha_at_ref(s, freq_arr_hz, ref_freq_hz) for s in samples],
     )
