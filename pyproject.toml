@@ -171,6 +171,7 @@ skip = "uv.lock"
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = ["-ra", "-n", "auto", "--showlocals", "--strict-markers", "--strict-config"]
+markers = ["slow_uncompiled: too slow to run with NUMBA_DISABLE_JIT"]
 xfail_strict = true
 filterwarnings = [
     "error",
