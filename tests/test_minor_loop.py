@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from dataclasses import replace
 from importlib import resources
 from typing import Any, Literal, TypeAlias
@@ -10,9 +11,11 @@ from typing import Any, Literal, TypeAlias
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from rm_lite.utils import clean
 from rm_lite.utils.clean import (
     CleanProgress,
     CleanState,
+    HogbomStop,
     MinorLoopArrays,
     MinorLoopBatchArrays,
     MinorLoopBatchOptions,
@@ -21,6 +24,7 @@ from rm_lite.utils.clean import (
     MinorLoopResults,
     RMCleanOptions,
     RMSynthArrays,
+    _HogbomBatchResults,
     minor_cycle,
     minor_cycle_batch,
     minor_loop,
@@ -247,9 +251,8 @@ def test_compiled_loop_matches_python_when_cut_short(
         assert compiled.iter_count == overrides["max_iter"]
 
 
-@pytest.mark.parametrize("mask_mode", ["adaptive", "threshold", "fixed"])
-def test_compiled_loop_matches_python_when_diverging(mask_mode: MaskMode) -> None:
-    """A sidelobe taller than the main lobe makes CLEAN run away"""
+def diverging(mask_mode: MaskMode) -> tuple[MinorLoopArrays, MinorLoopOptions]:
+    """A sidelobe taller than the main lobe, which makes CLEAN run away"""
     n_phi = 201
     phi_arr_radm2 = np.linspace(-1000, 1000, n_phi)
     phi_double_arr_radm2 = np.linspace(-2000, 2000, 2 * n_phi - 1)
@@ -272,20 +275,31 @@ def test_compiled_loop_matches_python_when_diverging(mask_mode: MaskMode) -> Non
         1e-3,
         max_iter=200,
     )
-    options = dataclasses.replace(options, gain=0.5)
+    return arrays, dataclasses.replace(options, gain=0.5)
+
+
+@pytest.mark.parametrize("mask_mode", ["adaptive", "threshold", "fixed"])
+def test_compiled_loop_matches_python_when_diverging(mask_mode: MaskMode) -> None:
+    """A sidelobe taller than the main lobe makes CLEAN run away"""
+    arrays, options = diverging(mask_mode)
     with quiet_logs():
         compiled = minor_loop(arrays, options)
     assert_same_clean(compiled, python_minor_loop(arrays, options))
     assert compiled.iter_count < 200
 
 
-@pytest.mark.parametrize("mask_mode", ["adaptive", "threshold", "fixed"])
-def test_compiled_loop_matches_python_on_a_blank_spectrum(mask_mode: MaskMode) -> None:
+def blank_arrays() -> MinorLoopArrays:
+    """An all-NaN spectrum"""
     arrays = simulated_arrays("noise")
     blank = np.full(arrays.resid_fdf_spectrum_mask.shape, np.nan, dtype=complex)
-    arrays = arrays._replace(
+    return arrays._replace(
         resid_fdf_spectrum_mask=np.ma.array(blank, mask=np.zeros(blank.shape, bool))
     )
+
+
+@pytest.mark.parametrize("mask_mode", ["adaptive", "threshold", "fixed"])
+def test_compiled_loop_matches_python_on_a_blank_spectrum(mask_mode: MaskMode) -> None:
+    arrays = blank_arrays()
     _, options = options_for(arrays, mask_mode, NOISE, max_iter=30)
     with quiet_logs():
         compiled = minor_loop(arrays, options)
@@ -338,6 +352,57 @@ def test_compiled_loop_matches_python_when_reseeding_changes_nothing() -> None:
         compiled = minor_loop(arrays, options)
     assert_same_clean(compiled, python_minor_loop(arrays, options))
     assert compiled.iter_count == 3000
+
+
+@pytest.fixture
+def stop_reasons(monkeypatch: pytest.MonkeyPatch) -> list[HogbomStop]:
+    """Why each minor loop stopped, as `_log_stops` is told"""
+    reasons: list[HogbomStop] = []
+
+    def capture(results: _HogbomBatchResults) -> None:
+        reasons.extend(HogbomStop(stop) for stop in results.stop)
+
+    monkeypatch.setattr(clean, "_log_stops", capture)
+    return reasons
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("threshold", HogbomStop.THRESHOLD),
+        ("empty_mask", HogbomStop.EMPTY_MASK),
+        ("max_iter", HogbomStop.MAX_ITER),
+        ("diverged", HogbomStop.DIVERGED),
+        ("reseed", HogbomStop.MAX_ITER),
+        ("blank", HogbomStop.EMPTY_MASK),
+        ("not_started", HogbomStop.NOT_STARTED),
+    ],
+)
+def test_minor_loop_stops_for_its_reason(
+    case: str, expected: HogbomStop, stop_reasons: list[HogbomStop]
+) -> None:
+    """Each way the loop can end reports its own reason"""
+    point = simulated_arrays("point")
+    cases: dict[str, Callable[[], tuple[MinorLoopArrays, MinorLoopOptions]]] = {
+        "threshold": lambda: options_for(point, "fixed", NOISE),
+        "empty_mask": lambda: options_for(point, "threshold", NOISE),
+        "max_iter": lambda: options_for(
+            simulated_arrays("pair"), "adaptive", NOISE, max_iter=50
+        ),
+        "diverged": lambda: diverging("fixed"),
+        # A mask floor below the stopping threshold reseeds the same channel
+        "reseed": lambda: options_for(
+            point, "adaptive", NOISE, mask_threshold=NOISE, stopping_threshold=0.05
+        ),
+        "blank": lambda: options_for(blank_arrays(), "adaptive", NOISE, max_iter=30),
+        "not_started": lambda: options_for(
+            point, "fixed", NOISE, start_iter=10, max_iter=5
+        ),
+    }
+    arrays, options = cases[case]()
+    with quiet_logs():
+        minor_loop(arrays, options)
+    assert stop_reasons == [expected]
 
 
 @pytest.mark.parametrize("n_chan", [64, 288])
