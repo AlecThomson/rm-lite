@@ -1281,9 +1281,10 @@ def test_rmclean_graph_build_stays_linear_in_chunk_count(tmp_path):
     assert len(fine.clean_fdf_cube.dask.layers) == len(
         coarse.clean_fdf_cube.dask.layers
     )
-    # 4x the chunks is at worst ~4x the tasks to build, so ~5x is generous
-    # headroom. The per-layer version came in around 15x.
-    assert fine_time < 5 * coarse_time, (coarse_time, fine_time)
+    # 4x the chunks is ~4x the tasks to build if linear, ~16x if quadratic (the
+    # per-layer version came in around 15x). 8x splits them on a log scale, so
+    # a busy runner stays under it and a quadratic build cannot.
+    assert fine_time < 8 * coarse_time, (coarse_time, fine_time)
 
 
 def test_read_fits_cube_channel_chunks_matches_spatial_read(tmp_path):
