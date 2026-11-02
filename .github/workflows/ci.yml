@@ -60,8 +60,8 @@ jobs:
         env:
           NUMBA_DISABLE_JIT: 1
         run: >-
-          uv run --extra dev pytest -ra --cov --cov-report=
-          tests/test_minor_loop.py tests/test_arrays.py
+          uv run --extra dev pytest -ra --cov --cov-report= -m "not
+          slow_uncompiled" tests/test_minor_loop.py tests/test_arrays.py
 
       - name: Test package
         run: >-

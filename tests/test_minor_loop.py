@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import replace
+from importlib import resources
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
@@ -12,10 +14,19 @@ from rm_lite.utils.clean import (
     CleanProgress,
     CleanState,
     MinorLoopArrays,
+    MinorLoopBatchArrays,
+    MinorLoopBatchOptions,
+    MinorLoopBatchResults,
     MinorLoopOptions,
     MinorLoopResults,
+    RMCleanOptions,
+    RMSynthArrays,
+    minor_cycle,
+    minor_cycle_batch,
     minor_loop,
+    minor_loop_batch,
     offsource_rms,
+    rmclean,
     shift_rmsf,
 )
 from rm_lite.utils.logging import quiet_logs
@@ -396,3 +407,329 @@ def test_minor_loop_rejects_mismatched_axes() -> None:
             arrays._replace(phi_double_arr_radm2=arrays.phi_double_arr_radm2[1:]),
             options,
         )
+
+
+def delay_spectra(
+    n_spectra: int, n_chan: int, seed: int = 0
+) -> tuple[MinorLoopBatchArrays, NDArray[np.float64]]:
+    """Delay spectra with their own flagging (so their own response), a mix of
+    noise-only, point and bright sources, and the noise of each"""
+    rng = np.random.default_rng(seed)
+    n_samples = 4 * n_chan
+    channels = np.arange(n_chan)
+    dirty, response, noise = [], [], []
+    for spec in range(n_spectra):
+        weights = (rng.random(n_chan) > 0.1).astype(float)
+        spectrum = rng.normal(size=n_chan) + 1j * rng.normal(size=n_chan)
+        amp = (0.0, 30.0, 300.0, 3000.0)[spec % 4]
+        spectrum += amp * np.exp(2j * np.pi * rng.uniform(-0.4, 0.4) * channels)
+        dirty.append(
+            np.fft.fftshift(np.fft.fft(weights * spectrum, n=n_samples)) / weights.sum()
+        )
+        response.append(
+            np.fft.fftshift(np.fft.fft(weights, n=n_samples)) / weights.sum()
+        )
+        noise.append(np.sqrt(np.sum(weights**2)) / weights.sum())
+    arrays = MinorLoopBatchArrays(
+        resid_fdf_arr_mask=np.ma.array(
+            dirty, mask=np.zeros((n_spectra, n_samples), bool)
+        ),
+        phi_arr_radm2=np.arange(n_samples, dtype=float),
+        phi_double_arr_radm2=np.arange(3 * n_samples, dtype=float) - n_samples,
+        rmsf_arr=np.tile(np.array(response), 3),
+    )
+    return arrays, np.array(noise)
+
+
+def looped(
+    arrays: MinorLoopBatchArrays, options: MinorLoopBatchOptions
+) -> list[MinorLoopResults]:
+    """`minor_loop` on each spectrum of a batch"""
+    n_spectra = arrays.resid_fdf_arr_mask.shape[0]
+    rmsf_arr = np.atleast_2d(arrays.rmsf_arr)
+    mask_threshold, stopping_threshold, start_iter, noise = (
+        np.broadcast_to(np.asarray(value), n_spectra)
+        for value in (
+            options.mask_threshold,
+            options.stopping_threshold,
+            options.start_iter,
+            np.nan if options.noise is None else options.noise,
+        )
+    )
+    with quiet_logs():
+        return [
+            minor_loop(
+                MinorLoopArrays(
+                    arrays.resid_fdf_arr_mask[spec],
+                    arrays.phi_arr_radm2,
+                    arrays.phi_double_arr_radm2,
+                    rmsf_arr[spec if len(rmsf_arr) > 1 else 0],
+                    1.0,
+                ),
+                MinorLoopOptions(
+                    max_iter=options.max_iter,
+                    gain=options.gain,
+                    mask_threshold=float(mask_threshold[spec]),
+                    stopping_threshold=float(stopping_threshold[spec]),
+                    start_iter=int(start_iter[spec]),
+                    update_mask=options.update_mask,
+                    noise=None if options.noise is None else float(noise[spec]),
+                    stall_iters=options.stall_iters,
+                ),
+            )
+            for spec in range(n_spectra)
+        ]
+
+
+def assert_batch_matches(
+    batch: MinorLoopBatchResults, singles: list[MinorLoopResults]
+) -> None:
+    """The batch is bit for bit `minor_loop` on each spectrum"""
+    for spec, single in enumerate(singles):
+        assert batch.iter_count_arr[spec] == single.iter_count
+        np.testing.assert_array_equal(
+            batch.resid_fdf_arr[spec], single.resid_fdf_spectrum
+        )
+        np.testing.assert_array_equal(
+            batch.model_fdf_arr[spec], single.model_fdf_spectrum
+        )
+        np.testing.assert_array_equal(
+            np.ma.getmaskarray(batch.resid_fdf_arr_mask)[spec],
+            np.ma.getmaskarray(single.resid_fdf_spectrum_mask),
+        )
+
+
+@pytest.mark.slow_uncompiled
+@pytest.mark.parametrize("parallel", [False, True])
+@pytest.mark.parametrize("mask_mode", ["adaptive", "threshold", "fixed"])
+@pytest.mark.parametrize("response", ["per-spectrum", "shared"])
+def test_batch_matches_looped_minor_loop(
+    parallel: bool, mask_mode: MaskMode, response: Literal["per-spectrum", "shared"]
+) -> None:
+    """Each spectrum of a batch cleans as it would alone, serially or in parallel"""
+    arrays, noise = delay_spectra(12, 64)
+    if response == "shared":
+        arrays = arrays._replace(rmsf_arr=arrays.rmsf_arr[0])
+    if mask_mode == "fixed":
+        dirty = arrays.resid_fdf_arr_mask.data
+        arrays = arrays._replace(
+            resid_fdf_arr_mask=np.ma.array(
+                dirty, mask=~(np.abs(dirty) > 5 * noise[:, None])
+            )
+        )
+    options = MinorLoopBatchOptions(
+        max_iter=20_000,
+        gain=0.1,
+        mask_threshold=5 * noise,
+        stopping_threshold=3 * noise,
+        update_mask=mask_mode != "fixed",
+        noise=noise if mask_mode == "adaptive" else None,
+        parallel=parallel,
+    )
+    with quiet_logs():
+        batch = minor_loop_batch(arrays, options)
+    assert_batch_matches(batch, looped(arrays, options))
+    # delay_spectra cycles through amplitudes 0, 30, 300 and 3000
+    assert (batch.iter_count_arr[np.arange(12) % 4 != 0] > 0).all()
+
+
+def test_batch_takes_scalars_and_mixed_per_spectrum_options() -> None:
+    """Scalar thresholds, a per-spectrum start, NaN noise (a blanked pixel of a
+    noise map) for some spectra, a short max_iter, and complex64"""
+    arrays, noise = delay_spectra(8, 32, seed=1)
+    arrays = arrays._replace(
+        resid_fdf_arr_mask=np.ma.array(arrays.resid_fdf_arr_mask, dtype=np.complex64),
+        rmsf_arr=arrays.rmsf_arr.astype(np.complex64),
+    )
+    options = MinorLoopBatchOptions(
+        max_iter=300,
+        gain=0.2,
+        mask_threshold=float(5 * noise.mean()),
+        stopping_threshold=float(3 * noise.mean()),
+        start_iter=np.arange(8) * 10,
+        noise=np.where(np.arange(8) % 2, noise, np.nan),
+        stall_iters=20,
+        # The uncompiled coverage run reaches the parallel loop only here, as
+        # the parametrised test is too slow for it
+        parallel=True,
+    )
+    with quiet_logs():
+        batch = minor_loop_batch(arrays, options)
+    assert batch.resid_fdf_arr.dtype == np.complex64
+    assert_batch_matches(batch, looped(arrays, options))
+
+
+def test_batch_rejects_misshapen_inputs() -> None:
+    arrays, noise = delay_spectra(3, 16)
+    options = MinorLoopBatchOptions(
+        max_iter=10, gain=0.1, mask_threshold=1.0, stopping_threshold=1.0
+    )
+    with pytest.raises(ValueError, match="2D"):
+        minor_loop_batch(
+            arrays._replace(resid_fdf_arr_mask=arrays.resid_fdf_arr_mask[0]), options
+        )
+    with pytest.raises(ValueError, match="one for each"):
+        minor_loop_batch(arrays._replace(rmsf_arr=arrays.rmsf_arr[:2]), options)
+    with pytest.raises(ValueError, match="clipped to the FDF axis"):
+        minor_loop_batch(
+            arrays._replace(phi_double_arr_radm2=arrays.phi_double_arr_radm2[1:]),
+            options,
+        )
+    with pytest.raises(ValueError, match="`mask_threshold` must be one value"):
+        minor_loop_batch(arrays, replace(options, mask_threshold=noise[:2]))
+    with pytest.raises(ValueError, match="all NaN"):
+        minor_loop_batch(
+            arrays._replace(rmsf_arr=np.full_like(arrays.rmsf_arr, np.nan)), options
+        )
+
+
+def test_batch_of_no_spectra() -> None:
+    arrays, _ = delay_spectra(1, 16)
+    results = minor_loop_batch(
+        arrays._replace(resid_fdf_arr_mask=arrays.resid_fdf_arr_mask[:0]),
+        MinorLoopBatchOptions(
+            max_iter=10, gain=0.1, mask_threshold=1.0, stopping_threshold=1.0
+        ),
+    )
+    assert results.resid_fdf_arr.shape == (0, 64)
+    assert results.iter_count_arr.shape == (0,)
+
+
+@pytest.mark.parametrize("fdf_noise", [None, 1.0])
+def test_minor_cycle_batch_rejects_misshapen_inputs(fdf_noise: float | None) -> None:
+    """The same message for a fixed or an adaptive mask"""
+    arrays, noise = delay_spectra(4, 16)
+    rm_synth_arrays = RMSynthArrays(
+        dirty_fdf_arr=arrays.resid_fdf_arr_mask.data.T,
+        phi_arr_radm2=arrays.phi_arr_radm2,
+        phi_double_arr_radm2=arrays.phi_double_arr_radm2,
+        rmsf_arr=arrays.rmsf_arr.T,
+        fwhm_rmsf_arr=np.array(1.0),
+    )
+    options = RMCleanOptions(mask=1.0, threshold=1.0, fdf_noise=fdf_noise)
+    with pytest.raises(ValueError, match="`mask` must be one value"):
+        minor_cycle_batch(rm_synth_arrays, replace(options, mask=noise[:3]))
+    with pytest.raises(ValueError, match=r"2D \(phi, spectrum\)"):
+        minor_cycle_batch(
+            rm_synth_arrays._replace(dirty_fdf_arr=rm_synth_arrays.dirty_fdf_arr[:, 0]),
+            options,
+        )
+
+
+@pytest.mark.slow_uncompiled
+@pytest.mark.parametrize("adaptive", [True, False])
+@pytest.mark.parametrize("per_pixel", [True, False])
+def test_rmclean_matches_minor_cycle_on_each_pixel(
+    adaptive: bool, per_pixel: bool
+) -> None:
+    """rmclean cleans its pixels in batches, and each cleans as minor_cycle on
+    it alone, with per-pixel maps, an FDF mask, and a shared or per-pixel RMSF"""
+    sources = (
+        (),
+        (Component("delta", 0.0, 0.0, 1.0),),
+        (Component("delta", 0.0, 1.0, 0.05),),
+        (Component("delta", 0.0, 0.0, 1.0), Component("delta", 0.0, 2.5, 0.6)),
+    )
+    sims = [
+        simulate_fdf(
+            FDFSpec(components),
+            np.linspace(800e6, 1088e6, 288),
+            rng=np.random.default_rng(pix),
+            sigma=NOISE,
+        )
+        for pix, components in enumerate(sources * 2)
+    ]
+    # Enough pixels to clean that rmclean takes more than one batch
+    shape = (16, 24)
+    dirty = np.tile(np.stack([sim.dirty_fdf for sim in sims], axis=1), 48)
+    dirty = dirty.reshape(-1, *shape)
+    sim = sims[0]
+    n_double = len(sim.rmsf_arr)
+    if per_pixel:
+        scale = 1 + 0.001 * np.arange(dirty[0].size).reshape(shape)
+        rmsf_arr = sim.rmsf_arr[:, None, None] * scale
+    else:
+        rmsf_arr = np.broadcast_to(sim.rmsf_arr[:, None, None], (n_double, *shape))
+    noise = np.asarray(
+        sim.fdf_noise * (1 + 0.2 * (np.arange(dirty[0].size) % 8).reshape(shape)),
+        dtype=np.float64,
+    )
+    fdf_mask_arr = np.ones(dirty.shape, dtype=bool)
+    fdf_mask_arr[: len(sim.phi_arr_radm2) // 4] = False
+    clean_options = RMCleanOptions(
+        mask=5 * noise, threshold=noise, fdf_noise=noise if adaptive else None
+    )
+    with quiet_logs():
+        results = rmclean(
+            RMSynthArrays(
+                dirty_fdf_arr=dirty,
+                phi_arr_radm2=sim.phi_arr_radm2,
+                phi_double_arr_radm2=sim.phi_double_arr_radm2,
+                rmsf_arr=rmsf_arr,
+                fwhm_rmsf_arr=np.array(sim.fwhm),
+                fdf_mask_arr=fdf_mask_arr,
+            ),
+            clean_options,
+        )
+        for y, x in np.ndindex(shape):
+            pixel = minor_cycle(
+                RMSynthArrays(
+                    dirty_fdf_arr=dirty[:, y, x],
+                    phi_arr_radm2=sim.phi_arr_radm2,
+                    phi_double_arr_radm2=sim.phi_double_arr_radm2,
+                    rmsf_arr=np.ascontiguousarray(rmsf_arr[:, y, x]),
+                    fwhm_rmsf_arr=np.array(sim.fwhm),
+                    fdf_mask_arr=fdf_mask_arr[:, y, x],
+                ),
+                replace(
+                    clean_options,
+                    mask=noise[y, x] * 5,
+                    threshold=noise[y, x],
+                    fdf_noise=noise[y, x] if adaptive else None,
+                ),
+            )
+            assert results.clean_iter_arr[y, x] == pixel.iter_count
+            for got, expected in (
+                # rmclean adds the residual back in
+                (
+                    results.clean_fdf_arr[:, y, x],
+                    pixel.clean_fdf_spectrum + pixel.resid_fdf_spectrum,
+                ),
+                (results.model_fdf_arr[:, y, x], pixel.model_fdf_spectrum),
+                (results.resid_fdf_arr[:, y, x], pixel.resid_fdf_spectrum),
+            ):
+                np.testing.assert_array_equal(got, expected)
+    assert (results.clean_iter_arr > 0).sum() > 256
+
+
+@pytest.mark.slow_uncompiled
+@pytest.mark.parametrize("mode", ["adaptive", "fixed"])
+def test_rmclean_matches_main(mode: Literal["adaptive", "fixed"]) -> None:
+    """rmclean as `main` (aa208dc) ran it on a saved cube: delay spectra with
+    per-pixel RMSFs, noise and thresholds, and an FDF mask"""
+    saved = np.load(str(resources.files("rm_lite.data.tests") / "rmclean_main.npz"))
+    noise = saved["noise"]
+    with quiet_logs():
+        results = rmclean(
+            RMSynthArrays(
+                dirty_fdf_arr=saved["dirty"],
+                phi_arr_radm2=saved["phi"],
+                phi_double_arr_radm2=saved["phi_double"],
+                rmsf_arr=saved["rmsf"],
+                fwhm_rmsf_arr=saved["fwhm"],
+                fdf_mask_arr=saved["fdf_mask"],
+            ),
+            RMCleanOptions(
+                mask=5 * noise,
+                threshold=3 * noise,
+                fdf_noise=noise if mode == "adaptive" else None,
+            ),
+        )
+    np.testing.assert_array_equal(
+        results.clean_iter_arr, saved[f"{mode}_clean_iter_arr"]
+    )
+    # Equal to rounding, as `assert_same_clean`
+    for name in ("clean_fdf_arr", "model_fdf_arr", "resid_fdf_arr"):
+        expected = saved[f"{mode}_{name}"]
+        atol = 100 * np.finfo(expected.dtype).eps * np.abs(expected).max()
+        np.testing.assert_allclose(getattr(results, name), expected, rtol=0, atol=atol)

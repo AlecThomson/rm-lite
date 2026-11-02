@@ -37,9 +37,8 @@ every code change.
 
 ## Code style
 
-- Docstrings and comments: terse, one-liners (`"""Does X"""`), same for
-  NamedTuple field docstrings. No numpydoc/Google sections unless surrounding
-  code already has them.
+- Functions: short Google docstrings (`Args:`/`Returns:`/`Raises:` where
+  useful). NamedTuple fields and comments: terse one-liners (`"""Does X"""`).
 - Write like a human, not a manual. No over-explaining, no em/en dashes anywhere
   (docs, comments, commit messages, prose).
 - `from __future__ import annotations` required in every module (ruff isort

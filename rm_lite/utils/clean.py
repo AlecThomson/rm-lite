@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import IntEnum, StrEnum
-from typing import Literal, NamedTuple, TypeAlias, TypeVar, get_args
+from typing import Any, Literal, NamedTuple, TypeAlias, TypeVar, get_args
 
 import numba
 import numpy as np
@@ -207,6 +207,59 @@ class MinorLoopOptions:
     """Iterations without progress before the adaptive mask adds the global peak"""
 
 
+class MinorLoopBatchArrays(NamedTuple):
+    """Arrays for the RM-CLEAN minor loop over a stack of spectra"""
+
+    resid_fdf_arr_mask: np.ma.MaskedArray
+    """Residual spectra, one per row; masked channels are not cleaned"""
+    phi_arr_radm2: NDArray[np.float64]
+    """Faraday depth array in rad/m^2"""
+    phi_double_arr_radm2: NDArray[np.float64]
+    """Double-length Faraday depth array in rad/m^2"""
+    rmsf_arr: NDArray[np.complexfloating]
+    """RMSF shared by every spectrum (1D), or one per row (2D)"""
+
+
+@dataclass(frozen=True, kw_only=True, slots=True)
+class MinorLoopBatchOptions:
+    """`MinorLoopOptions` for a stack of spectra, one value or one per spectrum"""
+
+    max_iter: int
+    """Maximum number of iterations"""
+    gain: float
+    """Loop gain"""
+    mask_threshold: float | NDArray[np.float64]
+    """Amplitude below which a channel is not cleaned"""
+    stopping_threshold: float | NDArray[np.float64]
+    """Peak amplitude at which the loop stops"""
+    start_iter: int | NDArray[np.int64] = 0
+    """Starting iteration"""
+    update_mask: bool = True
+    """Update the mask after each iteration"""
+    noise: float | NDArray[np.float64] | None = None
+    """FDF noise for the adaptive off-source auto-mask; None keeps the mask fixed"""
+    stall_iters: int = 300
+    """Iterations without progress before the adaptive mask adds the global peak"""
+    parallel: bool = False
+    """Clean the spectra on numba's threads, for a caller that is not already
+    parallel. Inside dask tasks leave it off: dask's threads over blocks are
+    faster, and numba's workqueue threading layer aborts on launches from
+    several threads."""
+
+
+class MinorLoopBatchResults(NamedTuple):
+    """Results of the RM-CLEAN minor loop over a stack of spectra"""
+
+    resid_fdf_arr: NDArray[np.complexfloating]
+    """Residual spectra, one per row"""
+    resid_fdf_arr_mask: np.ma.MaskedArray
+    """Residual spectra, masked outside each one's final clean region"""
+    model_fdf_arr: NDArray[np.complexfloating]
+    """Clean components, one row per spectrum"""
+    iter_count_arr: NDArray[np.int64]
+    """Iterations per spectrum"""
+
+
 def shift_rmsf(
     rmsf_spectrum: NDArray[np.complexfloating],
     fdf_index: int,
@@ -291,6 +344,80 @@ class HogbomOptions(NamedTuple):
     """Maximum number of iterations"""
     divergence_fraction: float
     """Rise of the residual peak over its lowest that counts as diverging"""
+
+
+class _HogbomSettings(NamedTuple):
+    """The `HogbomOptions` shared by every spectrum of a batch"""
+
+    gain: float
+    """Loop gain, in the residual's real dtype"""
+    update_mask: bool
+    """Update the mask as the loop goes"""
+    adaptive: bool
+    """Grow the mask from a seed against the off-source noise"""
+    stall_iters: int
+    """Iterations without progress before the adaptive mask seeds the global peak"""
+    max_iter: int
+    """Maximum number of iterations"""
+    divergence_fraction: float
+    """Rise of the residual peak over its lowest that counts as diverging"""
+
+
+class _HogbomBatch(NamedTuple):
+    """Spectra for the Hogbom loop, one per row, with their own thresholds"""
+
+    resid: NDArray[np.complexfloating]
+    """Residuals, copies of `resid_start`, cleaned in place"""
+    resid_start: NDArray[np.complexfloating]
+    """Residuals to start from"""
+    mask_original: NDArray[np.bool_]
+    """Channels that may be cleaned"""
+    rmsf: NDArray[np.complexfloating]
+    """Double-length RMSFs: one row for every spectrum, or one each"""
+    max_rmsf_index: NDArray[np.int64]
+    """Index of each RMSF's peak"""
+    stopping_threshold: NDArray[np.float64]
+    """Peak amplitude at which each loop stops"""
+    mask_threshold: NDArray[np.float64]
+    """Amplitude below which a channel is not cleaned"""
+    noise: NDArray[np.float64]
+    """FDF noise for the adaptive mask"""
+    start_iter: NDArray[np.int64]
+    """Starting iteration"""
+
+
+class _HogbomSpectrumResults(NamedTuple):
+    """`minor_loop_spectrum` on one spectrum"""
+
+    model: NDArray[np.complexfloating]
+    """Clean components"""
+    mask: NDArray[np.bool_]
+    """Final mask"""
+    iter_count: int
+    """Iterations"""
+    stop: int
+    """`HogbomStop`"""
+    best_peak: float
+    """Lowest peak of the whole residual"""
+    n_start: int
+    """Channels in the starting mask"""
+
+
+class _HogbomBatchResults(NamedTuple):
+    """`_HogbomSpectrumResults` for a stack of spectra, one per row"""
+
+    model: NDArray[np.complexfloating]
+    """Clean components"""
+    mask: NDArray[np.bool_]
+    """Final masks"""
+    iter_count: NDArray[np.int64]
+    """Iterations"""
+    stop: NDArray[np.int64]
+    """`HogbomStop`"""
+    best_peak: NDArray[np.float64]
+    """Lowest peak of the whole residual"""
+    n_start: NDArray[np.int64]
+    """Channels in the starting mask"""
 
 
 class Peaks(NamedTuple):
@@ -586,7 +713,7 @@ def minor_loop_spectrum(
     rmsf: NDArray[np.complexfloating],
     max_rmsf_index: int,
     options: HogbomOptions,
-) -> tuple[NDArray[np.complexfloating], NDArray[np.bool_], int, int, float, int]:
+) -> _HogbomSpectrumResults:
     """Hogbom minor loop over one spectrum: the compiled body of `minor_loop`.
 
     Args:
@@ -599,10 +726,9 @@ def minor_loop_spectrum(
         options (HogbomOptions): Loop options.
 
     Returns:
-        tuple[NDArray[np.complexfloating], NDArray[np.bool_], int, int, float, int]:
-            Model, final mask, iteration count, `HogbomStop`, lowest residual
-            peak, and channels in the starting mask. On divergence the residual
-            and model are those at the lowest peak.
+        _HogbomSpectrumResults: Model, final mask, iterations, why it stopped, lowest
+            residual peak and starting mask size. On divergence the residual and
+            model are those at the lowest peak.
     """
     if options.update_mask and options.adaptive:
         # Start tight (seed only) so the RMSF sidelobe ringing sits off-source
@@ -644,7 +770,70 @@ def minor_loop_spectrum(
             best_iter,
             guard_divergence,
         )[0]
-    return model, mask, iter_count, stop, best_peak, int(np.count_nonzero(mask_start))
+    return _HogbomSpectrumResults(
+        model, mask, iter_count, stop, best_peak, int(np.count_nonzero(mask_start))
+    )
+
+
+@numba.njit(cache=True, nogil=True)  # type: ignore[misc]
+def _minor_loop_spectra(
+    batch: _HogbomBatch,
+    settings: _HogbomSettings,
+    results: _HogbomBatchResults,
+    first: int,
+    last: int,
+) -> None:
+    """`minor_loop_spectrum` on spectra (rows) `first` to `last - 1`, in turn.
+
+    Args:
+        batch (_HogbomBatch): Spectra, RMSFs and per-spectrum thresholds.
+        settings (_HogbomSettings): Settings for every spectrum.
+        results (_HogbomBatchResults): Filled in place.
+        first (int): First spectrum to clean.
+        last (int): One past the last spectrum to clean.
+    """
+    for spec in range(first, last):
+        row = spec if batch.rmsf.shape[0] > 1 else 0
+        result = minor_loop_spectrum(
+            batch.resid[spec],
+            batch.resid_start[spec],
+            batch.mask_original[spec],
+            batch.rmsf[row],
+            batch.max_rmsf_index[row],
+            HogbomOptions(
+                gain=settings.gain,
+                stopping_threshold=batch.stopping_threshold[spec],
+                mask_threshold=batch.mask_threshold[spec],
+                update_mask=settings.update_mask,
+                adaptive=settings.adaptive,
+                noise=batch.noise[spec],
+                stall_iters=settings.stall_iters,
+                start_iter=batch.start_iter[spec],
+                max_iter=settings.max_iter,
+                divergence_fraction=settings.divergence_fraction,
+            ),
+        )
+        results.model[spec] = result.model
+        results.mask[spec] = result.mask
+        results.iter_count[spec] = result.iter_count
+        results.stop[spec] = result.stop
+        results.best_peak[spec] = result.best_peak
+        results.n_start[spec] = result.n_start
+
+
+@numba.njit(cache=True, nogil=True, parallel=True)  # type: ignore[misc]
+def _minor_loop_spectra_parallel(
+    batch: _HogbomBatch, settings: _HogbomSettings, results: _HogbomBatchResults
+) -> None:
+    """`_minor_loop_spectra` over every spectrum, spread over numba's threads.
+
+    Args:
+        batch (_HogbomBatch): As `_minor_loop_spectra`.
+        settings (_HogbomSettings): As `_minor_loop_spectra`.
+        results (_HogbomBatchResults): As `_minor_loop_spectra`.
+    """
+    for spec in numba.prange(batch.resid.shape[0]):
+        _minor_loop_spectra(batch, settings, results, spec, spec + 1)
 
 
 def minor_loop(
@@ -664,89 +853,187 @@ def minor_loop(
     Returns:
         MinorLoopResults: Clean, residual, model, masked residual, and iteration count.
     """
+    results = minor_loop_batch(
+        MinorLoopBatchArrays(
+            resid_fdf_arr_mask=minor_loop_arrays.resid_fdf_spectrum_mask[np.newaxis],
+            phi_arr_radm2=minor_loop_arrays.phi_arr_radm2,
+            phi_double_arr_radm2=minor_loop_arrays.phi_double_arr_radm2,
+            rmsf_arr=minor_loop_arrays.rmsf_spectrum,
+        ),
+        MinorLoopBatchOptions(**dataclasses.asdict(minor_loop_options)),
+    )
+    return MinorLoopResults(
+        resid_fdf_spectrum=results.resid_fdf_arr[0],
+        resid_fdf_spectrum_mask=results.resid_fdf_arr_mask[0],
+        model_fdf_spectrum=results.model_fdf_arr[0],
+        iter_count=int(results.iter_count_arr[0]),
+    )
+
+
+def _check_per_spectrum(options: dict[str, Any], n_spectra: int) -> None:
+    """Check each option is one value, or one for each spectrum.
+
+    Args:
+        options (dict[str, Any]): Options by name.
+        n_spectra (int): Number of spectra.
+
+    Raises:
+        ValueError: If an option has any other shape.
+    """
+    for name, value in options.items():
+        if np.ndim(value) != 0 and np.shape(value) != (n_spectra,):
+            msg = (
+                f"`{name}` must be one value, or one for each of the {n_spectra} "
+                f"spectra; got shape {np.shape(value)}."
+            )
+            raise ValueError(msg)
+
+
+def minor_loop_batch(
+    minor_loop_arrays: MinorLoopBatchArrays,
+    minor_loop_options: MinorLoopBatchOptions,
+) -> MinorLoopBatchResults:
+    """`minor_loop` over a stack of spectra in one call, with the same results.
+
+    Args:
+        minor_loop_arrays (MinorLoopBatchArrays): Masked residuals, phi axes, RMSF(s).
+        minor_loop_options (MinorLoopBatchOptions): Gain, thresholds, noise, max_iter.
+
+    Raises:
+        ValueError: If the arrays or per-spectrum options do not line up.
+
+    Returns:
+        MinorLoopBatchResults: Residuals, models, final masks and iteration counts.
+    """
+    resid_fdf_arr_mask = minor_loop_arrays.resid_fdf_arr_mask
+    if resid_fdf_arr_mask.ndim != 2:
+        msg = (
+            f"Residuals must be 2D (spectrum, channel), got {resid_fdf_arr_mask.ndim}D."
+        )
+        raise ValueError(msg)
+    n_spectra, n_chan = resid_fdf_arr_mask.shape
     # The compiled loop wants contiguous, native-byte-order arrays
     resid_start = np.ascontiguousarray(
-        minor_loop_arrays.resid_fdf_spectrum_mask.data,
-        dtype=minor_loop_arrays.resid_fdf_spectrum_mask.dtype.newbyteorder("="),
+        resid_fdf_arr_mask.data,
+        dtype=resid_fdf_arr_mask.dtype.newbyteorder("="),
     )
-    resid_fdf_spectrum = resid_start.copy()
-    rmsf_spectrum = np.ascontiguousarray(
-        minor_loop_arrays.rmsf_spectrum,
-        dtype=minor_loop_arrays.rmsf_spectrum.dtype.newbyteorder("="),
+    rmsf_arr = np.ascontiguousarray(
+        np.atleast_2d(minor_loop_arrays.rmsf_arr),
+        dtype=minor_loop_arrays.rmsf_arr.dtype.newbyteorder("="),
     )
-    # Find the index of the peak of the RMSF
-    max_rmsf_index = int(nb_nanargmax_abs(rmsf_spectrum)[0])
-    if max_rmsf_index < 0:
-        msg = "The RMSF is all NaN."
+    if rmsf_arr.shape[0] not in (1, n_spectra):
+        msg = f"Need one RMSF, or one for each of the {n_spectra} spectra; got {rmsf_arr.shape[0]}."
         raise ValueError(msg)
-
-    # Calculate the padding in the sampled RMSF
-    # Assumes only integer shifts and symmetric RMSF
-    n_phi_pad = int(
-        (
-            len(minor_loop_arrays.phi_double_arr_radm2)
-            - len(minor_loop_arrays.phi_arr_radm2)
-        )
-        / 2
-    )
-    fdf_len = len(rmsf_spectrum) - 2 * n_phi_pad
-    if fdf_len != len(resid_fdf_spectrum):
+    n_phi_pad = (
+        len(minor_loop_arrays.phi_double_arr_radm2)
+        - len(minor_loop_arrays.phi_arr_radm2)
+    ) // 2
+    fdf_len = rmsf_arr.shape[1] - 2 * n_phi_pad
+    if fdf_len != n_chan:
         msg = (
             f"The RMSF clipped to the FDF axis has {fdf_len} channels, but the "
-            f"residual has {len(resid_fdf_spectrum)}."
+            f"residuals have {n_chan}."
         )
         raise ValueError(msg)
-
+    max_rmsf_index = nb_nanargmax_abs(rmsf_arr)
+    if (max_rmsf_index < 0).any():
+        msg = "An RMSF is all NaN."
+        raise ValueError(msg)
     noise = minor_loop_options.noise
-    model_fdf_spectrum, mask_arr, iter_count, stop, best_peak, n_initial = (
-        minor_loop_spectrum(
-            resid_fdf_spectrum,
-            resid_start,
-            ~np.ma.getmaskarray(minor_loop_arrays.resid_fdf_spectrum_mask),
-            rmsf_spectrum,
-            max_rmsf_index,
-            HogbomOptions(
-                # gain * peak in the residual's own precision, as NumPy does it
-                gain=resid_fdf_spectrum.real.dtype.type(minor_loop_options.gain),
-                stopping_threshold=float(minor_loop_options.stopping_threshold),
-                mask_threshold=float(minor_loop_options.mask_threshold),
-                update_mask=minor_loop_options.update_mask,
-                adaptive=noise is not None,
-                noise=0.0 if noise is None else float(noise),
-                stall_iters=minor_loop_options.stall_iters,
-                start_iter=minor_loop_options.start_iter,
-                max_iter=minor_loop_options.max_iter,
-                divergence_fraction=CleanProgress.divergence_fraction,
-            ),
-        )
+    per_spectrum = {
+        "stopping_threshold": minor_loop_options.stopping_threshold,
+        "mask_threshold": minor_loop_options.mask_threshold,
+        "noise": 0.0 if noise is None else noise,
+        "start_iter": minor_loop_options.start_iter,
+    }
+    _check_per_spectrum(per_spectrum, n_spectra)
+
+    batch = _HogbomBatch(
+        resid=resid_start.copy(),
+        resid_start=resid_start,
+        mask_original=np.ascontiguousarray(~np.ma.getmaskarray(resid_fdf_arr_mask)),
+        rmsf=rmsf_arr,
+        max_rmsf_index=max_rmsf_index,
+        stopping_threshold=np.full(
+            n_spectra, per_spectrum["stopping_threshold"], dtype=np.float64
+        ),
+        mask_threshold=np.full(
+            n_spectra, per_spectrum["mask_threshold"], dtype=np.float64
+        ),
+        noise=np.full(n_spectra, per_spectrum["noise"], dtype=np.float64),
+        start_iter=np.full(n_spectra, per_spectrum["start_iter"], dtype=np.int64),
+    )
+    settings = _HogbomSettings(
+        # gain * peak in the residuals' own precision, as NumPy does it
+        gain=resid_start.real.dtype.type(minor_loop_options.gain),
+        update_mask=minor_loop_options.update_mask,
+        adaptive=noise is not None,
+        stall_iters=minor_loop_options.stall_iters,
+        max_iter=minor_loop_options.max_iter,
+        divergence_fraction=CleanProgress.divergence_fraction,
+    )
+    results = _HogbomBatchResults(
+        model=np.zeros_like(resid_start),
+        mask=np.zeros((n_spectra, n_chan), dtype=bool),
+        iter_count=np.zeros(n_spectra, dtype=np.int64),
+        stop=np.zeros(n_spectra, dtype=np.int64),
+        best_peak=np.zeros(n_spectra),
+        n_start=np.zeros(n_spectra, dtype=np.int64),
+    )
+    if minor_loop_options.parallel:
+        # Spectra cost anything from microseconds to seconds, so hand them to
+        # the threads one at a time rather than in equal blocks
+        with numba.parallel_chunksize(1):
+            _minor_loop_spectra_parallel(batch, settings, results)
+    else:
+        _minor_loop_spectra(batch, settings, results, 0, n_spectra)
+    _log_stops(results)
+    return MinorLoopBatchResults(
+        resid_fdf_arr=batch.resid,
+        resid_fdf_arr_mask=np.ma.array(batch.resid, mask=~results.mask),
+        model_fdf_arr=results.model,
+        iter_count_arr=results.iter_count,
     )
 
-    logger.info(f"Starting minor loop... {n_initial} pixels in the mask")
-    if stop == HogbomStop.EMPTY_MASK:
+
+def _log_stops(results: _HogbomBatchResults) -> None:
+    """Log why each minor loop stopped: in full for one spectrum, as a count of
+    each reason for a stack."""
+    if results.stop.size == 0:
+        return
+    if results.stop.size > 1:
+        stops = dict(zip(*np.unique(results.stop, return_counts=True), strict=True))
+        logger.info(
+            f"Minor loop over {results.stop.size} spectra: "
+            + ", ".join(
+                f"{count} {HogbomStop(stop).name.lower()}"
+                for stop, count in stops.items()
+            )
+        )
+        for stop in (HogbomStop.EMPTY_MASK, HogbomStop.MAX_ITER, HogbomStop.DIVERGED):
+            if stop in stops:
+                logger.warning(f"{stops[stop]} spectra stopped: {stop.name.lower()}")
+        return
+    iter_count, reason = int(results.iter_count[0]), int(results.stop[0])
+    logger.info(f"Starting minor loop... {results.n_start[0]} pixels in the mask")
+    if reason == HogbomStop.EMPTY_MASK:
         logger.warning(
             f"All channels masked. Exiting loop...performed {iter_count} iterations"
         )
-    elif stop == HogbomStop.MAX_ITER:
+    elif reason == HogbomStop.MAX_ITER:
         logger.warning(
             f"Max iterations reached. Exiting loop...performed {iter_count} iterations"
         )
-    elif stop == HogbomStop.THRESHOLD:
+    elif reason == HogbomStop.THRESHOLD:
         logger.info(
             f"Threshold reached. Exiting loop...performed {iter_count} iterations"
         )
-    elif stop == HogbomStop.DIVERGED:
+    elif reason == HogbomStop.DIVERGED:
         logger.warning(
             f"CLEAN {CleanState.DIVERGING} at iter {iter_count} (best peak "
-            f"{best_peak:0.3g}); "
+            f"{results.best_peak[0]:0.3g}); "
             "stopping at best."
         )
-
-    return MinorLoopResults(
-        resid_fdf_spectrum=resid_fdf_spectrum,
-        resid_fdf_spectrum_mask=np.ma.array(resid_fdf_spectrum, mask=~mask_arr),
-        model_fdf_spectrum=model_fdf_spectrum,
-        iter_count=iter_count,
-    )
 
 
 def restore_model(
@@ -885,14 +1172,15 @@ class PixelCleanOptions:
             return f"{float(mask):0.3g}"
         return f"{np.min(mask):0.3g} to {np.max(mask):0.3g} per-pixel"
 
-    def at(self, pix_idx: int) -> RMCleanOptions:
-        """The options for one pixel."""
+    def at(self, pix_idx: int | NDArray[np.intp]) -> RMCleanOptions:
+        """The options for one pixel, or for an array of pixels, where each
+        per-pixel map becomes one value per pixel."""
         if not self._per_pixel:
             return self._options
-        return replace(
-            self._options,
-            **{field: values[pix_idx] for field, values in self._per_pixel.items()},
-        )
+        per_pixel: dict[str, Any] = {
+            field: values[pix_idx] for field, values in self._per_pixel.items()
+        }
+        return replace(self._options, **per_pixel)
 
 
 def rmclean(
@@ -1009,17 +1297,31 @@ def rmclean(
             f"Skipping {int(skip_arr.sum())} of {skip_arr.size} fully blanked pixels."
         )
 
-    # Loop through the pixels containing a polarised signal
+    todo = np.flatnonzero(~skip_arr)
+    # Multiscale cleans one pixel at a time. Single-scale cleans 256 per call:
+    # a call's working copies of its FDFs (and per-pixel RMSFs) stay a few MB,
+    # while each call still covers enough pixels to make the call cheap.
+    pixel_groups: Sequence[int | NDArray[np.intp]]
+    if multiscale:
+        pixel_groups = todo.tolist()
+    else:
+        pixel_groups = [todo[i : i + 256] for i in range(0, todo.size, 256)]
+    fdf_mask_arr_2d = (
+        None
+        if rm_synth_arrays.fdf_mask_arr is None
+        else nd_to_two_d(rm_synth_arrays.fdf_mask_arr)
+    )
+    # A shared RMSF is broadcast over the pixels (zero stride along them), so it
+    # goes in once
+    shared_rmsf = rmsf_arr_2d.strides[1] == 0
     for pix_idx in tqdm(
-        range(dirty_fdf_arr_2d.shape[1]),
+        pixel_groups,
         file=TQDM_OUT,
         leave=False,
         # tqdm.auto uses the notebook widget in Jupyter, which ignores `file`
         # and so escapes quiet_logs; gate on the logger level to actually mute it.
         disable=not logger.isEnabledFor(logging.INFO),
     ):
-        if skip_arr[pix_idx]:
-            continue
         if multiscale:
             (clean_spec, resid_spec, model_spec, iters, sub_minor_iters) = (
                 multiscale_clean_spectrum(
@@ -1039,26 +1341,24 @@ def rmclean(
             iter_count_arr_2d[pix_idx] = iters
             sub_minor_iter_arr_2d[pix_idx] = sub_minor_iters
             continue
-        clean_loop_results = minor_cycle(
-            rm_synth_1d_arrays=RMSynthArrays(
+        results = minor_cycle_batch(
+            RMSynthArrays(
                 dirty_fdf_arr=resid_fdf_arr_2d[:, pix_idx],
                 phi_arr_radm2=rm_synth_arrays.phi_arr_radm2,
-                rmsf_arr=rmsf_arr_2d[:, pix_idx],
+                rmsf_arr=rmsf_arr_2d[:, 0] if shared_rmsf else rmsf_arr_2d[:, pix_idx],
                 phi_double_arr_radm2=rm_synth_arrays.phi_double_arr_radm2,
                 fwhm_rmsf_arr=fwhm_rmsf_arr_2d,
-                fdf_mask_arr=nd_to_two_d(rm_synth_arrays.fdf_mask_arr)[:, pix_idx]
-                if rm_synth_arrays.fdf_mask_arr is not None
-                else None,
+                fdf_mask_arr=None
+                if fdf_mask_arr_2d is None
+                else fdf_mask_arr_2d[:, pix_idx],
             ),
-            clean_options=pixel_options.at(pix_idx),
+            pixel_options.at(pix_idx),
         )
-        clean_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.clean_fdf_spectrum
-        resid_fdf_arr_2d[:, pix_idx] = clean_loop_results.resid_fdf_spectrum
-        model_fdf_spectrum_2d[:, pix_idx] = clean_loop_results.model_fdf_spectrum
-        iter_count_arr_2d[pix_idx] = clean_loop_results.iter_count
-        # Single-scale: each minor iteration places one component, so the
-        # component count equals the minor-iteration count.
-        sub_minor_iter_arr_2d[pix_idx] = clean_loop_results.iter_count
+        clean_fdf_spectrum_2d[:, pix_idx] = results.clean_fdf_arr
+        resid_fdf_arr_2d[:, pix_idx] = results.resid_fdf_arr
+        model_fdf_spectrum_2d[:, pix_idx] = results.model_fdf_arr
+        iter_count_arr_2d[pix_idx] = results.clean_iter_arr
+        sub_minor_iter_arr_2d[pix_idx] = results.sub_minor_iter_arr
 
     # Restore the residual to the cleaned FDF (moved outside of loop:
     # will now work for pixels/spectra without clean components)
@@ -1109,99 +1409,130 @@ def minor_cycle(
     Returns:
         CleanLoopResults: Clean, residual, and model spectra and the iteration count.
     """
+    fdf_mask_arr = rm_synth_1d_arrays.fdf_mask_arr
     for array in (
         rm_synth_1d_arrays.dirty_fdf_arr,
         rm_synth_1d_arrays.phi_arr_radm2,
         rm_synth_1d_arrays.phi_double_arr_radm2,
+        *(() if fdf_mask_arr is None else (fdf_mask_arr,)),
     ):
         if array.ndim != 1:
             msg = "Arrays in minor cycle must be 1D."
             raise ValueError(msg)
+    results = minor_cycle_batch(
+        rm_synth_1d_arrays._replace(
+            dirty_fdf_arr=rm_synth_1d_arrays.dirty_fdf_arr[:, np.newaxis],
+            fdf_mask_arr=None if fdf_mask_arr is None else fdf_mask_arr[:, np.newaxis],
+        ),
+        clean_options,
+    )
+    return CleanLoopResults(
+        clean_fdf_spectrum=results.clean_fdf_arr[:, 0],
+        resid_fdf_spectrum=results.resid_fdf_arr[:, 0],
+        model_fdf_spectrum=results.model_fdf_arr[:, 0],
+        iter_count=int(results.clean_iter_arr[0]),
+    )
 
-    # Initialise arrays to hold the residual FDF, clean components, clean FDF
-    resid_fdf_spectrum = rm_synth_1d_arrays.dirty_fdf_arr.copy()
+
+def minor_cycle_batch(
+    rm_synth_2d_arrays: RMSynthArrays,
+    clean_options: RMCleanOptions,
+) -> RMCleanResults:
+    """`minor_cycle` on a stack of spectra, each minor loop cleaning them all in
+    one call.
+
+    Args:
+        rm_synth_2d_arrays (RMSynthArrays): Dirty FDFs [phi, spectrum], phi axes,
+            RMSF (shared 1D, or [phi_double, spectrum]), one FWHM for all
+            spectra, optional mask [phi, spectrum].
+        clean_options (RMCleanOptions): Mask, threshold, gain, max_iter, FDF
+            noise; per-spectrum values as 1D arrays.
+
+    Raises:
+        ValueError: If the FDFs are not 2D, or an option or RMSF does not have
+            one value for every spectrum.
+
+    Returns:
+        RMCleanResults: Clean, model and residual FDFs [phi, spectrum], and the
+            iterations per spectrum.
+    """
+    if rm_synth_2d_arrays.dirty_fdf_arr.ndim != 2:
+        msg = (
+            "Dirty FDFs must be 2D (phi, spectrum), got "
+            f"{rm_synth_2d_arrays.dirty_fdf_arr.ndim}D."
+        )
+        raise ValueError(msg)
+    dirty_fdf_arr = rm_synth_2d_arrays.dirty_fdf_arr.T
+    _check_per_spectrum(
+        {
+            "mask": clean_options.mask,
+            "threshold": clean_options.threshold,
+            "fdf_noise": 0.0
+            if clean_options.fdf_noise is None
+            else clean_options.fdf_noise,
+        },
+        len(dirty_fdf_arr),
+    )
+    # A scalar mask stays a scalar, so it compares at the FDF's own precision
+    mask_level = clean_options.mask
+    if np.ndim(mask_level) != 0:
+        mask_level = np.asarray(mask_level, dtype=np.float64)[:, np.newaxis]
 
     if clean_options.fdf_noise is not None:
         # Adaptive mask: cap is the whole allowed region (minor_loop starts tight
         # from a seed and grows the mask against the falling off-source noise).
-        mask_arr = np.ones_like(resid_fdf_spectrum, dtype=bool)
+        mask_arr = np.ones(dirty_fdf_arr.shape, dtype=bool)
     else:
-        mask_arr = np.abs(rm_synth_1d_arrays.dirty_fdf_arr) > clean_options.mask
+        mask_arr = np.abs(dirty_fdf_arr) > mask_level
+    if rm_synth_2d_arrays.fdf_mask_arr is not None:
+        mask_arr &= rm_synth_2d_arrays.fdf_mask_arr.T.astype(bool)
 
-    if rm_synth_1d_arrays.fdf_mask_arr is not None:
-        assert rm_synth_1d_arrays.fdf_mask_arr.ndim == 1, (
-            "Arrays in minor cycle must be 1D."
-        )
-        mask_arr = np.logical_and(
-            mask_arr,
-            rm_synth_1d_arrays.fdf_mask_arr.astype(bool),
-        )
-
-    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
-
-    minor_loop_arrays = MinorLoopArrays(
-        resid_fdf_spectrum_mask=resid_fdf_spectrum_mask,
-        phi_arr_radm2=rm_synth_1d_arrays.phi_arr_radm2,
-        phi_double_arr_radm2=rm_synth_1d_arrays.phi_double_arr_radm2,
-        rmsf_spectrum=rm_synth_1d_arrays.rmsf_arr,
-        rmsf_fwhm=float(rm_synth_1d_arrays.fwhm_rmsf_arr.squeeze()),
+    minor_loop_arrays = MinorLoopBatchArrays(
+        resid_fdf_arr_mask=np.ma.array(dirty_fdf_arr, mask=~mask_arr),
+        phi_arr_radm2=rm_synth_2d_arrays.phi_arr_radm2,
+        phi_double_arr_radm2=rm_synth_2d_arrays.phi_double_arr_radm2,
+        rmsf_arr=rm_synth_2d_arrays.rmsf_arr.T,
     )
-
-    minor_loop_options = MinorLoopOptions(
+    minor_loop_options = MinorLoopBatchOptions(
         max_iter=clean_options.max_iter,
         gain=clean_options.gain,
-        mask_threshold=float(clean_options.mask),
-        stopping_threshold=float(clean_options.threshold),
-        start_iter=0,
-        update_mask=True,
-        noise=None
-        if clean_options.fdf_noise is None
-        else float(clean_options.fdf_noise),
+        mask_threshold=clean_options.mask,
+        stopping_threshold=clean_options.threshold,
+        noise=clean_options.fdf_noise,
     )
-
     logger.info("Starting initial minor loop...")
-    initial_loop_results = minor_loop(
-        minor_loop_arrays=minor_loop_arrays,
-        minor_loop_options=minor_loop_options,
-    )
+    initial = minor_loop_batch(minor_loop_arrays, minor_loop_options)
 
-    # Deep clean
-    # Mask where clean components have been added
-    mask_arr = np.abs(initial_loop_results.model_fdf_spectrum) > 0
-    resid_fdf_spectrum = initial_loop_results.resid_fdf_spectrum
-    resid_fdf_spectrum_mask = np.ma.array(resid_fdf_spectrum, mask=~mask_arr)
-
+    # Deep clean, masked to where clean components have been added
     logger.info("Initial loop complete. Starting deep clean...")
-
-    deep_loop_results = minor_loop(
-        minor_loop_arrays=minor_loop_arrays._replace(
-            resid_fdf_spectrum_mask=resid_fdf_spectrum_mask
+    deep = minor_loop_batch(
+        minor_loop_arrays._replace(
+            resid_fdf_arr_mask=np.ma.array(
+                initial.resid_fdf_arr, mask=initial.model_fdf_arr == 0
+            )
         ),
-        minor_loop_options=dataclasses.replace(
+        replace(
             minor_loop_options,
-            start_iter=initial_loop_results.iter_count,
+            start_iter=initial.iter_count_arr,
             update_mask=False,
         ),
     )
 
-    resid_fdf_spectrum = np.squeeze(deep_loop_results.resid_fdf_spectrum)
-    model_fdf_spectrum = np.squeeze(
-        deep_loop_results.model_fdf_spectrum + initial_loop_results.model_fdf_spectrum
+    model_fdf_arr = deep.model_fdf_arr + initial.model_fdf_arr
+    rmsf_fwhm = float(np.squeeze(rm_synth_2d_arrays.fwhm_rmsf_arr))
+    clean_fdf_arr = np.stack(
+        [
+            restore_model(model, rm_synth_2d_arrays.phi_arr_radm2, rmsf_fwhm)
+            for model in model_fdf_arr
+        ]
     )
-    clean_fdf_spectrum = np.squeeze(
-        restore_model(
-            deep_loop_results.model_fdf_spectrum
-            + initial_loop_results.model_fdf_spectrum,
-            rm_synth_1d_arrays.phi_arr_radm2,
-            float(rm_synth_1d_arrays.fwhm_rmsf_arr.squeeze()),
-        )
-    )
-
-    return CleanLoopResults(
-        clean_fdf_spectrum=clean_fdf_spectrum,
-        resid_fdf_spectrum=resid_fdf_spectrum,
-        model_fdf_spectrum=model_fdf_spectrum,
-        iter_count=deep_loop_results.iter_count,
+    return RMCleanResults(
+        clean_fdf_arr=clean_fdf_arr.T,
+        model_fdf_arr=model_fdf_arr.T,
+        clean_iter_arr=deep.iter_count_arr,
+        resid_fdf_arr=deep.resid_fdf_arr.T,
+        # Each minor iteration places one component
+        sub_minor_iter_arr=deep.iter_count_arr,
     )
 
 
