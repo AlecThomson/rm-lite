@@ -62,6 +62,7 @@ jobs:
         run: >-
           uv run --extra dev pytest -ra --cov --cov-report= -m "not
           slow_uncompiled" tests/test_minor_loop.py tests/test_arrays.py
+          tests/test_fitting.py
 
       - name: Test package
         run: >-

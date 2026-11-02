@@ -5,14 +5,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import dask.array as da
+import numpy as np
 import pytest
 from astropy.io import fits
+from rm_lite.utils import fitting
+from rm_lite.utils.lmfit_numba import LMFit, ModelSettings
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    import numpy as np
     from numpy.typing import NDArray
 
 
@@ -47,3 +49,43 @@ def fits_cube() -> Callable[..., Path]:
         return path
 
     return write
+
+
+@pytest.fixture(scope="session")
+def scipy_fits_only() -> Callable[[pytest.MonkeyPatch], None]:
+    """Patch `lm_fit` never to converge, so every Python fit takes scipy's
+    path. The compiled block fit runs its own `lm_fit`, which this leaves."""
+
+    def unconverged(
+        _x_arr: NDArray[np.float64],
+        _stokes_i_arr: NDArray[np.float64],
+        _sigma_arr: NDArray[np.float64],
+        initial_guess: NDArray[np.float64],
+        _settings: ModelSettings,
+    ) -> LMFit:
+        n_param = initial_guess.size
+        return LMFit(initial_guess, np.full((n_param, n_param), np.nan), False)
+
+    def patch(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(fitting, "lm_fit", unconverged)
+
+    return patch
+
+
+@pytest.fixture(scope="session")
+def python_block_fit() -> Callable[[pytest.MonkeyPatch], None]:
+    """Patch the compiled block fit to leave every pixel to the per-pixel
+    Python fit."""
+
+    def all_left_to_python(
+        spectra: fitting.StokesISpectra, options: fitting.SpectraFitOptions
+    ) -> fitting.SpectraFit:
+        n_spec, n_freq = spectra.i_rows.shape
+        fit = fitting._empty_spectra_fit(n_spec, n_freq, abs(options.fit_order) + 1)
+        fit.status[:] = fitting.FitStatus.NEEDS_SCIPY
+        return fit
+
+    def patch(monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(fitting, "fit_stokes_i_spectra", all_left_to_python)
+
+    return patch

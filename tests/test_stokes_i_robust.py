@@ -341,7 +341,9 @@ def test_no_error_falls_back_to_plain_least_squares(spectrum: Spectrum) -> None:
 
 
 def test_a_failed_fit_is_unscoreable(
-    spectrum: Spectrum, monkeypatch: pytest.MonkeyPatch
+    spectrum: Spectrum,
+    monkeypatch: pytest.MonkeyPatch,
+    scipy_fits_only: Callable[[pytest.MonkeyPatch], None],
 ) -> None:
     """A flat model nothing converged to scores inf rather than competing."""
     # Otherwise it competes on AIC once the weighting has shrunk its residuals.
@@ -351,6 +353,8 @@ def test_a_failed_fit_is_unscoreable(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(optimize, "curve_fit", always_fails)
+    # and the compiled fit that runs first
+    scipy_fits_only(monkeypatch)
     fit = static_fit(
         spectrum.freq_arr_hz,
         spectrum.ref_freq_hz,

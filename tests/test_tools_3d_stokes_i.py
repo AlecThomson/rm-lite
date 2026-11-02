@@ -642,9 +642,10 @@ def test_stokes_i_snr_cut_zero_fits_all_pixels(chunked: Callable[..., da.Array])
     assert np.isfinite(order_at_faint_pixel(0.0))
 
 
-def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
+def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch, scipy_fits_only):
     """A fit that cannot converge returns a flat model instead of raising."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
+    scipy_fits_only(monkeypatch)
 
     freq_arr_hz = (np.arange(744, 1032, 3) * 1e6).astype(np.float64)
     ref_freq_hz = float(np.median(freq_arr_hz))
@@ -666,10 +667,12 @@ def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch):
 
 
 def test_stokes_i_fit_failure_is_graceful(
-    monkeypatch, chunked: Callable[..., da.Array]
+    monkeypatch, chunked: Callable[..., da.Array], scipy_fits_only, python_block_fit
 ):
     """If every fit fails, the cube still completes on flat models."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
+    scipy_fits_only(monkeypatch)
+    python_block_fit(monkeypatch)
 
     cube = make_stokes_i_cube(alpha=-1.0)
     i_err = np.full_like(cube.stokes_i, 1e-3)
