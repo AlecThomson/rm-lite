@@ -1269,6 +1269,9 @@ def rmclean(
     # Reshape the arrays to 2D i.e. [phi, x, y] -> [phi, x*y]
     dirty_fdf_arr_2d = nd_to_two_d(rm_synth_arrays.dirty_fdf_arr)
     rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.rmsf_arr)
+    # A shared RMSF is broadcast over the pixels (zero stride along them), so it
+    # goes in once
+    shared_rmsf = rmsf_arr_2d.strides[1] == 0
     iter_count_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
     sub_minor_iter_arr_2d = np.zeros(dirty_fdf_arr_2d.shape[1:], dtype=int)
     fwhm_rmsf_arr_2d = nd_to_two_d(rm_synth_arrays.fwhm_rmsf_arr)
@@ -1319,6 +1322,20 @@ def rmclean(
     pixel_groups: Sequence[int | NDArray[np.intp]]
     if multiscale:
         pixel_groups = todo.tolist()
+        # The scale kernels come from the RMSF, FWHM, phi axis, scales and kernel
+        # shape, all block-constant with a shared RMSF, so the block needs them
+        # once, and only if a pixel cleans
+        ms_kernels = (
+            compute_scale_kernels(
+                scales,
+                rmsf_arr_2d[:, 0],
+                rmsf_fwhm,
+                rm_synth_arrays.phi_double_arr_radm2,
+                ms_options.kernel,
+            )
+            if shared_rmsf and todo.size
+            else None
+        )
     else:
         pixel_groups = [todo[i : i + 256] for i in range(0, todo.size, 256)]
     fdf_mask_arr_2d = (
@@ -1326,9 +1343,6 @@ def rmclean(
         if rm_synth_arrays.fdf_mask_arr is None
         else nd_to_two_d(rm_synth_arrays.fdf_mask_arr)
     )
-    # A shared RMSF is broadcast over the pixels (zero stride along them), so it
-    # goes in once
-    shared_rmsf = rmsf_arr_2d.strides[1] == 0
     for pix_idx in tqdm(
         pixel_groups,
         file=TQDM_OUT,
@@ -1348,6 +1362,7 @@ def rmclean(
                     scales=scales,
                     clean_options=pixel_options.at(pix_idx),
                     multiscale_options=ms_options,
+                    kernels=ms_kernels,
                 )
             )
             clean_fdf_spectrum_2d[:, pix_idx] = clean_spec
@@ -2378,6 +2393,7 @@ def multiscale_clean_spectrum(
     scales: NDArray[np.float64],
     clean_options: RMCleanOptions,
     multiscale_options: MultiscaleOptions,
+    kernels: ScaleKernels | None = None,
 ) -> tuple[
     NDArray[np.complexfloating],
     NDArray[np.complexfloating],
@@ -2402,6 +2418,12 @@ def multiscale_clean_spectrum(
         scales (NDArray[np.float64]): Scales in RMSF FWHM units.
         clean_options (RMCleanOptions): Mask, threshold, gain, max_iter.
         multiscale_options (MultiscaleOptions): Kernel, selector, sub-minor settings.
+        kernels (ScaleKernels | None): `compute_scale_kernels` of this RMSF,
+            FWHM, phi axis, scales and kernel shape, to share between spectra;
+            computed here if None.
+
+    Raises:
+        ValueError: If `kernels` were computed for other scales.
 
     Returns:
         (clean, resid, model, minor_iters, sub_minor_iters): minor_iters counts
@@ -2434,13 +2456,17 @@ def multiscale_clean_spectrum(
     kernel = multiscale_options.kernel
     resid_fdf_spectrum = dirty_fdf_spectrum.copy()
     model_fdf_spectrum = np.zeros_like(resid_fdf_spectrum)
-    kernels = compute_scale_kernels(
-        scales,
-        rmsf_spectrum,
-        rmsf_fwhm,
-        phi_double_arr_radm2,
-        kernel,
-    )
+    if kernels is not None and not np.array_equal(kernels.scales, scales):
+        msg = f"`kernels` are for scales {kernels.scales}, not {scales}."
+        raise ValueError(msg)
+    if kernels is None:
+        kernels = compute_scale_kernels(
+            scales,
+            rmsf_spectrum,
+            rmsf_fwhm,
+            phi_double_arr_radm2,
+            kernel,
+        )
     # Adaptive opening-filter masking replaces the frozen dirty-based supports and
     # the dirty hybrid classification (activation is the opening filter).
     adaptive = clean_options.fdf_noise is not None
