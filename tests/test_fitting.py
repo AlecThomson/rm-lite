@@ -415,3 +415,11 @@ def test_aic_lsq_is_astropys(n_samples: int) -> None:
             fitting.aic_lsq(2.5, n_params, n_samples),
             akaike_info_criterion_lsq(2.5, n_params, n_samples),
         )
+
+
+def test_unscoreable_orders_fall_back_to_the_fewest_parameters() -> None:
+    """At the minimum channel count the AICc correction diverges, so no order
+    can be scored, and Occam's rule keeps the fewest parameters"""
+    assert fitting.aic_lsq(2.5, 3, 4) == np.inf
+    aics = np.full(3, np.inf)
+    assert fitting.best_aic_index(aics, np.array([3, 1, 2])) == 1
