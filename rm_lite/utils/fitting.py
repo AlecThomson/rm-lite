@@ -318,11 +318,11 @@ def _eval_model_at(
     x: NDArray[np.float64],
     log_model: bool,
 ) -> NDArray[np.float64]:
-    """`eval_model` in NumPy for the model functions, so it broadcasts"""
-    # Uncompiled (NUMBA_DISABLE_JIT), eval_model is the function itself
-    py_eval_model = getattr(eval_model, "py_func", eval_model)
+    """`_eval_model` in NumPy for the model functions, so it broadcasts"""
+    # Uncompiled (NUMBA_DISABLE_JIT), _eval_model is the function itself
+    py_eval_model = getattr(_eval_model, "py_func", _eval_model)
     return np.asarray(
-        py_eval_model(params, np.asarray(x), ModelSettings(log_model, 0.0))
+        py_eval_model(params, np.asarray(x), _ModelSettings(log_model, 0.0))
     )
 
 
@@ -330,7 +330,7 @@ def best_aic_func(
     aics: NDArray[np.float64], n_param: NDArray[np.integer[Any]]
 ) -> tuple[float, int, int]:
     """Find the best AIC for a set of AICs using Occam's razor."""
-    best_aic_idx = best_aic_index(
+    best_aic_idx = _best_aic_index(
         np.asarray(aics, dtype=np.float64), np.asarray(n_param, dtype=np.int64)
     )
     best_aic, best_n = float(aics[best_aic_idx]), int(n_param[best_aic_idx])
@@ -338,7 +338,7 @@ def best_aic_func(
     return best_aic, best_n, best_aic_idx
 
 
-class ModelSettings(NamedTuple):
+class _ModelSettings(NamedTuple):
     """Stokes I model and loss, as the compiled fit takes them"""
 
     log_model: bool
@@ -347,7 +347,7 @@ class ModelSettings(NamedTuple):
     """Cauchy loss scale in sigma; 0 for a linear loss"""
 
 
-class RobustCost(NamedTuple):
+class _RobustCost(NamedTuple):
     """A Stokes I fit's cost at a set of parameters (see `_robust_cost`)"""
 
     cost: float
@@ -360,8 +360,8 @@ class RobustCost(NamedTuple):
     """Jacobian scaled for the loss"""
 
 
-class LMFit(NamedTuple):
-    """Result of `lm_fit`"""
+class _LMFit(NamedTuple):
+    """Result of `_lm_fit`"""
 
     popt: NDArray[np.float64]
     """Parameters"""
@@ -381,7 +381,7 @@ class FitStatus(IntEnum):
     UNUSABLE = 2
     """Fitted, but the model cannot divide Q/U (see `model_is_usable`)"""
     NEEDS_SCIPY = 3
-    """`lm_fit` did not converge, so the Python fit takes it"""
+    """`_lm_fit` did not converge, so the Python fit takes it"""
 
 
 class StokesISpectra(NamedTuple):
@@ -402,7 +402,7 @@ class SpectraFitOptions(NamedTuple):
 
     fit_order: int
     """Model order; negative for every order up to it, chosen by AIC"""
-    model: ModelSettings
+    model: _ModelSettings
     """Model and loss"""
     snr_cut: float
     """`stokes_i_snr` below which a spectrum is skipped; -inf for no cut"""
@@ -428,8 +428,8 @@ class SpectraFit(NamedTuple):
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def eval_model(
-    params: NDArray[np.float64], x_arr: NDArray[np.float64], settings: ModelSettings
+def _eval_model(
+    params: NDArray[np.float64], x_arr: NDArray[np.float64], settings: _ModelSettings
 ) -> NDArray[np.float64]:
     """A `power_law` or `polynomial` model, compiled. Uncompiled (`py_func`) it
     broadcasts `x_arr` against parameters that are arrays, as the model
@@ -438,7 +438,7 @@ def eval_model(
     Args:
         params (NDArray[np.float64]): Model parameters.
         x_arr (NDArray[np.float64]): freq / ref_freq.
-        settings (ModelSettings): Model (the loss is not used).
+        settings (_ModelSettings): Model (the loss is not used).
 
     Returns:
         NDArray[np.float64]: The model at `x_arr`.
@@ -461,8 +461,8 @@ def _robust_cost(
     basis: NDArray[np.float64],
     stokes_i_arr: NDArray[np.float64],
     sigma_arr: NDArray[np.float64],
-    settings: ModelSettings,
-) -> RobustCost:
+    settings: _ModelSettings,
+) -> _RobustCost:
     """Cost of a Stokes I fit at `params`, with the residuals and Jacobian
     scaled for the loss as scipy's `scale_for_robust_loss_function`, so a
     Gauss-Newton step and the covariance match `least_squares`.
@@ -473,12 +473,12 @@ def _robust_cost(
             freq / ref_freq for a polynomial.
         stokes_i_arr (NDArray[np.float64]): Stokes I.
         sigma_arr (NDArray[np.float64]): 1-sigma errors.
-        settings (ModelSettings): Model and loss.
+        settings (_ModelSettings): Model and loss.
 
     Returns:
-        RobustCost: Cost, residuals, and the scaled residuals and Jacobian.
+        _RobustCost: Cost, residuals, and the scaled residuals and Jacobian.
     """
-    # One pass per channel, as lm_fit calls this on every trial step: the model
+    # One pass per channel, as _lm_fit calls this on every trial step: the model
     # and its Jacobian row, then the loss
     n_param = params.size
     f_scale = settings.f_scale
@@ -522,17 +522,17 @@ def _robust_cost(
             scaled_resid[chan] = sigma_resid[chan]
         for i in range(n_param):
             jac[chan, i] *= scale / sigma_arr[chan]
-    return RobustCost(cost, sigma_resid, scaled_resid, jac)
+    return _RobustCost(cost, sigma_resid, scaled_resid, jac)
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def lm_fit(
+def _lm_fit(
     x_arr: NDArray[np.float64],
     stokes_i_arr: NDArray[np.float64],
     sigma_arr: NDArray[np.float64],
     initial_guess: NDArray[np.float64],
-    settings: ModelSettings,
-) -> LMFit:
+    settings: _ModelSettings,
+) -> _LMFit:
     """Levenberg-Marquardt fit of a Stokes I model, compiled so threads can run it.
 
     Same optimum as `static_fit`'s `curve_fit` call: residuals divided by
@@ -548,16 +548,16 @@ def lm_fit(
         stokes_i_arr (NDArray[np.float64]): Stokes I.
         sigma_arr (NDArray[np.float64]): 1-sigma errors; ones for an unweighted fit.
         initial_guess (NDArray[np.float64]): Starting parameters.
-        settings (ModelSettings): Model and loss.
+        settings (_ModelSettings): Model and loss.
 
     Returns:
-        LMFit: popt, pcov, and whether it converged.
+        _LMFit: popt, pcov, and whether it converged.
     """
     n_param = initial_guess.size
     params = initial_guess.copy()
     pcov = np.full((n_param, n_param), np.nan)
     if x_arr.size < n_param or params[0] <= 0:
-        return LMFit(params, pcov, False)
+        return _LMFit(params, pcov, False)
     basis = np.log10(x_arr) if settings.log_model else x_arr
     current = _robust_cost(params, basis, stokes_i_arr, sigma_arr, settings)
     # Steps are measured against the errors, or against the data where that is
@@ -576,7 +576,7 @@ def lm_fit(
         hess = jac.T @ jac
         grad = jac.T @ current.scaled_resid
         if not np.isfinite(current.cost) or not np.all(np.isfinite(hess)):
-            return LMFit(params, pcov, False)
+            return _LMFit(params, pcov, False)
         # Converged once a full Gauss-Newton step is under 1e-6 of the errors:
         # it lowers the cost by 0.5 dp.H.dp, and H is the inverse covariance.
         # Tested before stepping, as at the optimum no step lowers it, in
@@ -589,7 +589,7 @@ def lm_fit(
         while True:
             damped = hess + damping * np.diag(np.diag(hess))
             if not np.all(np.isfinite(damped)):
-                return LMFit(params, pcov, False)
+                return _LMFit(params, pcov, False)
             trial = params - (np.linalg.pinv(damped) @ grad) / norm
             trial[0] = max(trial[0], 0.0)
             trial_cost = _robust_cost(trial, basis, stokes_i_arr, sigma_arr, settings)
@@ -597,18 +597,18 @@ def lm_fit(
                 break
             damping *= 10
             if damping > 1e16:
-                return LMFit(params, pcov, False)
+                return _LMFit(params, pcov, False)
         params, current = trial, trial_cost
         damping = max(damping / 10, 1e-15)
     if not converged or params[0] <= 0:
-        return LMFit(params, pcov, False)
+        return _LMFit(params, pcov, False)
     # Many channels past f_scale: the loss is far from quadratic and has other
     # minima, where solvers part ways. Leave those to scipy.
     f_scale = settings.f_scale
     if f_scale > 0 and np.mean(np.abs(current.sigma_resid) > f_scale) > 0.1:
-        return LMFit(params, pcov, False)
+        return _LMFit(params, pcov, False)
     pcov = _curve_fit_pcov(current.jac)
-    return LMFit(params, pcov, bool(np.all(np.isfinite(pcov))))
+    return _LMFit(params, pcov, bool(np.all(np.isfinite(pcov))))
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
@@ -630,7 +630,7 @@ def _curve_fit_pcov(jac: NDArray[np.float64]) -> NDArray[np.float64]:
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def robust_aic(
+def _robust_aic(
     sigma_resid: NDArray[np.float64], n_params: int, f_scale: float
 ) -> float:
     """AIC of a least-squares fit, as astropy's `akaike_info_criterion_lsq`, with
@@ -678,7 +678,7 @@ def aic_lsq(ssr: float, n_params: int, n_samples: int) -> float:
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def best_aic_index(aics: NDArray[np.float64], n_param: NDArray[np.int64]) -> int:
+def _best_aic_index(aics: NDArray[np.float64], n_param: NDArray[np.int64]) -> int:
     """Occam's razor on AIC: the lowest, then the fewest parameters within 2 of
     it; the fewest parameters if none can be scored.
 
@@ -700,7 +700,7 @@ def best_aic_index(aics: NDArray[np.float64], n_param: NDArray[np.int64]) -> int
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def spectral_index(
+def _spectral_index(
     models: NDArray[np.float64], freq_arr_hz: NDArray[np.float64], ref_freq_hz: float
 ) -> NDArray[np.float64]:
     """Spectral index (d ln I / d ln nu) of each model (row) at the reference
@@ -741,7 +741,7 @@ def spectral_index(
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def fittable_channels(
+def _fittable_channels(
     stokes_i_arr: NDArray[np.float64], stokes_i_error_arr: NDArray[np.float64]
 ) -> NDArray[np.bool_]:
     """Channels a Stokes I fit can use.
@@ -764,7 +764,7 @@ def fittable_channels(
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def initial_guess(
+def _initial_guess(
     stokes_i_arr: NDArray[np.float64], n_param: int
 ) -> NDArray[np.float64]:
     """Starting parameters: the mean flux (0 if negative, as `p0 >= 0`), then
@@ -782,41 +782,41 @@ def initial_guess(
     return params
 
 
-class FitWeights(NamedTuple):
-    """How a Stokes I fit weights its channels (see `fit_weights`)"""
+class _FitWeights(NamedTuple):
+    """How a Stokes I fit weights its channels (see `_fit_weights`)"""
 
     sigma: NDArray[np.float64]
     """1-sigma errors to divide residuals by; ones for an unweighted fit"""
     weighted: bool
     """Whether `sigma` are the errors"""
-    settings: ModelSettings
+    settings: _ModelSettings
     """Model and loss, linear when unweighted"""
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def fit_weights(
-    stokes_i_error_arr: NDArray[np.float64], settings: ModelSettings
-) -> FitWeights:
+def _fit_weights(
+    stokes_i_error_arr: NDArray[np.float64], settings: _ModelSettings
+) -> _FitWeights:
     """Weight by the errors if every one is finite and positive. Otherwise fit
     unweighted, with a linear loss, as residuals in flux have no sigma for
     `f_scale` to count.
 
     Args:
         stokes_i_error_arr (NDArray[np.float64]): Errors.
-        settings (ModelSettings): Model and loss asked for.
+        settings (_ModelSettings): Model and loss asked for.
 
     Returns:
-        FitWeights: Errors to divide by, whether they are real, and the loss.
+        _FitWeights: Errors to divide by, whether they are real, and the loss.
     """
     if np.all(np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0)):
-        return FitWeights(stokes_i_error_arr, True, settings)
-    return FitWeights(
-        np.ones(stokes_i_error_arr.size), False, ModelSettings(settings.log_model, 0.0)
+        return _FitWeights(stokes_i_error_arr, True, settings)
+    return _FitWeights(
+        np.ones(stokes_i_error_arr.size), False, _ModelSettings(settings.log_model, 0.0)
     )
 
 
-class SpectrumFit(NamedTuple):
-    """`fit_spectrum` of one spectrum"""
+class _SpectrumFit(NamedTuple):
+    """`_fit_spectrum` of one spectrum"""
 
     status: int
     """`FitStatus`"""
@@ -827,21 +827,21 @@ class SpectrumFit(NamedTuple):
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def fit_spectrum(
+def _fit_spectrum(
     stokes_i_arr: NDArray[np.float64],
     stokes_i_error_arr: NDArray[np.float64],
     x_arr: NDArray[np.float64],
     options: SpectraFitOptions,
-) -> SpectrumFit:
+) -> _SpectrumFit:
     """`fit_stokes_i_model` on one spectrum, compiled: the channel and SNR
-    gates, then `lm_fit` at the order, or each order up to it with Occam's rule
-    on `robust_aic`.
+    gates, then `_lm_fit` at the order, or each order up to it with Occam's rule
+    on `_robust_aic`.
 
-    A dynamic fit scores an order `lm_fit` left to scipy where it stopped, near
+    A dynamic fit scores an order `_lm_fit` left to scipy where it stopped, near
     scipy's fit. That can pick another order than the Python fit, which scores
     scipy's: for polynomials about 1 pixel in 150 at `fit_order=-4`, whose
     models differ by about 5e-4. Any order stopped on the `p0 >= 0` bound, or a
-    chosen order `lm_fit` left, needs scipy.
+    chosen order `_lm_fit` left, needs scipy.
 
     Args:
         stokes_i_arr (NDArray[np.float64]): Stokes I.
@@ -850,50 +850,50 @@ def fit_spectrum(
         options (SpectraFitOptions): Fit options.
 
     Returns:
-        SpectrumFit: `FitStatus`, and popt and pcov if fitted.
+        _SpectrumFit: `FitStatus`, and popt and pcov if fitted.
     """
     n_coeff = abs(options.fit_order) + 1
-    good = fittable_channels(stokes_i_arr, stokes_i_error_arr)
+    good = _fittable_channels(stokes_i_arr, stokes_i_error_arr)
     if np.count_nonzero(good) < n_coeff + 1:
-        return SpectrumFit(FitStatus.SKIPPED, np.empty(0), np.empty((0, 0)))
+        return _SpectrumFit(FitStatus.SKIPPED, np.empty(0), np.empty((0, 0)))
     i_good, e_good, x_good = stokes_i_arr[good], stokes_i_error_arr[good], x_arr[good]
     if _stokes_i_snr(i_good, e_good) < options.snr_cut:
-        return SpectrumFit(FitStatus.SKIPPED, np.empty(0), np.empty((0, 0)))
-    weights = fit_weights(e_good, options.model)
+        return _SpectrumFit(FitStatus.SKIPPED, np.empty(0), np.empty((0, 0)))
+    weights = _fit_weights(e_good, options.model)
     # Every order up to |fit_order| when it is negative
     first = 0 if options.fit_order < 0 else options.fit_order
     aics = np.full(n_coeff, np.inf)
     fits = []
     for order in range(first, n_coeff):
-        fit = lm_fit(
+        fit = _lm_fit(
             x_good,
             i_good,
             weights.sigma,
-            initial_guess(i_good, order + 1),
+            _initial_guess(i_good, order + 1),
             weights.settings,
         )
         # On the p0 >= 0 bound, scipy's bounded fit lands elsewhere, and its AIC
         # could pick another order
         if not fit.converged and fit.popt[0] <= 0:
-            return SpectrumFit(FitStatus.NEEDS_SCIPY, np.empty(0), np.empty((0, 0)))
+            return _SpectrumFit(FitStatus.NEEDS_SCIPY, np.empty(0), np.empty((0, 0)))
         fits.append(fit)
-        model = eval_model(fit.popt, x_good, weights.settings)
-        aics[order] = robust_aic(
+        model = _eval_model(fit.popt, x_good, weights.settings)
+        aics[order] = _robust_aic(
             (model - i_good) / weights.sigma, order + 1, weights.settings.f_scale
         )
     best = (
-        best_aic_index(aics, np.arange(1, n_coeff + 1))
+        _best_aic_index(aics, np.arange(1, n_coeff + 1))
         if options.fit_order < 0
         else first
     )
     fit = fits[best - first]
     if not fit.converged:
-        return SpectrumFit(FitStatus.NEEDS_SCIPY, np.empty(0), np.empty((0, 0)))
-    return SpectrumFit(FitStatus.FITTED, fit.popt, fit.pcov)
+        return _SpectrumFit(FitStatus.NEEDS_SCIPY, np.empty(0), np.empty((0, 0)))
+    return _SpectrumFit(FitStatus.FITTED, fit.popt, fit.pcov)
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def empty_spectra_fit(n_spec: int, n_freq: int, n_coeff: int) -> SpectraFit:
+def _empty_spectra_fit(n_spec: int, n_freq: int, n_coeff: int) -> SpectraFit:
     """A `SpectraFit` with every spectrum skipped.
 
     Args:
@@ -915,7 +915,7 @@ def empty_spectra_fit(n_spec: int, n_freq: int, n_coeff: int) -> SpectraFit:
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def record_fit(
+def _record_fit(
     fit: SpectraFit,
     spec: int,
     spectra: StokesISpectra,
@@ -936,7 +936,7 @@ def record_fit(
         pcov (NDArray[np.float64]): Their covariance.
     """
     x_arr = spectra.freq_arr_hz / spectra.ref_freq_hz[spec]
-    model = eval_model(popt, x_arr, options.model)
+    model = _eval_model(popt, x_arr, options.model)
     floor = _noise_floor(spectra.err_rows[spec], options.model_floor_sigma)
     # The whole model divides Q/U, including channels Stokes I had flagged and
     # Q/U did not, so all of it has to be usable
@@ -945,7 +945,7 @@ def record_fit(
         return
     fit.status[spec] = FitStatus.FITTED
     fit.model[spec] = model
-    fit.alpha[spec] = spectral_index(
+    fit.alpha[spec] = _spectral_index(
         model.reshape(1, -1), spectra.freq_arr_hz, spectra.ref_freq_hz[spec]
     )[0]
     fit.order[spec] = popt.size - 1
@@ -959,7 +959,7 @@ def record_fit(
 def fit_stokes_i_spectra(
     spectra: StokesISpectra, options: SpectraFitOptions
 ) -> SpectraFit:
-    """`fit_spectrum` and `record_fit` on every spectrum, without the GIL.
+    """`_fit_spectrum` and `_record_fit` on every spectrum, without the GIL.
 
     Args:
         spectra (StokesISpectra): Stokes I, errors and frequencies.
@@ -967,13 +967,13 @@ def fit_stokes_i_spectra(
 
     Returns:
         SpectraFit: Models, alpha, order, coefficients and errors, NaN where
-            not fitted, and each spectrum's `FitStatus`; a spectrum `lm_fit`
+            not fitted, and each spectrum's `FitStatus`; a spectrum `_lm_fit`
             left to scipy is `FitStatus.NEEDS_SCIPY`, for the Python fit.
     """
     n_spec, n_freq = spectra.i_rows.shape
-    fit: SpectraFit = empty_spectra_fit(n_spec, n_freq, abs(options.fit_order) + 1)
+    fit: SpectraFit = _empty_spectra_fit(n_spec, n_freq, abs(options.fit_order) + 1)
     for spec in range(n_spec):
-        result = fit_spectrum(
+        result = _fit_spectrum(
             spectra.i_rows[spec],
             spectra.err_rows[spec],
             spectra.freq_arr_hz / spectra.ref_freq_hz[spec],
@@ -981,14 +981,14 @@ def fit_stokes_i_spectra(
         )
         fit.status[spec] = result.status
         if result.status == FitStatus.FITTED:
-            record_fit(fit, spec, spectra, options, result.popt, result.pcov)
+            _record_fit(fit, spec, spectra, options, result.popt, result.pcov)
     return fit
 
 
-def model_settings(
+def _model_settings(
     fit_function: Literal["log", "linear"], robust_loss: RobustLoss, f_scale: float
-) -> ModelSettings:
-    """`ModelSettings` for a fit function and loss.
+) -> _ModelSettings:
+    """`_ModelSettings` for a fit function and loss.
 
     Args:
         fit_function (Literal["log", "linear"]): Power law or polynomial.
@@ -999,17 +999,17 @@ def model_settings(
         ValueError: For a loss other than "cauchy" or "linear".
 
     Returns:
-        ModelSettings: The model, and `f_scale`, or 0 for a linear loss.
+        _ModelSettings: The model, and `f_scale`, or 0 for a linear loss.
     """
     if robust_loss not in ("cauchy", "linear"):
         msg = f"robust_loss must be 'cauchy' or 'linear', got {robust_loss!r}."
         raise ValueError(msg)
-    return ModelSettings(
+    return _ModelSettings(
         fit_function == "log", f_scale if robust_loss == "cauchy" else 0.0
     )
 
 
-def spectra_fit_options(fit_options: StokesIFitOptions) -> SpectraFitOptions:
+def _spectra_fit_options(fit_options: StokesIFitOptions) -> SpectraFitOptions:
     """`SpectraFitOptions` from `StokesIFitOptions`.
 
     Args:
@@ -1020,7 +1020,7 @@ def spectra_fit_options(fit_options: StokesIFitOptions) -> SpectraFitOptions:
     """
     return SpectraFitOptions(
         fit_order=fit_options.fit_order,
-        model=model_settings(
+        model=_model_settings(
             fit_options.fit_function, fit_options.robust_loss, fit_options.f_scale
         ),
         snr_cut=-np.inf if fit_options.snr_cut is None else fit_options.snr_cut,
@@ -1040,7 +1040,7 @@ def static_fit(
 ) -> FitResult:
     """Fit one Stokes I spectrum at a fixed order.
 
-    `lm_fit` first, then `curve_fit` (scipy's `least_squares`) for any fit it
+    `_lm_fit` first, then `curve_fit` (scipy's `least_squares`) for any fit it
     leaves. With `robust_loss` "cauchy" a channel more than `f_scale` sigma out
     is downweighted instead of dragging the model; the bounds pick
     `method="trf"`, the one method that takes a loss.
@@ -1057,13 +1057,13 @@ def static_fit(
     else:
         msg = f"Unknown fit type {fit_function} provided. Must be 'log' or 'linear'."  # type: ignore[unreachable]
         raise ValueError(msg)
-    settings = model_settings(fit_function, robust_loss, f_scale)
+    settings = _model_settings(fit_function, robust_loss, f_scale)
     x_arr = np.ascontiguousarray(freq_arr_hz / ref_freq_hz, dtype=np.float64)
     stokes_i_arr = np.ascontiguousarray(stokes_i_arr, dtype=np.float64)
-    weights = fit_weights(
+    weights = _fit_weights(
         np.ascontiguousarray(stokes_i_error_arr, dtype=np.float64), settings
     )
-    p0 = initial_guess(stokes_i_arr, fit_order + 1)
+    p0 = _initial_guess(stokes_i_arr, fit_order + 1)
     bounds = ([0.0] + [-np.inf] * fit_order, [np.inf] * (fit_order + 1))
     loss_kwargs: dict[str, Any] = (
         {"loss": "cauchy", "f_scale": f_scale} if weights.settings.f_scale > 0 else {}
@@ -1071,7 +1071,7 @@ def static_fit(
     fitted = True
     try:
         # Compiled first, so threads can run it; scipy for any fit it leaves
-        popt, pcov, converged = lm_fit(
+        popt, pcov, converged = _lm_fit(
             x_arr, stokes_i_arr, weights.sigma, p0, weights.settings
         )
         if not converged:
@@ -1102,7 +1102,7 @@ def static_fit(
     stokes_i_model_arr = fit_func(x_arr, *popt)
     # Nothing converged, so there is no fit for `dynamic_fit` to rank.
     aic = (
-        robust_aic(
+        _robust_aic(
             (stokes_i_arr - stokes_i_model_arr) / weights.sigma,
             fit_order + 1,
             weights.settings.f_scale,
@@ -1396,13 +1396,13 @@ def fit_stokes_i_model(
     frequency-averaged SNR is below it, so the caller leaves the pixel out. A
     fit that cannot converge does not raise: `static_fit` falls back to a flat
     (mean) model. Right at the minimum channel count the fit is real but its AIC
-    is inf (see `robust_aic`), so a negative `fit_order` settles on a lower order
+    is inf (see `_robust_aic`), so a negative `fit_order` settles on a lower order
     there. A bad flux is left to `options.robust_loss` in `static_fit`.
     """
     fit_order = options.fit_order
     stokes_i_arr = np.ascontiguousarray(stokes_i_arr, dtype=np.float64)
     stokes_i_error_arr = np.ascontiguousarray(stokes_i_error_arr, dtype=np.float64)
-    good = fittable_channels(stokes_i_arr, stokes_i_error_arr)
+    good = _fittable_channels(stokes_i_arr, stokes_i_error_arr)
     if int(good.sum()) < abs(fit_order) + 2:
         return None
     if (
@@ -1586,9 +1586,9 @@ def _alpha_at_ref(
     freq_arr_hz: NDArray[np.float64],
     ref_freq_hz: float,
 ) -> NDArray[np.float64]:
-    """`spectral_index` of `spec`, or of each of its rows"""
+    """`_spectral_index` of `spec`, or of each of its rows"""
     rows = np.ascontiguousarray(spec, dtype=np.float64).reshape(-1, spec.shape[-1])
-    alpha = spectral_index(
+    alpha = _spectral_index(
         rows, np.ascontiguousarray(freq_arr_hz, dtype=np.float64), ref_freq_hz
     )
     return np.asarray(alpha.reshape(spec.shape[:-1]))
@@ -1752,7 +1752,7 @@ def _fit_stokes_i_block(
             np.broadcast_to(np.asarray(ref_freq_hz, dtype=np.float64), (cy, cx)).ravel()
         ),
     )
-    options = spectra_fit_options(fit_options)
+    options = _spectra_fit_options(fit_options)
     planes = _block_planes(
         n_freq, abs(fit_options.fit_order) + 1, fit_options.compute_model_error
     )
@@ -1760,7 +1760,7 @@ def _fit_stokes_i_block(
     # The model errors need each fit's covariance, so every pixel takes the
     # per-pixel path. Otherwise only those the compiled fit leaves to scipy do.
     if fit_options.compute_model_error:
-        fit = empty_spectra_fit(cy * cx, n_freq, abs(fit_options.fit_order) + 1)
+        fit = _empty_spectra_fit(cy * cx, n_freq, abs(fit_options.fit_order) + 1)
         pixels = np.arange(cy * cx)
     else:
         fit = fit_stokes_i_spectra(spectra, options)
@@ -1780,7 +1780,7 @@ def _fit_stokes_i_block(
             fit.status[spec] = FitStatus.SKIPPED
             if pixel_fit is None:
                 continue
-            record_fit(
+            _record_fit(
                 fit,
                 spec,
                 spectra,

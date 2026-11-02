@@ -52,21 +52,21 @@ def fits_cube() -> Callable[..., Path]:
 
 @pytest.fixture(scope="session")
 def scipy_fits_only() -> Callable[[pytest.MonkeyPatch], None]:
-    """Patch `lm_fit` never to converge, so every Python fit takes scipy's
-    path. The compiled block fit runs its own `lm_fit`, which this leaves."""
+    """Patch `_lm_fit` never to converge, so every Python fit takes scipy's
+    path. The compiled block fit runs its own `_lm_fit`, which this leaves."""
 
     def unconverged(
         _x_arr: NDArray[np.float64],
         _stokes_i_arr: NDArray[np.float64],
         _sigma_arr: NDArray[np.float64],
         initial_guess: NDArray[np.float64],
-        _settings: fitting.ModelSettings,
-    ) -> fitting.LMFit:
+        _settings: fitting._ModelSettings,
+    ) -> fitting._LMFit:
         n_param = initial_guess.size
-        return fitting.LMFit(initial_guess, np.full((n_param, n_param), np.nan), False)
+        return fitting._LMFit(initial_guess, np.full((n_param, n_param), np.nan), False)
 
     def patch(monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(fitting, "lm_fit", unconverged)
+        monkeypatch.setattr(fitting, "_lm_fit", unconverged)
 
     return patch
 
@@ -80,7 +80,7 @@ def python_block_fit() -> Callable[[pytest.MonkeyPatch], None]:
         spectra: fitting.StokesISpectra, options: fitting.SpectraFitOptions
     ) -> fitting.SpectraFit:
         n_spec, n_freq = spectra.i_rows.shape
-        fit = fitting.empty_spectra_fit(n_spec, n_freq, abs(options.fit_order) + 1)
+        fit = fitting._empty_spectra_fit(n_spec, n_freq, abs(options.fit_order) + 1)
         fit.status[:] = fitting.FitStatus.NEEDS_SCIPY
         return fit
 

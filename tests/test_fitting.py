@@ -16,14 +16,14 @@ from numpy.typing import ArrayLike
 from rm_lite.utils import fitting
 from rm_lite.utils.fitting import (
     FitStatus,
-    ModelSettings,
     SpectraFitOptions,
     StokesIFitOptions,
     StokesISpectra,
+    _lm_fit,
+    _ModelSettings,
     dynamic_fit,
     fit_stokes_i_model,
     fit_stokes_i_spectra,
-    lm_fit,
     static_fit,
 )
 from scipy import stats
@@ -32,7 +32,7 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore::scipy.optimize.OptimizeWarning"),
     # Uncompiled (NUMBA_DISABLE_JIT), NumPy warns where a trial step overflows
     # (and then multiplies inf by 0), which compiled code does silently and
-    # lm_fit then rejects
+    # _lm_fit then rejects
     pytest.mark.filterwarnings("ignore:overflow encountered:RuntimeWarning"),
     pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning"),
 ]
@@ -122,12 +122,12 @@ def test_compiled_polynomial_fit_is_the_least_squares_solution() -> None:
         if exact[0] <= 0:
             continue  # beyond the c0 >= 0 bound, so scipy's to fit
         n_unbounded += 1
-        popt, pcov, converged = lm_fit(
+        popt, pcov, converged = _lm_fit(
             x_arr,
             stokes_i_arr,
             error_arr,
             np.r_[max(stokes_i_arr.mean(), 0.0), np.zeros(order)],
-            ModelSettings(log_model=False, f_scale=0.0),
+            _ModelSettings(log_model=False, f_scale=0.0),
         )
         if converged:
             n_compiled += 1
@@ -148,12 +148,12 @@ def test_compiled_fit_handles_the_default_fit() -> None:
     n_spectra, n_compiled = 200, 0
     for _ in range(n_spectra):
         freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr = random_spectrum(rng)
-        n_compiled += lm_fit(
+        n_compiled += _lm_fit(
             freq_arr_hz / ref_freq_hz,
             stokes_i_arr,
             error_arr,
             np.array([max(stokes_i_arr.mean(), 0.0), 0.0, 0.0]),
-            ModelSettings(log_model=True, f_scale=3.0),
+            _ModelSettings(log_model=True, f_scale=3.0),
         )[2]
     assert n_compiled >= 0.98 * n_spectra
 
@@ -197,7 +197,7 @@ def test_dynamic_orders_stay_compiled() -> None:
         ),
         SpectraFitOptions(
             fit_order=-3,
-            model=ModelSettings(log_model=True, f_scale=3.0),
+            model=_ModelSettings(log_model=True, f_scale=3.0),
             snr_cut=-np.inf,
             model_floor_sigma=1.0,
         ),
@@ -208,12 +208,12 @@ def test_dynamic_orders_stay_compiled() -> None:
 def test_compiled_fit_leaves_a_bounded_fit_to_scipy() -> None:
     """A negative spectrum puts p0 on its >= 0 bound: scipy's to handle"""
     x_arr = np.linspace(0.8, 1.2, 50)
-    popt, _, converged = lm_fit(
+    popt, _, converged = _lm_fit(
         x_arr,
         -np.ones(50),
         np.full(50, 0.1),
         np.zeros(3),
-        ModelSettings(log_model=True, f_scale=3.0),
+        _ModelSettings(log_model=True, f_scale=3.0),
     )
     assert not converged
     assert popt[0] == 0.0
@@ -321,7 +321,7 @@ def test_block_fit_matches_per_pixel_fit(
     i_block[rng.random(i_block.shape) < 0.01] += 0.05  # outliers
     i_block[:, 0, 1] = rng.normal(0, 1e-3, n_freq)  # noise only
     i_block[:, 1, 0] = 0.1 - 0.09 * freq_arr_hz / 900e6  # dips below zero
-    i_block[::3, 1, 2] += 0.05  # a third of channels out: lm_fit leaves to scipy
+    i_block[::3, 1, 2] += 0.05  # a third of channels out: _lm_fit leaves to scipy
     err_block = np.full(i_block.shape, 1e-3)
     err_block[:, 1, 1] = 0.0  # no errors given
     kwargs: dict[str, Any] = {
@@ -340,7 +340,7 @@ def test_block_fit_matches_per_pixel_fit(
     )
     compiled = fitting._fit_stokes_i_block(*blocks, **kwargs)
     with monkeypatch.context() as patch:
-        # Every pixel through the Python path, which still runs lm_fit first
+        # Every pixel through the Python path, which still runs _lm_fit first
         python_block_fit(patch)
         reference = fitting._fit_stokes_i_block(*blocks, **kwargs)
     np.testing.assert_array_equal(np.isnan(compiled), np.isnan(reference))
@@ -422,4 +422,4 @@ def test_unscoreable_orders_fall_back_to_the_fewest_parameters() -> None:
     can be scored, and Occam's rule keeps the fewest parameters"""
     assert fitting.aic_lsq(2.5, 3, 4) == np.inf
     aics = np.full(3, np.inf)
-    assert fitting.best_aic_index(aics, np.array([3, 1, 2])) == 1
+    assert fitting._best_aic_index(aics, np.array([3, 1, 2])) == 1
