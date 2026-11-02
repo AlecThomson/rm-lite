@@ -346,7 +346,7 @@ class HogbomOptions(NamedTuple):
     """Rise of the residual peak over its lowest that counts as diverging"""
 
 
-class HogbomSettings(NamedTuple):
+class _HogbomSettings(NamedTuple):
     """The `HogbomOptions` shared by every spectrum of a batch"""
 
     gain: float
@@ -363,7 +363,7 @@ class HogbomSettings(NamedTuple):
     """Rise of the residual peak over its lowest that counts as diverging"""
 
 
-class HogbomBatch(NamedTuple):
+class _HogbomBatch(NamedTuple):
     """Spectra for the Hogbom loop, one per row, with their own thresholds"""
 
     resid: NDArray[np.complexfloating]
@@ -386,7 +386,7 @@ class HogbomBatch(NamedTuple):
     """Starting iteration"""
 
 
-class HogbomSpectrumResults(NamedTuple):
+class _HogbomSpectrumResults(NamedTuple):
     """`minor_loop_spectrum` on one spectrum"""
 
     model: NDArray[np.complexfloating]
@@ -403,8 +403,8 @@ class HogbomSpectrumResults(NamedTuple):
     """Channels in the starting mask"""
 
 
-class HogbomBatchResults(NamedTuple):
-    """`HogbomSpectrumResults` for a stack of spectra, one per row"""
+class _HogbomBatchResults(NamedTuple):
+    """`_HogbomSpectrumResults` for a stack of spectra, one per row"""
 
     model: NDArray[np.complexfloating]
     """Clean components"""
@@ -713,7 +713,7 @@ def minor_loop_spectrum(
     rmsf: NDArray[np.complexfloating],
     max_rmsf_index: int,
     options: HogbomOptions,
-) -> HogbomSpectrumResults:
+) -> _HogbomSpectrumResults:
     """Hogbom minor loop over one spectrum: the compiled body of `minor_loop`.
 
     Args:
@@ -726,7 +726,7 @@ def minor_loop_spectrum(
         options (HogbomOptions): Loop options.
 
     Returns:
-        HogbomSpectrumResults: Model, final mask, iterations, why it stopped, lowest
+        _HogbomSpectrumResults: Model, final mask, iterations, why it stopped, lowest
             residual peak and starting mask size. On divergence the residual and
             model are those at the lowest peak.
     """
@@ -770,25 +770,25 @@ def minor_loop_spectrum(
             best_iter,
             guard_divergence,
         )[0]
-    return HogbomSpectrumResults(
+    return _HogbomSpectrumResults(
         model, mask, iter_count, stop, best_peak, int(np.count_nonzero(mask_start))
     )
 
 
 @numba.njit(cache=True, nogil=True)  # type: ignore[misc]
-def minor_loop_spectra(
-    batch: HogbomBatch,
-    settings: HogbomSettings,
-    results: HogbomBatchResults,
+def _minor_loop_spectra(
+    batch: _HogbomBatch,
+    settings: _HogbomSettings,
+    results: _HogbomBatchResults,
     first: int,
     last: int,
 ) -> None:
     """`minor_loop_spectrum` on spectra (rows) `first` to `last - 1`, in turn.
 
     Args:
-        batch (HogbomBatch): Spectra, RMSFs and per-spectrum thresholds.
-        settings (HogbomSettings): Settings for every spectrum.
-        results (HogbomBatchResults): Filled in place.
+        batch (_HogbomBatch): Spectra, RMSFs and per-spectrum thresholds.
+        settings (_HogbomSettings): Settings for every spectrum.
+        results (_HogbomBatchResults): Filled in place.
         first (int): First spectrum to clean.
         last (int): One past the last spectrum to clean.
     """
@@ -822,18 +822,18 @@ def minor_loop_spectra(
 
 
 @numba.njit(cache=True, nogil=True, parallel=True)  # type: ignore[misc]
-def minor_loop_spectra_parallel(
-    batch: HogbomBatch, settings: HogbomSettings, results: HogbomBatchResults
+def _minor_loop_spectra_parallel(
+    batch: _HogbomBatch, settings: _HogbomSettings, results: _HogbomBatchResults
 ) -> None:
-    """`minor_loop_spectra` over every spectrum, spread over numba's threads.
+    """`_minor_loop_spectra` over every spectrum, spread over numba's threads.
 
     Args:
-        batch (HogbomBatch): As `minor_loop_spectra`.
-        settings (HogbomSettings): As `minor_loop_spectra`.
-        results (HogbomBatchResults): As `minor_loop_spectra`.
+        batch (_HogbomBatch): As `_minor_loop_spectra`.
+        settings (_HogbomSettings): As `_minor_loop_spectra`.
+        results (_HogbomBatchResults): As `_minor_loop_spectra`.
     """
     for spec in numba.prange(batch.resid.shape[0]):
-        minor_loop_spectra(batch, settings, results, spec, spec + 1)
+        _minor_loop_spectra(batch, settings, results, spec, spec + 1)
 
 
 def minor_loop(
@@ -948,7 +948,7 @@ def minor_loop_batch(
     }
     _check_per_spectrum(per_spectrum, n_spectra)
 
-    batch = HogbomBatch(
+    batch = _HogbomBatch(
         resid=resid_start.copy(),
         resid_start=resid_start,
         mask_original=np.ascontiguousarray(~np.ma.getmaskarray(resid_fdf_arr_mask)),
@@ -963,7 +963,7 @@ def minor_loop_batch(
         noise=np.full(n_spectra, per_spectrum["noise"], dtype=np.float64),
         start_iter=np.full(n_spectra, per_spectrum["start_iter"], dtype=np.int64),
     )
-    settings = HogbomSettings(
+    settings = _HogbomSettings(
         # gain * peak in the residuals' own precision, as NumPy does it
         gain=resid_start.real.dtype.type(minor_loop_options.gain),
         update_mask=minor_loop_options.update_mask,
@@ -972,7 +972,7 @@ def minor_loop_batch(
         max_iter=minor_loop_options.max_iter,
         divergence_fraction=CleanProgress.divergence_fraction,
     )
-    results = HogbomBatchResults(
+    results = _HogbomBatchResults(
         model=np.zeros_like(resid_start),
         mask=np.zeros((n_spectra, n_chan), dtype=bool),
         iter_count=np.zeros(n_spectra, dtype=np.int64),
@@ -984,9 +984,9 @@ def minor_loop_batch(
         # Spectra cost anything from microseconds to seconds, so hand them to
         # the threads one at a time rather than in equal blocks
         with numba.parallel_chunksize(1):
-            minor_loop_spectra_parallel(batch, settings, results)
+            _minor_loop_spectra_parallel(batch, settings, results)
     else:
-        minor_loop_spectra(batch, settings, results, 0, n_spectra)
+        _minor_loop_spectra(batch, settings, results, 0, n_spectra)
     _log_stops(results)
     return MinorLoopBatchResults(
         resid_fdf_arr=batch.resid,
@@ -996,7 +996,7 @@ def minor_loop_batch(
     )
 
 
-def _log_stops(results: HogbomBatchResults) -> None:
+def _log_stops(results: _HogbomBatchResults) -> None:
     """Log why each minor loop stopped: in full for one spectrum, as a count of
     each reason for a stack."""
     if results.stop.size == 0:
