@@ -15,6 +15,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy import optimize, stats
 
 from rm_lite.utils.arrays import nb_median
+from rm_lite.utils.lmfit_numba import ModelSettings, lm_fit
 from rm_lite.utils.logging import logger, quiet_logs
 
 GAUSSIAN_SIGMA_TO_FWHM = float(2.0 * np.sqrt(2.0 * np.log(2.0)))
@@ -322,7 +323,7 @@ def _eval_model_at(
     # Uncompiled (NUMBA_DISABLE_JIT), _eval_model is the function itself
     py_eval_model = getattr(_eval_model, "py_func", _eval_model)
     return np.asarray(
-        py_eval_model(params, np.asarray(x), _ModelSettings(log_model, 0.0))
+        py_eval_model(params, np.asarray(x), ModelSettings(log_model, 0.0))
     )
 
 
@@ -338,39 +339,6 @@ def best_aic_func(
     return best_aic, best_n, best_aic_idx
 
 
-class _ModelSettings(NamedTuple):
-    """Stokes I model and loss, as the compiled fit takes them"""
-
-    log_model: bool
-    """Fit `power_law` rather than `polynomial`"""
-    f_scale: float
-    """Cauchy loss scale in sigma; 0 for a linear loss"""
-
-
-class _RobustCost(NamedTuple):
-    """A Stokes I fit's cost at a set of parameters (see `_robust_cost`)"""
-
-    cost: float
-    """Cost under the loss"""
-    sigma_resid: NDArray[np.float64]
-    """Residuals in sigma"""
-    scaled_resid: NDArray[np.float64]
-    """Residuals scaled for the loss"""
-    jac: NDArray[np.float64]
-    """Jacobian scaled for the loss"""
-
-
-class _LMFit(NamedTuple):
-    """Result of `_lm_fit`"""
-
-    popt: NDArray[np.float64]
-    """Parameters"""
-    pcov: NDArray[np.float64]
-    """Their covariance, NaN if not converged"""
-    converged: bool
-    """Whether the fit converged; if not, scipy's fit is the one to use"""
-
-
 class FitStatus(IntEnum):
     """What `fit_stokes_i_spectra` did with a spectrum"""
 
@@ -381,7 +349,7 @@ class FitStatus(IntEnum):
     UNUSABLE = 2
     """Fitted, but the model cannot divide Q/U (see `model_is_usable`)"""
     NEEDS_SCIPY = 3
-    """`_lm_fit` did not converge, so the Python fit takes it"""
+    """`lm_fit` did not converge, so the Python fit takes it"""
 
 
 class StokesISpectra(NamedTuple):
@@ -402,7 +370,7 @@ class SpectraFitOptions(NamedTuple):
 
     fit_order: int
     """Model order; negative for every order up to it, chosen by AIC"""
-    model: _ModelSettings
+    model: ModelSettings
     """Model and loss"""
     snr_cut: float
     """`stokes_i_snr` below which a spectrum is skipped; -inf for no cut"""
@@ -429,7 +397,7 @@ class SpectraFit(NamedTuple):
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
 def _eval_model(
-    params: NDArray[np.float64], x_arr: NDArray[np.float64], settings: _ModelSettings
+    params: NDArray[np.float64], x_arr: NDArray[np.float64], settings: ModelSettings
 ) -> NDArray[np.float64]:
     """A `power_law` or `polynomial` model, compiled. Uncompiled (`py_func`) it
     broadcasts `x_arr` against parameters that are arrays, as the model
@@ -438,7 +406,7 @@ def _eval_model(
     Args:
         params (NDArray[np.float64]): Model parameters.
         x_arr (NDArray[np.float64]): freq / ref_freq.
-        settings (_ModelSettings): Model (the loss is not used).
+        settings (ModelSettings): Model (the loss is not used).
 
     Returns:
         NDArray[np.float64]: The model at `x_arr`.
@@ -453,180 +421,6 @@ def _eval_model(
     for i in range(len(params)):
         model = model + params[i] * x_arr**i
     return model
-
-
-@numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def _robust_cost(
-    params: NDArray[np.float64],
-    basis: NDArray[np.float64],
-    stokes_i_arr: NDArray[np.float64],
-    sigma_arr: NDArray[np.float64],
-    settings: _ModelSettings,
-) -> _RobustCost:
-    """Cost of a Stokes I fit at `params`, with the residuals and Jacobian
-    scaled for the loss as scipy's `scale_for_robust_loss_function`, so a
-    Gauss-Newton step and the covariance match `least_squares`.
-
-    Args:
-        params (NDArray[np.float64]): Model parameters.
-        basis (NDArray[np.float64]): log10(freq / ref_freq) for a power law,
-            freq / ref_freq for a polynomial.
-        stokes_i_arr (NDArray[np.float64]): Stokes I.
-        sigma_arr (NDArray[np.float64]): 1-sigma errors.
-        settings (_ModelSettings): Model and loss.
-
-    Returns:
-        _RobustCost: Cost, residuals, and the scaled residuals and Jacobian.
-    """
-    # One pass per channel, as _lm_fit calls this on every trial step: the model
-    # and its Jacobian row, then the loss
-    n_param = params.size
-    f_scale = settings.f_scale
-    eps = np.finfo(np.float64).eps
-    sigma_resid = np.empty(basis.size)
-    scaled_resid = np.empty(basis.size)
-    jac = np.empty((basis.size, n_param))
-    cost = 0.0
-    for chan in range(basis.size):
-        if settings.log_model:
-            # p0 * 10**(sum p_i L**i), L = log10(x): d/dp0 = 10**(...), and
-            # d/dp_i = model * ln(10) * L**i
-            power, log_x_i = 0.0, 1.0
-            for i in range(1, n_param):
-                log_x_i *= basis[chan]
-                power += params[i] * log_x_i
-            jac[chan, 0] = np.exp(np.log(10.0) * power)
-            model = params[0] * jac[chan, 0]
-            log_x_i = 1.0
-            for i in range(1, n_param):
-                log_x_i *= basis[chan]
-                jac[chan, i] = model * np.log(10.0) * log_x_i
-        else:
-            model, x_i = 0.0, 1.0
-            for i in range(n_param):
-                jac[chan, i] = x_i
-                model += params[i] * x_i
-                x_i *= basis[chan]
-        sigma_resid[chan] = (model - stokes_i_arr[chan]) / sigma_arr[chan]
-        if f_scale > 0:
-            # Cauchy: rho(z) = f**2 log(1 + z/f**2), on z = resid**2
-            z = (sigma_resid[chan] / f_scale) ** 2
-            rho1 = 1 / (1 + z)
-            rho2 = -(rho1**2) / f_scale**2
-            scale = np.sqrt(max(rho1 + 2 * rho2 * sigma_resid[chan] ** 2, eps))
-            cost += 0.5 * f_scale**2 * np.log1p(z)
-            scaled_resid[chan] = sigma_resid[chan] * rho1 / scale
-        else:
-            scale = 1.0
-            cost += 0.5 * sigma_resid[chan] ** 2
-            scaled_resid[chan] = sigma_resid[chan]
-        for i in range(n_param):
-            jac[chan, i] *= scale / sigma_arr[chan]
-    return _RobustCost(cost, sigma_resid, scaled_resid, jac)
-
-
-@numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def _lm_fit(
-    x_arr: NDArray[np.float64],
-    stokes_i_arr: NDArray[np.float64],
-    sigma_arr: NDArray[np.float64],
-    initial_guess: NDArray[np.float64],
-    settings: _ModelSettings,
-) -> _LMFit:
-    """Levenberg-Marquardt fit of a Stokes I model, compiled so threads can run it.
-
-    Same optimum as `static_fit`'s `curve_fit` call: residuals divided by
-    `sigma_arr`, the Cauchy loss with scipy's robust scaling, and the covariance
-    as curve_fit's (pseudo-inverse of the loss-scaled Jacobian, absolute sigma).
-    It returns not converged, for scipy to fit, when: `p0` starts or ends on its
-    >= 0 bound, there are fewer channels than parameters, the cost or curvature
-    is not finite, the damping runs away, 100 steps do not converge, more than
-    10% of channels sit past `f_scale`, or the covariance is not finite.
-
-    Args:
-        x_arr (NDArray[np.float64]): freq / ref_freq.
-        stokes_i_arr (NDArray[np.float64]): Stokes I.
-        sigma_arr (NDArray[np.float64]): 1-sigma errors; ones for an unweighted fit.
-        initial_guess (NDArray[np.float64]): Starting parameters.
-        settings (_ModelSettings): Model and loss.
-
-    Returns:
-        _LMFit: popt, pcov, and whether it converged.
-    """
-    n_param = initial_guess.size
-    params = initial_guess.copy()
-    pcov = np.full((n_param, n_param), np.nan)
-    if x_arr.size < n_param or params[0] <= 0:
-        return _LMFit(params, pcov, False)
-    basis = np.log10(x_arr) if settings.log_model else x_arr
-    current = _robust_cost(params, basis, stokes_i_arr, sigma_arr, settings)
-    # Steps are measured against the errors, or against the data where that is
-    # smaller (an unweighted fit has sigma = 1, in flux units): the mean squared
-    # SNR, capped at 1
-    snr_sq = min(1.0, float(np.mean((stokes_i_arr / sigma_arr) ** 2)))
-    damping = 1e-3
-    converged = False
-    for _ in range(100):
-        # Columns scaled to unit norm, as scipy's x_scale="jac": the powers of
-        # log10(x) are nearly parallel over a band, and J^T J of the raw columns
-        # too ill-conditioned for pinv to keep every direction.
-        norm = np.sqrt(np.sum(current.jac**2, axis=0))
-        norm[norm == 0] = 1.0
-        jac = current.jac / norm
-        hess = jac.T @ jac
-        grad = jac.T @ current.scaled_resid
-        if not np.isfinite(current.cost) or not np.all(np.isfinite(hess)):
-            return _LMFit(params, pcov, False)
-        # Converged once a full Gauss-Newton step is under 1e-6 of the errors:
-        # it lowers the cost by 0.5 dp.H.dp, and H is the inverse covariance.
-        # Tested before stepping, as at the optimum no step lowers it, in
-        # floats. pinv (n_param square) rather than solve, which can raise.
-        predicted = 0.5 * grad @ np.linalg.pinv(hess) @ grad
-        if predicted <= max(0.5 * 1e-6**2 * snr_sq, 1e-15 * current.cost):
-            converged = True
-            break
-        # Marquardt: damp along the curvature, more after a step that failed
-        while True:
-            damped = hess + damping * np.diag(np.diag(hess))
-            if not np.all(np.isfinite(damped)):
-                return _LMFit(params, pcov, False)
-            trial = params - (np.linalg.pinv(damped) @ grad) / norm
-            trial[0] = max(trial[0], 0.0)
-            trial_cost = _robust_cost(trial, basis, stokes_i_arr, sigma_arr, settings)
-            if np.isfinite(trial_cost.cost) and trial_cost.cost <= current.cost:
-                break
-            damping *= 10
-            if damping > 1e16:
-                return _LMFit(params, pcov, False)
-        params, current = trial, trial_cost
-        damping = max(damping / 10, 1e-15)
-    if not converged or params[0] <= 0:
-        return _LMFit(params, pcov, False)
-    # Many channels past f_scale: the loss is far from quadratic and has other
-    # minima, where solvers part ways. Leave those to scipy.
-    f_scale = settings.f_scale
-    if f_scale > 0 and np.mean(np.abs(current.sigma_resid) > f_scale) > 0.1:
-        return _LMFit(params, pcov, False)
-    pcov = _curve_fit_pcov(current.jac)
-    return _LMFit(params, pcov, bool(np.all(np.isfinite(pcov))))
-
-
-@numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
-def _curve_fit_pcov(jac: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Covariance as `curve_fit` makes it: the Moore-Penrose inverse of J^T J,
-    dropping tiny singular values.
-
-    Args:
-        jac (NDArray[np.float64]): Jacobian, scaled for the loss.
-
-    Returns:
-        NDArray[np.float64]: Parameter covariance.
-    """
-    _, sing, vt = np.linalg.svd(jac, full_matrices=False)
-    keep = sing > np.finfo(np.float64).eps * max(jac.shape) * sing[0]
-    vt = vt[keep]
-    pcov: NDArray[np.float64] = (vt.T / sing[keep] ** 2) @ vt
-    return pcov
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
@@ -789,13 +583,13 @@ class _FitWeights(NamedTuple):
     """1-sigma errors to divide residuals by; ones for an unweighted fit"""
     weighted: bool
     """Whether `sigma` are the errors"""
-    settings: _ModelSettings
+    settings: ModelSettings
     """Model and loss, linear when unweighted"""
 
 
 @numba.njit(cache=True, nogil=True, error_model="numpy")  # type: ignore[misc]
 def _fit_weights(
-    stokes_i_error_arr: NDArray[np.float64], settings: _ModelSettings
+    stokes_i_error_arr: NDArray[np.float64], settings: ModelSettings
 ) -> _FitWeights:
     """Weight by the errors if every one is finite and positive. Otherwise fit
     unweighted, with a linear loss, as residuals in flux have no sigma for
@@ -803,7 +597,7 @@ def _fit_weights(
 
     Args:
         stokes_i_error_arr (NDArray[np.float64]): Errors.
-        settings (_ModelSettings): Model and loss asked for.
+        settings (ModelSettings): Model and loss asked for.
 
     Returns:
         _FitWeights: Errors to divide by, whether they are real, and the loss.
@@ -811,7 +605,7 @@ def _fit_weights(
     if np.all(np.isfinite(stokes_i_error_arr) & (stokes_i_error_arr > 0)):
         return _FitWeights(stokes_i_error_arr, True, settings)
     return _FitWeights(
-        np.ones(stokes_i_error_arr.size), False, _ModelSettings(settings.log_model, 0.0)
+        np.ones(stokes_i_error_arr.size), False, ModelSettings(settings.log_model, 0.0)
     )
 
 
@@ -834,14 +628,14 @@ def _fit_spectrum(
     options: SpectraFitOptions,
 ) -> _SpectrumFit:
     """`fit_stokes_i_model` on one spectrum, compiled: the channel and SNR
-    gates, then `_lm_fit` at the order, or each order up to it with Occam's rule
+    gates, then `lm_fit` at the order, or each order up to it with Occam's rule
     on `_robust_aic`.
 
-    A dynamic fit scores an order `_lm_fit` left to scipy where it stopped, near
+    A dynamic fit scores an order `lm_fit` left to scipy where it stopped, near
     scipy's fit. That can pick another order than the Python fit, which scores
     scipy's: for polynomials about 1 pixel in 150 at `fit_order=-4`, whose
     models differ by about 5e-4. Any order stopped on the `p0 >= 0` bound, or a
-    chosen order `_lm_fit` left, needs scipy.
+    chosen order `lm_fit` left, needs scipy.
 
     Args:
         stokes_i_arr (NDArray[np.float64]): Stokes I.
@@ -865,7 +659,7 @@ def _fit_spectrum(
     aics = np.full(n_coeff, np.inf)
     fits = []
     for order in range(first, n_coeff):
-        fit = _lm_fit(
+        fit = lm_fit(
             x_good,
             i_good,
             weights.sigma,
@@ -967,7 +761,7 @@ def fit_stokes_i_spectra(
 
     Returns:
         SpectraFit: Models, alpha, order, coefficients and errors, NaN where
-            not fitted, and each spectrum's `FitStatus`; a spectrum `_lm_fit`
+            not fitted, and each spectrum's `FitStatus`; a spectrum `lm_fit`
             left to scipy is `FitStatus.NEEDS_SCIPY`, for the Python fit.
     """
     n_spec, n_freq = spectra.i_rows.shape
@@ -987,8 +781,8 @@ def fit_stokes_i_spectra(
 
 def _model_settings(
     fit_function: Literal["log", "linear"], robust_loss: RobustLoss, f_scale: float
-) -> _ModelSettings:
-    """`_ModelSettings` for a fit function and loss.
+) -> ModelSettings:
+    """`ModelSettings` for a fit function and loss.
 
     Args:
         fit_function (Literal["log", "linear"]): Power law or polynomial.
@@ -999,12 +793,12 @@ def _model_settings(
         ValueError: For a loss other than "cauchy" or "linear".
 
     Returns:
-        _ModelSettings: The model, and `f_scale`, or 0 for a linear loss.
+        ModelSettings: The model, and `f_scale`, or 0 for a linear loss.
     """
     if robust_loss not in ("cauchy", "linear"):
         msg = f"robust_loss must be 'cauchy' or 'linear', got {robust_loss!r}."
         raise ValueError(msg)
-    return _ModelSettings(
+    return ModelSettings(
         fit_function == "log", f_scale if robust_loss == "cauchy" else 0.0
     )
 
@@ -1040,7 +834,7 @@ def static_fit(
 ) -> FitResult:
     """Fit one Stokes I spectrum at a fixed order.
 
-    `_lm_fit` first, then `curve_fit` (scipy's `least_squares`) for any fit it
+    `lm_fit` first, then `curve_fit` (scipy's `least_squares`) for any fit it
     leaves. With `robust_loss` "cauchy" a channel more than `f_scale` sigma out
     is downweighted instead of dragging the model; the bounds pick
     `method="trf"`, the one method that takes a loss.
@@ -1071,7 +865,7 @@ def static_fit(
     fitted = True
     try:
         # Compiled first, so threads can run it; scipy for any fit it leaves
-        popt, pcov, converged = _lm_fit(
+        popt, pcov, converged = lm_fit(
             x_arr, stokes_i_arr, weights.sigma, p0, weights.settings
         )
         if not converged:

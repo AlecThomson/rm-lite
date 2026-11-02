@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from astropy.io import fits
 from rm_lite.utils import fitting
+from rm_lite.utils.lmfit_numba import LMFit, ModelSettings
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,21 +53,21 @@ def fits_cube() -> Callable[..., Path]:
 
 @pytest.fixture(scope="session")
 def scipy_fits_only() -> Callable[[pytest.MonkeyPatch], None]:
-    """Patch `_lm_fit` never to converge, so every Python fit takes scipy's
-    path. The compiled block fit runs its own `_lm_fit`, which this leaves."""
+    """Patch `lm_fit` never to converge, so every Python fit takes scipy's
+    path. The compiled block fit runs its own `lm_fit`, which this leaves."""
 
     def unconverged(
         _x_arr: NDArray[np.float64],
         _stokes_i_arr: NDArray[np.float64],
         _sigma_arr: NDArray[np.float64],
         initial_guess: NDArray[np.float64],
-        _settings: fitting._ModelSettings,
-    ) -> fitting._LMFit:
+        _settings: ModelSettings,
+    ) -> LMFit:
         n_param = initial_guess.size
-        return fitting._LMFit(initial_guess, np.full((n_param, n_param), np.nan), False)
+        return LMFit(initial_guess, np.full((n_param, n_param), np.nan), False)
 
     def patch(monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(fitting, "_lm_fit", unconverged)
+        monkeypatch.setattr(fitting, "lm_fit", unconverged)
 
     return patch
 
