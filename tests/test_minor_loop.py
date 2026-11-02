@@ -549,6 +549,9 @@ def test_batch_takes_scalars_and_mixed_per_spectrum_options() -> None:
         start_iter=np.arange(8) * 10,
         noise=np.where(np.arange(8) % 2, noise, np.nan),
         stall_iters=20,
+        # The uncompiled coverage run reaches the parallel loop only here, as
+        # the parametrised test is too slow for it
+        parallel=True,
     )
     with quiet_logs():
         batch = minor_loop_batch(arrays, options)
