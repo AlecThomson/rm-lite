@@ -667,11 +667,12 @@ def test_fit_stokes_i_model_flat_fallback_on_failure(monkeypatch, scipy_fits_onl
 
 
 def test_stokes_i_fit_failure_is_graceful(
-    monkeypatch, chunked: Callable[..., da.Array], scipy_fits_only
+    monkeypatch, chunked: Callable[..., da.Array], scipy_fits_only, python_block_fit
 ):
     """If every fit fails, the cube still completes on flat models."""
     monkeypatch.setattr(optimize, "curve_fit", raise_curve_fit)
     scipy_fits_only(monkeypatch)
+    python_block_fit(monkeypatch)
 
     cube = make_stokes_i_cube(alpha=-1.0)
     i_err = np.full_like(cube.stokes_i, 1e-3)

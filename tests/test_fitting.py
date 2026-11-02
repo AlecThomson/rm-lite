@@ -11,6 +11,7 @@ from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import pytest
+from astropy.stats import akaike_info_criterion_lsq
 from numpy.typing import ArrayLike
 from rm_lite.utils import fitting
 from rm_lite.utils.fitting import (
@@ -59,7 +60,7 @@ def random_spectrum(
     return freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr
 
 
-ScipyFitsOnly: TypeAlias = Callable[[pytest.MonkeyPatch], None]
+MonkeyPatcher: TypeAlias = Callable[[pytest.MonkeyPatch], None]
 
 
 def assert_within_sigma(
@@ -79,7 +80,7 @@ def test_compiled_fit_matches_scipy(
     fit_function: Literal["log", "linear"],
     robust_loss: Literal["cauchy", "linear"],
     monkeypatch: pytest.MonkeyPatch,
-    scipy_fits_only: ScipyFitsOnly,
+    scipy_fits_only: MonkeyPatcher,
 ) -> None:
     """Same optimum and errors as curve_fit, to well within each parameter's
     uncertainty (or scipy's own fit, where the compiled one leaves it)."""
@@ -158,8 +159,9 @@ def test_compiled_fit_handles_the_default_fit() -> None:
 
 
 def test_dynamic_fit_picks_the_same_order(
-    monkeypatch: pytest.MonkeyPatch, scipy_fits_only: ScipyFitsOnly
+    monkeypatch: pytest.MonkeyPatch, scipy_fits_only: MonkeyPatcher
 ) -> None:
+    """A dynamic-order fit picks scipy's order, with scipy's parameters"""
     rng = np.random.default_rng(7)
     for spec in range(40):
         args = random_spectrum(rng)
@@ -189,7 +191,7 @@ def test_dynamic_orders_stay_compiled() -> None:
     fit = fit_stokes_i_spectra(
         StokesISpectra(
             i_rows=i_rows,
-            err_rows=np.broadcast_to(error, i_rows.shape),
+            err_rows=np.ascontiguousarray(np.broadcast_to(error, i_rows.shape)),
             freq_arr_hz=freq_arr_hz,
             ref_freq_hz=np.full(n_spec, np.mean(freq_arr_hz)),
         ),
@@ -220,7 +222,7 @@ def test_compiled_fit_leaves_a_bounded_fit_to_scipy() -> None:
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
 @pytest.mark.parametrize("name", ["bad_fit", "overflow"])
 def test_real_spectra_fit_as_scipy(
-    name: str, monkeypatch: pytest.MonkeyPatch, scipy_fits_only: ScipyFitsOnly
+    name: str, monkeypatch: pytest.MonkeyPatch, scipy_fits_only: MonkeyPatcher
 ) -> None:
     """Real Stokes I spectra that once broke the fit"""
     data_path = Path(str(resources.files("rm_lite.data.tests")))
@@ -303,7 +305,7 @@ def test_block_fit_matches_per_pixel_fit(
     options: StokesIFitOptions,
     dtype: type,
     monkeypatch: pytest.MonkeyPatch,
-    scipy_fits_only: ScipyFitsOnly,
+    python_block_fit: MonkeyPatcher,
 ) -> None:
     """The compiled block fit gives what fitting each pixel in Python does"""
     rng = np.random.default_rng(5)
@@ -339,8 +341,7 @@ def test_block_fit_matches_per_pixel_fit(
     compiled = fitting._fit_stokes_i_block(*blocks, **kwargs)
     with monkeypatch.context() as patch:
         # Every pixel through the Python path, which still runs lm_fit first
-        scipy_fits_only(patch)
-        patch.setattr(fitting, "lm_fit", lm_fit)
+        python_block_fit(patch)
         reference = fitting._fit_stokes_i_block(*blocks, **kwargs)
     np.testing.assert_array_equal(np.isnan(compiled), np.isnan(reference))
     assert np.isfinite(compiled).any()
@@ -354,4 +355,63 @@ def test_block_fit_matches_per_pixel_fit(
     ):
         np.testing.assert_allclose(
             compiled[plane], reference[plane], rtol=rtol, atol=1e-6, equal_nan=True
+        )
+
+
+# Uncompiled, NumPy warns of the 0/0 the compiled code does silently
+@pytest.mark.filterwarnings("ignore:divide by zero encountered:RuntimeWarning")
+@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")
+def test_a_repeated_end_channel_gives_a_finite_alpha() -> None:
+    """Two channels at the same frequency make an end slope 0/0, which must not
+    stop the block, fitted or with a model supplied"""
+    n_freq, cy, cx = 64, 2, 3
+    freq_arr_hz = np.linspace(744e6, 1032e6, n_freq)
+    freq_arr_hz[-1] = freq_arr_hz[-2]
+    ref_freq_hz = float(np.median(freq_arr_hz))
+    x_arr = (freq_arr_hz / ref_freq_hz)[:, None, None]
+    i_block = np.broadcast_to(x_arr**-0.7, (n_freq, cy, cx)).copy()
+    i_block += np.random.default_rng(1).normal(0, 1e-3, i_block.shape)
+    planes = fitting._block_planes(n_freq, 3, False)
+    fitted = fitting._fit_stokes_i_block(
+        i_block,
+        np.full(i_block.shape, 1e-3),
+        freq_arr_hz=freq_arr_hz,
+        ref_freq_hz=ref_freq_hz,
+        err_1d=None,
+        fit_options=StokesIFitOptions(),
+        log_level=logging.ERROR,
+    )
+    np.testing.assert_allclose(fitted[planes.alpha], -0.7, atol=0.02)
+    supplied = fitting.alpha_from_model_block(
+        np.broadcast_to(x_arr**-0.7, i_block.shape), freq_arr_hz, ref_freq_hz
+    )
+    np.testing.assert_allclose(supplied, -0.7, atol=1e-6)
+
+
+def test_spectral_index_needs_two_channels() -> None:
+    with pytest.raises(ValueError, match="two channels"):
+        fitting._alpha_at_ref(np.ones(1), np.ones(1), 1.0)
+
+
+def test_static_fit_rejects_other_losses() -> None:
+    """A loss the fit does not have raises, as `StokesIFitOptions` does"""
+    freq_arr_hz, ref_freq_hz, stokes_i_arr, error_arr = random_spectrum(
+        np.random.default_rng(2)
+    )
+    with pytest.raises(ValueError, match="robust_loss"):
+        static_fit(
+            freq_arr_hz,
+            ref_freq_hz,
+            stokes_i_arr,
+            error_arr,
+            robust_loss="huber",  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("n_samples", [5, 30, 400])
+def test_aic_lsq_is_astropys(n_samples: int) -> None:
+    for n_params in (1, 3):
+        np.testing.assert_allclose(
+            fitting.aic_lsq(2.5, n_params, n_samples),
+            akaike_info_criterion_lsq(2.5, n_params, n_samples),
         )
